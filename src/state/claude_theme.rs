@@ -26,8 +26,8 @@ impl Ticket {
     }
 }
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(super) fn wait(
-    spawned: &mut supervisor::Spawned,
+pub(super) fn wait<C: supervisor::ChildStatus>(
+    spawned: &mut supervisor::Spawned<C>,
     _ticket: &mut Ticket,
 ) -> Result<std::process::ExitStatus> {
     supervisor::wait(&mut spawned.child)

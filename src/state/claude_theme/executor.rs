@@ -8,7 +8,7 @@ use super::{
 use backend::{Capture, InputClaim, InputState, Key, PaneInfo, TerminalBackend};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
-    process::{Child, ExitStatus},
+    process::ExitStatus,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -39,7 +39,7 @@ impl Ticket {
             started: None,
         })
     }
-    fn binding(&self, spawned: &supervisor::Spawned) -> Option<Binding> {
+    fn binding<C: supervisor::ChildStatus>(&self, spawned: &supervisor::Spawned<C>) -> Option<Binding> {
         let r = &spawned.record;
         if self.spent
             || !eligible(r)
@@ -109,7 +109,7 @@ impl TerminalBackend for Native {
     }
 }
 
-fn alive(child: &mut Child, record: &Value) -> Result<()> {
+fn alive<C: supervisor::ChildStatus>(child: &mut C, record: &Value) -> Result<()> {
     if supervisor::shutdown_requested() {
         return Err("Claude appearance setup stopped".into());
     }
@@ -129,7 +129,7 @@ fn screen(native: &Native) -> Result<String> {
         .map_err(|e| e.to_string())
 }
 
-fn observed(native: &Native, child: &mut Child, expected: &parser::Panel) -> Result<()> {
+fn observed<C: supervisor::ChildStatus>(native: &Native, child: &mut C, expected: &parser::Panel) -> Result<()> {
     // Every Child probe follows the preceding helper's actual wait/EOF/joins.
     alive(child, &native.0.record)?;
     native.0.check()?;
@@ -152,9 +152,9 @@ fn observed(native: &Native, child: &mut Child, expected: &parser::Panel) -> Res
     Ok(())
 }
 
-fn confirm(
+fn confirm<C: supervisor::ChildStatus>(
     scope: &Arc<Scope>,
-    child: &mut Child,
+    child: &mut C,
     ticket: &mut Ticket,
     panel: &parser::Panel,
 ) -> Result<()> {
@@ -204,8 +204,8 @@ fn capture(binding: Binding, until: Instant) -> Result<String> {
     }
 }
 
-pub(in crate::state) fn wait(
-    spawned: &mut supervisor::Spawned,
+pub(in crate::state) fn wait<C: supervisor::ChildStatus>(
+    spawned: &mut supervisor::Spawned<C>,
     ticket: &mut Ticket,
 ) -> Result<ExitStatus> {
     let Some(binding) = ticket.binding(spawned) else {

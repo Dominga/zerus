@@ -2,6 +2,10 @@
 use super::*;
 
 pub(super) fn root(case: &str, dir: &Path) {
+    if case == "cleanup-late" {
+        std::thread::sleep(Duration::from_millis(100));
+        std::process::exit(17);
+    }
     if case == "external" {
         let mut byte = [0];
         assert_eq!(std::io::stdin().read(&mut byte).unwrap(), 0);
@@ -35,7 +39,7 @@ pub(super) fn root(case: &str, dir: &Path) {
         request = read_frame(&mut stream);
     }
     if request == "fork" {
-        if case == "clone" {
+        if matches!(case, "clone" | "policy-gap") {
             // fork-like clone with no SIGCHLD exit signal; ordinary wait omits it.
             let child =
                 unsafe { libc::syscall(libc::SYS_clone, 0usize, 0usize, 0usize, 0usize, 0usize) };

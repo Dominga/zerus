@@ -293,7 +293,7 @@ mod tests {
 
     fn complete() -> ReplicaMember {
         serde_json::from_value(json!({
-            "node": "node-1", "protocol": 1, "task_schema": 7, "store": STORE, "seen_at": 30,
+            "node": "node-1", "protocol": 1, "task_schema": TASK_SCHEMA, "store": STORE, "seen_at": 30,
             "projects": {"p1": {"complete": true, "exchanged": true, "at": 30}},
         }))
         .unwrap()
@@ -304,17 +304,32 @@ mod tests {
         assert_eq!(reason(&member(None), None).as_deref(), Some("unseen"));
         let mut replica = complete();
         replica.protocol = Some(2);
-        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("protocol"));
+        assert_eq!(
+            reason(&member(Some(replica.clone())), None).as_deref(),
+            Some("protocol")
+        );
         replica.protocol = None;
-        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("protocol"));
+        assert_eq!(
+            reason(&member(Some(replica.clone())), None).as_deref(),
+            Some("protocol")
+        );
         replica.protocol = Some(1);
-        replica.task_schema = Some(6);
-        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("task_schema"));
+        replica.task_schema = Some(TASK_SCHEMA - 1);
+        assert_eq!(
+            reason(&member(Some(replica.clone())), None).as_deref(),
+            Some("task_schema")
+        );
         replica.task_schema = None;
-        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("task_schema"));
+        assert_eq!(
+            reason(&member(Some(replica.clone())), None).as_deref(),
+            Some("task_schema")
+        );
         replica.task_schema = Some(TASK_SCHEMA);
         replica.projects.clear();
-        assert_eq!(reason(&member(Some(replica.clone())), None).as_deref(), Some("no_inventory"));
+        assert_eq!(
+            reason(&member(Some(replica.clone())), None).as_deref(),
+            Some("no_inventory")
+        );
         replica.projects = serde_json::from_value(json!({
             "p1": {"complete": false, "at": 20, "reason": "page_budget"},
         }))

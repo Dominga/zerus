@@ -15,6 +15,16 @@ fn store(root: &Path) -> ProjectStore {
     ProjectStore::open(root, "project-1").unwrap()
 }
 
+fn phone_store(root: &Path) -> ProjectStore {
+    ProjectStore::open_phone(root, "project-1").unwrap()
+}
+
+// The projection lane can retain the literal pre-cutover documents these
+// compatibility controls edit. It never grants a computer native authority.
+fn legacy_store(root: &Path) -> ProjectStore {
+    phone_store(root)
+}
+
 fn add(store: &ProjectStore, text: &str) -> TaskDoc {
     let mut task = TaskDoc::create(NewTask {
         project: store.project_id(),
@@ -291,9 +301,52 @@ fn pair() -> (
     ProjectStore,
     ProjectStore,
 ) {
+    pair_with(store)
+}
+
+fn legacy_pair() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    ProjectStore,
+    ProjectStore,
+) {
+    pair_with(legacy_store)
+}
+
+fn pair_with(
+    computer_store: fn(&Path) -> ProjectStore,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    ProjectStore,
+    ProjectStore,
+) {
     let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (phone, computer) = (store(a.path()), store(b.path()));
+    let (phone, computer) = (phone_store(a.path()), computer_store(b.path()));
     (a, b, phone, computer)
+}
+
+#[test]
+fn a_sealed_task_stays_read_only_on_the_phone() {
+    let (_a, _b, phone, computer) = pair();
+    let task = add(&computer, "Current computer task");
+    settled(run(&phone, &computer, Budget::default()));
+    let mut copy = phone.load(task.uuid()).unwrap();
+    assert_eq!(copy.schema(), zerus_replica::TASK_SCHEMA);
+    assert!(!copy.view().unwrap().writable);
+    let before = copy.snapshot().unwrap();
+    assert!(copy
+        .comment("No phone authority", &Actor::Person, 2)
+        .is_err());
+    assert!(copy
+        .edit_text("Do not change it", &Actor::Person, 2)
+        .is_err());
+    assert!(phone.save(&mut copy).is_err());
+    assert_eq!(phone.load(task.uuid()).unwrap().snapshot().unwrap(), before);
+    assert_eq!(
+        computer.load(task.uuid()).unwrap().snapshot().unwrap(),
+        task.snapshot().unwrap()
+    );
 }
 
 #[test]
@@ -315,7 +368,7 @@ fn a_fresh_phone_gets_every_live_task() {
 
 #[test]
 fn the_phone_s_edits_reach_the_computer() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let task = add(&computer, "Add rate limiting");
     settled(run(&phone, &computer, Budget::default()));
     comment(&phone, task.uuid(), "From the phone");
@@ -326,7 +379,7 @@ fn the_phone_s_edits_reach_the_computer() {
 
 #[test]
 fn both_sides_changed() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let task = add(&computer, "Add rate limiting");
     settled(run(&phone, &computer, Budget::default()));
     comment(&phone, task.uuid(), "From the phone");
@@ -386,7 +439,7 @@ fn every_request_fits_the_relay() {
 
 #[test]
 fn small_budgets_split_ranges_and_still_converge() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     for n in 0..200 {
         add(&computer, &format!("Task {n}"));
     }
@@ -506,7 +559,7 @@ fn misplaced(store: &ProjectStore) -> String {
 
 #[test]
 fn refused_documents_are_not_sent_again() {
-    let (_a, b, phone, computer) = pair();
+    let (_a, b, phone, computer) = legacy_pair();
     let good = add(&computer, "Add rate limiting");
     settled(run(&phone, &computer, Budget::default()));
     // The computer's copy no longer loads: the phone's whole document replaces it.
@@ -542,7 +595,7 @@ fn set_aside(root: &Path, uuid: &str) -> usize {
 #[test]
 fn an_old_phone_s_copy_keeps_the_computer_s_outstanding_attempt() {
     for damaged in [false, true] {
-        let (_a, b, phone, computer) = pair();
+        let (_a, b, phone, computer) = legacy_pair();
         let task = add(&computer, "A phone still holds the pre-attempt copy");
         settled(run(&phone, &computer, Budget::default()));
         reserve_first_attempt(&computer, task.uuid());
@@ -582,7 +635,7 @@ fn an_old_phone_s_copy_keeps_the_computer_s_outstanding_attempt() {
 /// aside, the task stays unloadable and closed, and the phone is told.
 #[test]
 fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
-    let (_a, b, phone, computer) = pair();
+    let (_a, b, phone, computer) = legacy_pair();
     let task = add(&computer, "The attempt only the computer's snapshot holds");
     settled(run(&phone, &computer, Budget::default()));
     reserve_first_attempt(&computer, task.uuid());
@@ -673,7 +726,7 @@ fn a_damaged_copy_the_phone_cannot_cover_is_kept_for_review() {
 
 #[test]
 fn an_answer_that_only_repeats_a_refusal_ends_the_exchange() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     add(&computer, "Add rate limiting");
     misplaced(&computer);
     let ended = run(&phone, &computer, Budget::default());
@@ -684,7 +737,7 @@ fn an_answer_that_only_repeats_a_refusal_ends_the_exchange() {
 
 #[test]
 fn a_document_too_large_to_send_is_named_and_skipped() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let task = add(&computer, "Add rate limiting");
     let small = add(&computer, "Measure first");
     settled(run(&phone, &computer, Budget::default()));
@@ -876,7 +929,7 @@ fn execution(store: &ProjectStore, uuid: &str) -> String {
 /// payload adds no attempt fact (phones have no attempt API).
 #[test]
 fn a_phone_edit_beside_the_first_attempt_comes_back_at_the_execution_schema() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let task = add(&computer, "Add rate limiting");
     settled(run(&phone, &computer, Budget::default()));
     reserve_first_attempt(&computer, task.uuid());
@@ -898,7 +951,7 @@ fn a_phone_edit_beside_the_first_attempt_comes_back_at_the_execution_schema() {
 /// lost; the phone edits again offline and reconnects.
 #[test]
 fn a_lost_answer_and_a_reconnect_still_bring_the_execution_schema() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let task = add(&computer, "Add rate limiting");
     settled(run(&phone, &computer, Budget::default()));
     reserve_first_attempt(&computer, task.uuid());
@@ -918,7 +971,7 @@ fn a_lost_answer_and_a_reconnect_still_bring_the_execution_schema() {
 /// execution schema, the others keep theirs.
 #[test]
 fn held_tasks_arrive_at_the_execution_schema_across_pages() {
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let tasks: Vec<TaskDoc> = (0..12)
         .map(|n| add(&computer, &noise(&format!("task {n}"), 40_000)))
         .collect();
@@ -970,7 +1023,10 @@ impl Inventories for Recorded<'_> {
 #[test]
 fn an_answer_reads_its_inventories_from_the_source_it_is_given_after_the_import() {
     let (phone_root, computer_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let (phone, computer) = (store(phone_root.path()), store(computer_root.path()));
+    let (phone, computer) = (
+        phone_store(phone_root.path()),
+        legacy_store(computer_root.path()),
+    );
     add(&computer, "Add rate limiting");
     let mut done = add(&computer, "Document the limits");
     accept(&computer, &mut done);
@@ -1130,9 +1186,11 @@ fn a_done_fetch_is_shallow_but_keeps_the_complete_task_state_and_attempt_facts()
         loaded.attempt_facts(id).unwrap(),
         task.attempt_facts(id).unwrap()
     );
+    let mut expected = serde_json::to_value(task.view().unwrap()).unwrap();
+    expected["writable"] = json!(false);
     assert_eq!(
         serde_json::to_value(loaded.view().unwrap()).unwrap(),
-        serde_json::to_value(task.view().unwrap()).unwrap()
+        expected
     );
 }
 
@@ -1197,7 +1255,7 @@ fn only_an_empty_version_done_fetch_changes_its_encoding() {
 
 #[test]
 fn a_shallow_done_copy_keeps_later_comments_and_a_desktop_reopen() {
-    let (root, _b, phone, computer) = pair();
+    let (root, _b, phone, computer) = legacy_pair();
     let mut task = add(&computer, "Continue after opening Done on the phone");
     accept(&computer, &mut task);
     fetch_done(&phone, &computer, task.uuid());
@@ -1291,7 +1349,7 @@ fn refuse_then_request_fresh(
 fn pre_root_concurrency_refuses_then_refreshes_only_a_fully_covered_copy() {
     use base64::{engine::general_purpose::STANDARD, Engine};
     for legacy_full_answer in [false, true] {
-        let (root, _b, phone, computer) = pair();
+        let (root, _b, phone, computer) = legacy_pair();
         let uuid = pre_root_pair(&phone, &computer);
         let path = task_file(root.path(), &uuid);
         let saved = fs::read(&path).unwrap();
@@ -1329,7 +1387,7 @@ fn pre_root_concurrency_refuses_then_refreshes_only_a_fully_covered_copy() {
 #[test]
 fn pre_root_refresh_keeps_unsent_edits_including_a_writer_after_the_request() {
     for edit_after_request in [false, true] {
-        let (root, _b, phone, computer) = pair();
+        let (root, _b, phone, computer) = legacy_pair();
         let uuid = pre_root_pair(&phone, &computer);
         if !edit_after_request {
             comment(&phone, &uuid, "Unsent local edit");
@@ -1418,7 +1476,7 @@ fn a_shallow_done_fetch_uses_the_existing_multipart_resume_and_restart() {
 
 #[test]
 fn a_fresh_fetch_never_replaces_a_copy_that_became_damaged() {
-    let (root, _b, phone, computer) = pair();
+    let (root, _b, phone, computer) = legacy_pair();
     let uuid = pre_root_pair(&phone, &computer);
     let mut exchange = Exchange::new();
     let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
@@ -1451,7 +1509,7 @@ fn a_shallow_snapshot_does_not_lower_an_unknown_task_schema_or_enable_writes() {
 #[test]
 fn a_phone_keeps_accepting_done_snapshots_from_an_older_full_answerer() {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let (_a, _b, phone, computer) = pair();
+    let (_a, _b, phone, computer) = legacy_pair();
     let mut task = add(&computer, "A Done task from an older answerer");
     accept(&computer, &mut task);
     let mut exchange = Exchange::new();
@@ -1473,7 +1531,7 @@ fn a_phone_keeps_accepting_done_snapshots_from_an_older_full_answerer() {
 
 #[test]
 fn review_a_fresh_fetch_keeps_a_corrupted_unsent_update_block_for_review() {
-    let (root, _b, phone, computer) = pair();
+    let (root, _b, phone, computer) = legacy_pair();
     let uuid = pre_root_pair(&phone, &computer);
     let mut exchange = Exchange::new();
     let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
@@ -1509,7 +1567,7 @@ fn review_a_fresh_fetch_keeps_a_corrupted_unsent_update_block_for_review() {
 
 #[test]
 fn a_fresh_fetch_keeps_a_truncated_unsent_block_unchanged() {
-    let (root, _b, phone, computer) = pair();
+    let (root, _b, phone, computer) = legacy_pair();
     let uuid = pre_root_pair(&phone, &computer);
     let mut exchange = Exchange::new();
     let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);
@@ -1529,7 +1587,7 @@ fn a_fresh_fetch_keeps_a_truncated_unsent_block_unchanged() {
 
 #[test]
 fn a_fresh_fetch_keeps_a_complete_but_unapplied_unsent_block_unchanged() {
-    let (root, _b, phone, computer) = pair();
+    let (root, _b, phone, computer) = legacy_pair();
     let uuid = pre_root_pair(&phone, &computer);
     let mut exchange = Exchange::new();
     let fresh = refuse_then_request_fresh(&mut exchange, &phone, &computer, &uuid);

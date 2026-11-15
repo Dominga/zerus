@@ -211,6 +211,39 @@ if 'resume' in args or '--resume' in args:
                 self.assertTrue(self.binding(name)['paused'])
         self.assertEqual(len(self.starts()), 3)
 
+    def test_held_owned_exit_does_not_fail_global_listing(self):
+        import fcntl
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        unrelated = self.start('claude')
+        self.wait(lambda: self.binding(unrelated).get('activity') == 'idle')
+        selected = self.binding(name)
+        state = self.root / 'state'
+        # Opaque synthetic reservation, published under the real writer lock.
+        # It cannot activate the const-false original-owner program.
+        with (state / '.lock').open('ab') as writer:
+            fcntl.flock(writer, fcntl.LOCK_EX)
+            paths = [p for p in state.rglob('*.json') if self._same_record(p, selected)]
+            self.assertEqual(len(paths), 1)
+            value = json.loads(paths[0].read_text())
+            value['original_owner'] = {'nonce': 'held-fixture-original'}
+            staged = paths[0].with_suffix('.fixture')
+            staged.write_text(json.dumps(value))
+            staged.replace(paths[0])
+        self.t('send-keys', '-t', selected['pane'], 'exit', 'Enter')
+        self.wait(lambda: self.binding(name).get('exited_at'))
+        before = paths[0].read_bytes()
+        for flags in ([], ['--no-archives']):
+            result = self.hgs('ls', '--json', *flags)
+            computers = json.loads(result)
+            self.assertEqual(len(computers), 1)
+            rows = computers[0]['sessions']
+            self.assertTrue(any(row['name'] == name for row in rows))
+            self.assertTrue(any(row['name'] == unrelated for row in rows))
+            self.assertEqual(paths[0].read_bytes(), before)
+        self.assertEqual(self.binding(name)['original_owner'], value['original_owner'])
+        self.assertEqual(self.binding(unrelated)['activity'], 'idle')
+
     def test_unknown_owned_reservation_is_not_overwritten_by_resume_or_fresh(self):
         name = self.start('codex')
         self.wait(lambda: self.binding(name).get('activity') == 'idle')

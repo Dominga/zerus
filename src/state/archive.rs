@@ -294,7 +294,10 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
     }
     let mut saved = false;
     for record in &bindings {
+        // Held original owners keep their binding; only their cohort finalizer
+        // may retire it. An unrelated listing must remain available.
         if terminating::pending(record)
+            || supervisor::owned_pending(record)
             || terminal_live(snapshot, record).unwrap_or(true)
             || process_alive(record)
             || record.get("pausing").is_some()
@@ -337,7 +340,8 @@ pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>>
     let mut catalog = None;
     let mut archive_unavailable = false;
     for record in bindings {
-        if terminating::pending(&record) {
+        // Retain opaque owned reservations before consulting archive membership.
+        if terminating::pending(&record) || supervisor::owned_pending(&record) {
             result.push(record);
             continue;
         }
@@ -819,3 +823,6 @@ mod tests {
         assert!(!path(id).unwrap().exists());
     }
 }
+
+#[cfg(all(test, unix))]
+mod owned_listing_tests;

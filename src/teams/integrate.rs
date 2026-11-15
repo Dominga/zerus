@@ -34,6 +34,8 @@ pub struct Reported {
 }
 
 mod member_refs;
+mod base;
+pub(crate) use base::{main_refs, validate_base_advance};
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub use member_refs::member_branch_available;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

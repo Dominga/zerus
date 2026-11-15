@@ -132,6 +132,7 @@ fn reserve(ctx: &mut Context<'_>, node: u32, member: &str, id: &str, kind: &str)
     ctx.db.execute("INSERT INTO effects(team,node,member,generation,request_id,actor,kind,created_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![ctx.team.id,node,member,ctx.generation(node)?,id,encode(ctx.actor)?,kind,ctx.now]).map_err(storage)?;
     ctx.reply.node = Some(node);
     ctx.reply.item = Some(ctx.db.last_insert_rowid() as u64);
+    ctx.db.execute("INSERT INTO handout_bases(effect,base_commit) VALUES(?1,?2)",params![id,ctx.team.base_commit]).map_err(storage)?;
     Ok(())
 }
 pub(super) fn reopen_intent(ctx: &mut Context<'_>) -> Result<()> {

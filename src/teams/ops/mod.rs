@@ -3,6 +3,7 @@
 #![allow(dead_code)] // Used by the following CLI and service packages.
 mod apply;
 mod authority;
+mod base;
 mod common;
 mod decisions;
 mod delegation;
@@ -28,6 +29,7 @@ mod validation;
 use super::store::{self, rows, DecisionState, Store};
 #[allow(unused_imports)]
 pub use apply::apply;
+pub(crate) use apply::apply_with_repository;
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

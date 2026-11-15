@@ -62,6 +62,7 @@ impl TeamAction {
             Self::Resume {} => "resume",
             Self::Stop {} => "stop",
             Self::Archive {} => "archive",
+            Self::AdvanceBase { .. } => "advance-base",
             Self::PauseMember { .. } => "pause-member",
             Self::ResumeMember { .. } => "resume-member",
             Self::StopMember { .. } => "stop-member",
@@ -115,6 +116,7 @@ impl TeamAction {
             | Self::StopMember { member }
             | Self::ArchiveMember { member } => json!({"member": member}),
             Self::Settings { settings } => json!({"settings": settings}),
+            Self::AdvanceBase { commit } => json!({"commit": commit}),
             Self::Decide { card, decision } => json!({"card": card, "decision": decision}),
             Self::Admit { node } => json!({"node": node}),
             Self::Route {
@@ -157,6 +159,17 @@ impl TeamAction {
     pub fn check(&self) -> Result<(), String> {
         match self {
             Self::Create { .. } => check_create(self),
+            Self::AdvanceBase { commit } => {
+                if matches!(commit.len(), 40 | 64)
+                    && commit
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    Ok(())
+                } else {
+                    Err("Name the full lowercase commit hash.".into())
+                }
+            }
             Self::Pause {}
             | Self::Resume {}
             | Self::Stop {}
@@ -215,6 +228,11 @@ impl TeamAction {
             action: action.to_owned(),
         };
         match self {
+            Self::AdvanceBase { commit } => Some(ask(
+                "teamAdvanceBaseConfirm", "Advance base?",
+                format!("Advance the base of {name} to {commit}? Future hand-outs use it. Earlier hand-outs keep their assigned base. Branches are unchanged."),
+                "Advance base",
+            )),
             Self::Stop {} => Some(ask(
                 "teamStopConfirm",
                 "Stop team?",

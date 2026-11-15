@@ -122,7 +122,8 @@ impl Runtime {
             machine: team.home.clone(),
             project: team.project.clone(),
             branch: team.integration_branch.clone(),
-            base: team.base_commit.clone(),
+            base: store.attempt_base(&team.id, d.node, d.generation)?
+                .ok_or_else(|| problem("The accepted task has no assigned base"))?,
             repo: ports.repository(team)?,
             node: d.node,
             generation: d.generation,

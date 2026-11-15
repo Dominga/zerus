@@ -69,6 +69,18 @@ pub(crate) fn health(state: &std::path::Path) -> Option<Health> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use native::repository;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn repository(
+    _config: &crate::config::Config,
+    _team: &zerus_team_plan::model::Team,
+) -> Result<crate::teams::integrate::Repo, zerus_team_plan::Problem> {
+    Err(zerus_team_plan::Problem::new(
+        zerus_team_plan::problem::code::INVALID_STATE,
+        "Local Teams repository placement is unavailable on this computer.",
+    ))
+}
 mod ports;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod timers;

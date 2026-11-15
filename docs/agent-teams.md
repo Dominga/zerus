@@ -618,3 +618,46 @@ working process and its desktop views, and builds the runtime on Zerus tasks
 and the desktop service. Files imported from the fork keep WhiteWh as their
 Git author. See "Origin and credit" in the
 [design](superpowers/specs/2026-11-11-agent-teams-design.md#origin-and-credit).
+
+## Advancing the base of a live team
+
+A person can use **Advance base…** in the Team tab's bar, or run
+`hgs team advance-base --json` with a JSON request on stdin:
+
+```json
+{"request_id":"00000000-0000-4000-8000-000000000165","team":"00000000-0000-4000-8000-000000000001","expected_revision":7,"commit":"0123456789abcdef0123456789abcdef01234567"}
+```
+
+The form reads the current base and the available main commits once, then asks
+for confirmation. Its revision remains the revision of that read. A stale
+revision requires reviewing the updated team; an uncertain result keeps its
+original request ID and offers the usual explicit Check and Dismiss actions.
+
+This operation is person-only, including when a lead has permission to accept
+results. It runs on the team's home computer and resolves the existing project
+through the same local placement reader as member launch. Branch integration
+must be enabled and the team must be running or paused. The full lowercase
+commit hash must exist in that repository, be strictly newer than the current
+base, and contain the current base in its ancestry. It must also be contained
+by either the literal local `refs/heads/main` or locally fetched
+`refs/remotes/origin/main`. There is no fetch, network lookup, HEAD fallback or
+arbitrary ref selection. Missing main refs and backward, equal, unrelated or
+non-main commits are refused. The journal records the old base, new base and
+the ref that admitted it. Repeating the exact request returns its saved receipt
+before rechecking the revision or repository.
+
+The new base applies to future hand-out and reopen reservations. Each effect
+pins its assigned base; its prompt and that generation's integration ancestry
+check use that pin even after another advance. The task detail and queue show
+`assigned_base` separately from the team's current default. On upgrade, older
+effects keep the pre-advance base through a frozen default and indexed
+high-water mark; upgrading does not scan or rewrite the effect history.
+
+Advancing writes no Git objects or refs. It does not merge into, reset or
+rewrite the integration branch or any member branch. Existing member
+checkouts and saved launch plans keep their identities. A newly selected
+member launch uses the current default as its initial checkout base. The
+hand-out tells the member to start from the integration branch and merge the
+assigned base into its own work branch before implementing. The member owns
+that merge and any conflicts. The service continues its ordinary acceptance
+merges using the base actually assigned to the reported task generation.

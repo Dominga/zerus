@@ -137,6 +137,7 @@
         "cards": [
           {
             "admitted": true,
+            "assigned_base": "0123456789abcdef0123456789abcdef01234567",
             "assignee": "",
             "decided_by": "",
             "held": false,

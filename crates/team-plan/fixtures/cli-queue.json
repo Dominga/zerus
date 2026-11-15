@@ -10,6 +10,7 @@
   "rows": [
     {
       "admitted": true,
+      "assigned_base": "0123456789abcdef0123456789abcdef01234567",
       "hold": true,
       "holder": "m1",
       "id": 1,
@@ -34,6 +35,7 @@
     },
     {
       "admitted": true,
+      "assigned_base": "0123456789abcdef0123456789abcdef01234567",
       "holder": "m3",
       "id": 2,
       "implementer": "m1",

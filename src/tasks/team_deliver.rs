@@ -452,6 +452,7 @@ fn request(
             &permit.team,
             &permit.node,
             &permit.member,
+            &store.effect_base(&permit.team.id, &body.id).map_err(problem)?,
             handover.then_some((permit.reason.as_str(), earlier))
         )
         .map_err(problem)?

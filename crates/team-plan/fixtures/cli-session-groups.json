@@ -79,6 +79,7 @@
     "rows": [
       {
         "admitted": true,
+        "assigned_base": null,
         "holder": null,
         "id": 1,
         "kind": "task",
@@ -101,6 +102,7 @@
       },
       {
         "admitted": true,
+        "assigned_base": "0123456789abcdef0123456789abcdef01234567",
         "holder": "m1",
         "id": 2,
         "implementer": "m1",

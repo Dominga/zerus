@@ -677,3 +677,37 @@ mod applied;
 mod answers;
 
 mod handovers;
+
+/// Product-written tasks/reports in a private Git repository: advancing the
+/// default must leave both actor planning and native ref admission on the
+/// older hand-out's base. This also proves that advancement did not merge main.
+#[test]
+fn advance_base_integration_uses_the_handouts_base_in_actor_and_native_admission() {
+    for through_actor in [false, true] {
+        let (mut h,o,plan)=merge_fixture();
+        std::fs::write(o.root.join("main-only.txt"),"new main\n").unwrap();
+        git(&o.root,&o.empty,&["add","main-only.txt"]);
+        git(&o.root,&o.empty,&["commit","-qm","Advance main"]);
+        let newer=git(&o.root,&o.empty,&["rev-parse","main"]);
+        let repo=crate::teams::integrate::Repo {git_dir:o.root.join(".git")};
+        assert!(!crate::teams::integrate::descends(&repo,&plan.commit,&newer).unwrap());
+        let team=h.store.team(TEAM).unwrap().unwrap();
+        let req=crate::teams::ops::tests::request(team.revision,Operation::AdvanceBase {commit:newer.clone()});
+        ops::apply_with_repository(&mut h.store,&person(),&req,100,&|_|Ok(repo.clone())).unwrap();
+        assert_eq!(git(&o.root,&o.empty,&["rev-parse",&plan.branch]),plan.base);
+        if through_actor {
+            let team=h.store.team(TEAM).unwrap().unwrap();
+            let mut runtime=Runtime::open(h.temp.path(),&team.home).unwrap();
+            let mut port=super::work::Work::default();
+            port.repo=Some(repo);
+            runtime.integrations(&mut h.store,&mut port,&team,200).unwrap();
+            assert_eq!(port.last_plan.as_ref().map(|p|p.base.as_str()),Some(plan.base.as_str()));
+        } else {
+            let result=native(&h).work_merge(&plan);
+            assert!(matches!(result,ports::MergeResult::Merged {..}),"{result:?}");
+        }
+        let tip=git(&o.root,&o.empty,&["rev-parse",&plan.branch]);
+        assert_ne!(tip,plan.base);
+        assert!(!crate::teams::integrate::descends(&crate::teams::integrate::Repo {git_dir:o.root.join(".git")},&tip,&newer).unwrap());
+    }
+}

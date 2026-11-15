@@ -16,6 +16,7 @@ use zerus_team_plan::Problem;
 pub(super) fn variant(command: &str) -> Option<&'static str> {
     Some(match command {
         "settings" => "change_settings",
+        "advance-base" => "advance_base",
         "pause" => "pause",
         "resume" => "resume",
         "stop" => "stop",
@@ -56,11 +57,14 @@ pub(super) fn run(
     }
     let mut store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
+    if command == "advance-base" {
+        actor::person_only(&identity, command)?;
+    }
     if matches!(command, "ask" | "verdict") {
         actor::member_session(&identity, command)?;
     }
     let request = build(variant, &request_input(provided)?)?;
-    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
+    let reply = ops::apply_with_repository(&mut store, &identity.actor, &request, input::now_ms(), &|team| crate::desktop::teams::repository(config,team))?;
     reply_view(&identity.actor, &request.team, &reply)
 }
 

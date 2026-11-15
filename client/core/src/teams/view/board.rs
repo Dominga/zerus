@@ -74,6 +74,7 @@ fn is_stage(node: &Value) -> bool {
 
 fn card(node: &Value) -> QueueCard {
     QueueCard {
+        assigned_base: optional_name(node, "assigned_base"),
         node: count(node, "id"),
         title: text(node, "title", LINE_CHARS),
         state: or_default(node, "state", "draft"),

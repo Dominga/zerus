@@ -53,7 +53,7 @@ it("words the counts with the catalog's three Russian plural forms", () => {
 it("offers the team's own operations by its status", () => {
   const { host, onAction } = setup();
   const buttons = [...host.querySelectorAll("[data-strip-actions] button")].map((button) => button.getAttribute("data-strip-action"));
-  expect(buttons).toEqual(["pause", "stop"]);
+  expect(buttons).toEqual(["advance_base", "pause", "stop"]);
   (host.querySelector('[data-strip-action="stop"]') as HTMLButtonElement).click();
   expect(onAction).toHaveBeenCalledWith("stop");
 });
@@ -63,7 +63,7 @@ it("folds the action row by the strip's own width while keeping operations reach
   for (const width of [1000, 850, 320]) {
     const { host, onAction } = setup(teamView, vi.fn(), width);
     expect(host.querySelector(".team-bar")?.getAttribute("data-compact")).toBe(width === 1000 ? "low" : "high");
-    expect([...host.querySelectorAll("[data-strip-action]")].map((button) => button.getAttribute("data-strip-action"))).toEqual(["pause", "stop"]);
+    expect([...host.querySelectorAll("[data-strip-action]")].map((button) => button.getAttribute("data-strip-action"))).toEqual(["advance_base", "pause", "stop"]);
     (host.querySelector('[data-strip-action="pause"]') as HTMLButtonElement).click();
     expect(onAction).toHaveBeenCalledWith("pause");
   }
@@ -71,7 +71,7 @@ it("folds the action row by the strip's own width while keeping operations reach
 
 it("offers resume to a paused team and archive to a stopped one", () => {
   const paused = { ...teamView, bar: { ...teamView.bar, status: "paused" } };
-  expect([...setup(paused).host.querySelectorAll("[data-strip-actions] button")].map((button) => button.getAttribute("data-strip-action"))).toEqual(["resume", "stop"]);
+  expect([...setup(paused).host.querySelectorAll("[data-strip-actions] button")].map((button) => button.getAttribute("data-strip-action"))).toEqual(["advance_base", "resume", "stop"]);
   const stopped = { ...teamView, bar: { ...teamView.bar, status: "stopped" } };
   expect([...setup(stopped).host.querySelectorAll("[data-strip-actions] button")].map((button) => button.getAttribute("data-strip-action"))).toEqual(["archive"]);
 });

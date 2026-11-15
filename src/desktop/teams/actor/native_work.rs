@@ -170,13 +170,15 @@ impl Native {
             || team.owner != plan.owner
             || team.project != plan.project
             || team.integration_branch != plan.branch
-            || team.base_commit != plan.base
             || team.settings.integration != Integration::Branch
         {
             return Err(problem("Integration admission changed"));
         }
         if store.generation(&plan.team, plan.node)? != Some(plan.generation) {
             return Err(problem("Integration generation changed"));
+        }
+        if store.attempt_base(&plan.team, plan.node, plan.generation)?.as_deref() != Some(plan.base.as_str()) {
+            return Err(problem("Integration admission changed"));
         }
         if !store.accepted_task_current(&plan.team, plan.node, plan.generation)? {
             return Err(problem("The accepted task's reviewed attempt changed"));

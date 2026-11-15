@@ -13,6 +13,20 @@ use zerus_team_plan::model::{Node, SessionKey, TeamStatus};
 use zerus_team_plan::problem::code;
 use zerus_team_plan::Problem;
 
+/// Explicit, bounded Git read for the Advance base form, never a polling read.
+pub(super) fn base(config: &Config, caller: &Caller, args: &[String]) -> Result<Value, Problem> {
+    let options = Options::parse(args, &["--team"], &[])?;
+    options.nothing_else("base")?;
+    let store = Store::open(&config.state)?;
+    let identity = actor::resolve(&store, caller)?;
+    actor::person_only(&identity, "base")?;
+    let id = actor::target_team(&store, &identity, options.team()?)?;
+    let team = store.team(&id)?.ok_or_else(|| not_found_team(&id))?;
+    let repo = crate::desktop::teams::repository(config,&team)?;
+    let refs = crate::teams::integrate::main_refs(&repo)?;
+    Ok(json!({"ok":true,"actor":actor::view(&identity.actor),"team":id,"revision":team.revision,"base_commit":team.base_commit,"refs":refs}))
+}
+
 /// `status [--team ID] [--bundle]`: the team, its members and counts.
 pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Result<Value, Problem> {
     let options = Options::parse(args, &["--team"], &["--bundle"])?;

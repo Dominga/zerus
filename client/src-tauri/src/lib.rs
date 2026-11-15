@@ -1743,6 +1743,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_catalog,
         teams::teams_template_save,
         teams::teams_project,
+        teams::teams_base,
         teams::teams_preview,
         task_details::task_details,
         task_details::task_reference,

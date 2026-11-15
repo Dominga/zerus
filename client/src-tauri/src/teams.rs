@@ -249,9 +249,42 @@ pub async fn teams_template_save(template: Value) -> Result<Value, String> {
     zerus_client_core::teams::catalog::saved_receipt(&reply, &sent)
 }
 
-/// A project folder's checkout facts (`hgs git-status --path PATH --json`):
-/// its branch and head commit, or the reason it is not a repository. This
-/// reply has no `ok` field of its own, so only its object shape is checked.
+/// One on-demand, bounded read of this team's current base and local main refs.
+#[tauri::command]
+pub async fn teams_base(team: String) -> Result<Value, String> {
+    if !valid_team(&team) {
+        return Err("Not a team id.".into());
+    }
+    let reply = read_team_json(&["team", "base", "--team", &team, "--json"], None).await?;
+    base_shape(reply, &team)
+}
+
+fn base_shape(reply: Value, team: &str) -> Result<Value, String> {
+    if reply.get("ok").and_then(Value::as_bool) != Some(true)
+        || reply.get("team").and_then(Value::as_str) != Some(team)
+        || reply.get("revision").and_then(Value::as_u64).is_none()
+        || reply.get("base_commit").and_then(Value::as_str).is_none()
+        || !reply
+            .get("refs")
+            .and_then(Value::as_array)
+            .is_some_and(|refs| {
+                !refs.is_empty()
+                    && refs.len() <= 2
+                    && refs.iter().all(|r| {
+                        r.get("commit").and_then(Value::as_str).is_some()
+                            && matches!(
+                                r.get("reference").and_then(Value::as_str),
+                                Some("refs/heads/main" | "refs/remotes/origin/main")
+                            )
+                    })
+            })
+    {
+        return Err("The team base answer is invalid.".into());
+    }
+    Ok(reply)
+}
+
+/// A project folder's existing checkout facts through the bounded CLI read.
 #[tauri::command]
 pub async fn teams_project(path: String) -> Result<Value, String> {
     if path.len() > PATH_INPUT_MAX {
@@ -385,6 +418,26 @@ mod real_reads;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Handwritten wire-shape controls; operation rows are tested in hgs.
+    #[test]
+    fn handwritten_base_reply_is_bounded_and_scoped_to_the_selected_team() {
+        let team = "00000000-0000-4000-8000-000000000165";
+        let commit = "0123456789abcdef0123456789abcdef01234567";
+        let reply = json!({"ok":true,"team":team,"revision":7,"base_commit":commit,
+            "refs":[{"reference":"refs/heads/main","commit":commit}]});
+        assert!(base_shape(reply.clone(), team).is_ok());
+        assert!(base_shape(reply.clone(), "other").is_err());
+        for refs in [
+            json!([]),
+            json!([{}, {}, {}]),
+            json!([{"reference":"HEAD","commit":commit}]),
+        ] {
+            let mut invalid = reply.clone();
+            invalid["refs"] = refs;
+            assert!(base_shape(invalid, team).is_err());
+        }
+    }
 
     #[test]
     fn a_structured_refusal_is_decoded_on_a_nonzero_exit() {

@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 use zerus_team_plan::problem::code;
 use zerus_team_plan::Problem;
 
-pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|import|export | template list|show|save|import|export|remove | create --template ID | list|waiting|status|inbox|queue|cards|journal [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | current | settings|pause|resume|stop|archive|decide|admit|route|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member (JSON on stdin)";
+pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|import|export | template list|show|save|import|export|remove | create --template ID | list|waiting|status|base|inbox|queue|cards|journal [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | current | advance-base|settings|pause|resume|stop|archive|decide|admit|route|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member (JSON on stdin)";
 
 /// The running command. `args` are the words after `team`; `provided` is a
 /// test's stdin, and `None` reads this command's own stdin when it needs one.
@@ -54,6 +54,7 @@ fn execute(
         "catalog" | "template" => catalog_cmd::run(config, caller, command, rest, provided),
         "create" => commands::create(config, caller, rest, provided),
         "status" => reads::status(config, caller, rest),
+        "base" => reads::base(config, caller, rest),
         "list" => reads::list_teams(config, caller, rest),
         "waiting" => reads::waiting(config, caller, rest),
         "inbox" | "queue" | "cards" | "journal" => reads::list(config, caller, command, rest),
@@ -120,7 +121,7 @@ fn problem_reply(mut problem: Problem, read: bool) -> (Value, i32) {
 fn is_read(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some(
-            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current",
+            "status" | "base" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current",
         ) => true,
         Some("catalog" | "template") => matches!(
             args.get(1).map(String::as_str),

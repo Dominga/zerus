@@ -238,6 +238,10 @@ pub enum Operation {
     Resume,
     Stop,
     Archive,
+    /// Person-only: advance the default for future hand-outs, without a Git write.
+    AdvanceBase {
+        commit: String,
+    },
     PauseMember {
         member: String,
     },

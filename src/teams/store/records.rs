@@ -56,6 +56,7 @@ pub struct Page<T> {
 /// (none otherwise).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueRow {
+    pub assigned_base: Option<String>,
     pub node: zerus_team_plan::model::Node,
     pub holder: Option<String>,
     pub pending: Option<String>,

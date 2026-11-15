@@ -16,6 +16,7 @@ mod member_sessions;
 pub use decision_state::DecisionState;
 pub(crate) mod pages;
 mod progress;
+pub(crate) mod bases;
 mod records;
 pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
 pub(crate) mod rows;
@@ -490,10 +491,11 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 3] = [
+const COMMON_SCHEMA: [&str; 4] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
     include_str!("read-indexes.sql"),
+    include_str!("base-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied
 /// once per store, when the table is absent, so the ordinary open performs

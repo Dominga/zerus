@@ -5,7 +5,7 @@ use crate::teams::{
     ops::{HandoutOutcome, Operation, TaskStage},
 };
 #[derive(Default)]
-struct Work {
+pub(super) struct Work {
     text: Option<String>,
     fail_observe: bool,
     allow_delivery: bool,
@@ -25,10 +25,10 @@ struct Work {
     lock_after_merge: Option<std::path::PathBuf>,
     held: Option<rusqlite::Connection>,
     advance: Option<std::path::PathBuf>,
-    repo: Option<integrate::Repo>,
+    pub(super) repo: Option<integrate::Repo>,
     stop_team: Option<std::path::PathBuf>,
     stop: bool,
-    last_plan: Option<MergePlan>,
+    pub(super) last_plan: Option<MergePlan>,
     conflicts_for: Option<(u32, Vec<String>)>,
     demote_after_merge: Option<std::path::PathBuf>,
 }

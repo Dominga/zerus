@@ -9,6 +9,20 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
+    apply_with_repository(store, actor, request, now, &|_| {
+        Err(invalid("A trusted local repository resolver is required to advance the base."))
+    })
+}
+
+/// The CLI supplies its own placement reader, never a renderer/request path.
+/// It runs under the writer transaction, after replay, authority and revision.
+pub(crate) fn apply_with_repository(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
     validate_request(request, now)?;
     store.refresh()?;
     prepare_first(store, actor, request)?;
@@ -43,7 +57,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         event: None,
         superseded: None,
     };
-    let result = run(&mut ctx, request, current.is_some());
+    let result = run(&mut ctx, request, current.is_some(), repository);
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
@@ -116,14 +130,23 @@ fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Re
         Saved::Refused(p) => Err(p),
     }))
 }
-fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply> {
+fn run(
+    ctx: &mut Context<'_>,
+    request: &Request,
+    existed: bool,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
     if existed && matches!(ctx.op, Operation::Create { .. }) {
         return Err(invalid("Team already exists."));
     }
-    dispatch(ctx)?;
+    if matches!(ctx.op, Operation::AdvanceBase { .. }) {
+        base::advance(ctx, repository)?;
+    } else {
+        dispatch(ctx)?;
+    }
     ctx.reply.revision = ctx
         .team
         .revision
@@ -167,6 +190,7 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
+        Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::Create { .. } => team::create(ctx),
         Operation::Pause => team::pause(ctx),
         Operation::Resume => team::resume(ctx),

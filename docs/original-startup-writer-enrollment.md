@@ -33,6 +33,9 @@ the ordinary mutator inventory, without claiming those are enrolled today.
   actual Child exists and retains its source through actual wait, input closure,
   output EOF and joins, including retirement after cancellation or Drop.
   It does not reserve a durable row in the original run's writer store.
+- The initial read-only `owner::Observation` does not hold a state writer;
+  mutating `owner::Scope` already does. Enrollment must distinguish these
+  actual owners instead of assuming that every helper has a writer to borrow.
 - `writer_records/admission.rs` and `io.rs` pair original source, pending row
   and helper custody, but no actual startup producer uses that pairing.
   Those types explicitly do not authorize input or establish crash settlement.
@@ -66,7 +69,7 @@ For every existing helper invocation in this family:
 1. Validate the live original owner/domain and that the fixed startup producer
    is still open. Use the host's current native source, selected record, target,
    request and existing Scope checks. Keep initialization absent from this path.
-2. Under the **same already-held** state writer, reserve the exact run's durable
+2. Under the **same original** state writer, reserve the exact run's durable
    row before `source.offer`, possible-delivery publication or physical spawn.
    A helper row has its own canonical UUID and binds the parent appearance
    request, closed command kind, original SID/run/source and intent digest.
@@ -79,6 +82,15 @@ For every existing helper invocation in this family:
    all its borrowed custody has returned. Preserve delivery/appearance outcomes
    separately. An unknown or failed native operation never gains replay from
    physical retirement, a different helper UUID or a later source check.
+
+Borrow the existing mutating Scope's writer. For the initial observation, use
+bounded existing-only admission on the original native writer, without creating
+locks or running general recovery. A busy admission offers no helper/Enter and
+does not start a fresh timeout. Release any observation-only writer at its
+defined admission boundary; keep native source and the per-run lease with the
+actual IO. Do not hold a second writer or infer effect permission from this
+read-only enrollment. A terminal helper's argv may act before stdin, so every
+durable row and its existing possible-effect reservation precedes actual spawn.
 
 Use fresh per-helper source capture under the fixed native owner, so legitimate
 original completion metadata between helpers does not become a stale source

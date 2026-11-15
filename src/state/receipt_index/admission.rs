@@ -83,6 +83,10 @@ pub(super) fn reconciled_question(state: &Path, at: f64) {
     }
 }
 
+pub(super) fn deadline() -> Option<Instant> {
+    UNTIL.with(Cell::get)
+}
+
 pub(super) fn install(db: &Connection) -> Result<()> {
     if UNTIL.with(Cell::get).is_some() {
         sql(db.busy_handler(Some(busy)))?;

@@ -310,6 +310,9 @@ fn bounded_advances_resume_discovery_instead_of_restarting_the_same_prefix() {
             )
             .unwrap();
     }
+    // Historical receipts are outside the native change-clock ambiguity
+    // window; the assertion still bounds every individual advance.
+    std::thread::sleep(Duration::from_millis(2100));
     let mut complete = false;
     for _ in 0..40 {
         if advance(temp.path(), Duration::ZERO).unwrap() {

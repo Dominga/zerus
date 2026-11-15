@@ -426,6 +426,7 @@ impl Catalog {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let db = sql(Connection::open_with_flags(&path, flags))?;
+        db.set_prepared_statement_cache_capacity(8);
         sql(db.busy_timeout(if create {
             Duration::from_millis(20)
         } else {
@@ -683,26 +684,24 @@ impl Catalog {
         }
     }
     fn cached_row(&self, source: Source, request: &str) -> Result<Option<CachedRow>> {
-        sql(self
-            .db
-            .query_row(
-                "SELECT binding,stamp,name,run,conversation,agent,first_message,at,files
-               FROM receipt_rows WHERE source=? AND request=?",
-                params![source.key(), request],
-                |row| {
-                    Ok(CachedRow {
-                        fingerprint: row.get(0)?,
-                        stamp: row.get(1)?,
-                        name: row.get(2)?,
-                        run: row.get(3)?,
-                        conversation: row.get(4)?,
-                        agent: row.get(5)?,
-                        first: row.get(6)?,
-                        at: row.get(7)?,
-                        files: row.get(8)?,
-                    })
-                },
-            )
+        let mut query = sql(self.db.prepare_cached(
+            "SELECT binding,stamp,name,run,conversation,agent,first_message,at,files
+             FROM receipt_rows WHERE source=? AND request=?",
+        ))?;
+        sql(query
+            .query_row(params![source.key(), request], |row| {
+                Ok(CachedRow {
+                    fingerprint: row.get(0)?,
+                    stamp: row.get(1)?,
+                    name: row.get(2)?,
+                    run: row.get(3)?,
+                    conversation: row.get(4)?,
+                    agent: row.get(5)?,
+                    first: row.get(6)?,
+                    at: row.get(7)?,
+                    files: row.get(8)?,
+                })
+            })
             .optional())
     }
     fn remember_row(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
@@ -1636,11 +1635,27 @@ fn read_original(path: &Path) -> std::result::Result<Value, &'static str> {
 
 /// A receipt original's content stamp. A missing file still yields a locator
 /// change, and the consumer validates the original before importing it.
+fn original_stamp(metadata: &fs::Metadata) -> String {
+    let (seconds, nanos) = crate::platform::modified(metadata);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{seconds}:{nanos}:{}:{}:{}:{}",
+            metadata.len(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )
+    }
+    #[cfg(not(unix))]
+    format!("{}:{seconds}:{nanos}", metadata.len())
+}
 fn file_stamp(path: &Path) -> Result<String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            let (seconds, nanos) = crate::platform::modified(&metadata);
-            Ok(format!("{}:{seconds}:{nanos}", metadata.len()))
+            Ok(original_stamp(&metadata))
         }
         Ok(_) => Err("Receipt original is not a regular file".into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok("missing".into()),
@@ -1655,10 +1670,13 @@ fn file_state(path: &Path) -> Option<(String, f64)> {
         .ok()
         .filter(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())?;
     let (seconds, nanos) = crate::platform::modified(&metadata);
-    Some((
-        format!("{}:{seconds}:{nanos}", metadata.len()),
-        seconds as f64 + nanos as f64 / 1e9,
-    ))
+    let modified = seconds as f64 + nanos as f64 / 1e9;
+    #[cfg(unix)]
+    let modified = {
+        use std::os::unix::fs::MetadataExt;
+        modified.max(metadata.ctime() as f64 + metadata.ctime_nsec() as f64 / 1e9)
+    };
+    Some((original_stamp(&metadata), modified))
 }
 
 /// Projection is advisory. Missing index/original data is never proof of absence

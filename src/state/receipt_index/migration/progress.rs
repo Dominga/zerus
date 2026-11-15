@@ -87,7 +87,10 @@ pub(super) fn restore(migration: &mut Migration) -> Result<()> {
         count_at_start: saved.count_at_start,
         schema: saved.schema,
         witness_error: saved.witness_error,
-        at: saved.at,
+        // Discovery re-enumerates the whole family after reopen. Use its new
+        // census time; the native object/change stamp must still match every
+        // reused original. Row counting retains the original walk's fence.
+        at: if saved.rows { saved.at } else { now() },
         walk_errors: saved.walk_errors,
         attempts: 0,
         catchup: None,

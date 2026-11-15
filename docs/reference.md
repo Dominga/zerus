@@ -2465,6 +2465,8 @@ original, check stamps and count retained bindings, while reusing only unchanged
 old originals. Changed, unknown and recently modified originals are parsed again;
 the coarse-clock window remains anchored to the first check. This bounded
 request-local optimization ends with the answer and establishes no delivery proof.
+On Linux and macOS, reuse also requires the native file object and change-time
+stamp; other platforms retain full original reconciliation.
 Expiry before admission refuses without input; it never certifies stale coverage.
 Inspection retains its separate short read budget.
 

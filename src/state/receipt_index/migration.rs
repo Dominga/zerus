@@ -72,10 +72,17 @@ pub(super) fn priority(state: &Path, worker: bool) -> Result<Option<Guard>> {
     if !file.metadata().is_ok_and(|m| m.is_file()) {
         return Err("Receipt admission lock is unavailable".into());
     }
-    match FileExt::try_lock_shared(&file) {
-        Ok(()) => Ok(Some(Guard::held(file))),
-        Err(error) if crate::platform::lock_contended(&error) => Ok(None),
-        Err(_) => Err("Receipt admission lock is unavailable".into()),
+    let until = admission::deadline().unwrap_or_else(|| Instant::now() + READ_BUSY_WAIT);
+    loop {
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => return Ok(Some(Guard::held(file))),
+            Err(error) if crate::platform::lock_contended(&error) && Instant::now() < until => {
+                std::thread::sleep(
+                    Duration::from_millis(1).min(until.saturating_duration_since(Instant::now())),
+                );
+            }
+            Err(_) => return Err("Receipt admission lock is unavailable".into()),
+        }
     }
 }
 
@@ -320,6 +327,16 @@ impl Migration {
         Ok(migration)
     }
     fn unchanged(catalog: &Catalog, source: Source, path: &Path, at: f64) -> bool {
+        #[cfg(not(unix))]
+        {
+            let _ = (catalog, source, path, at);
+            false
+        }
+        #[cfg(unix)]
+        Self::unchanged_native(catalog, source, path, at)
+    }
+    #[cfg(unix)]
+    fn unchanged_native(catalog: &Catalog, source: Source, path: &Path, at: f64) -> bool {
         let Some(id) = path.file_stem().and_then(|id| id.to_str()) else {
             return false;
         };

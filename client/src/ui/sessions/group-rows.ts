@@ -198,8 +198,10 @@ export function groupRows(input: ListInput): Row[] {
       const member = input.agentTeams?.get(s.key);
       const presentation = agentTeamSession(s, member, input.online(s));
       const shown = changed ? { ...presentation, subagents: kids } : presentation;
-      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, ...extra, team });
+      const row: Extract<Row, { type: "card" }> = { type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, ...extra, team };
+      out.push(row);
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
+      return row;
   };
   // One project group's visible cards in rank order, child sessions nested
   // under a parent shown in the same list. Nesting never hides a row: a loop
@@ -292,6 +294,16 @@ export function groupRows(input: ListInput): Row[] {
       }
     }
     const hidden = new Set<string>();
+    // A connector ends at the last *shown* sibling, even when later siblings
+    // stayed collapsed. The previous sibling's row is still local to this pass.
+    const lastShown = new Map<string, Extract<Row, { type: "card" | "container" }>>();
+    const connect = (row: Extract<Row, { type: "card" | "container" }>, parent?: string) => {
+      if (!parent) return;
+      const previous = lastShown.get(parent);
+      if (previous) previous.lastChild = false;
+      row.lastChild = true;
+      lastShown.set(parent, row);
+    };
     for (const { s, depth, parent, last } of nodes) {
       const onlyFavorites = favoritesOnly || !!parent && hidden.has(parent);
       if (onlyFavorites) {
@@ -304,11 +316,12 @@ export function groupRows(input: ListInput): Row[] {
       const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: parentKey?.(s) } } : {};
       const container = containers?.get(s.key);
       if (container) {
-        out.push({ type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
-                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
+        const row: Extract<Row, { type: "container" }> = { type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
+                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from };
+        out.push(row); connect(row, parent);
         continue;
       }
-      card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites);
+      connect(card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites), parent);
     }
   };
   const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed, favoritesOnly = false) =>

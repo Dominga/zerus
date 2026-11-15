@@ -37,6 +37,7 @@ describe("favorite sessions stay in the existing hierarchy (zerus-ux18t)", () =>
     expect(rows.map((r) => r.id)).toEqual(["h:project", lead.key, middle.key, favorite.key, "h:other", other.key]);
     expect(rows[0]).toMatchObject({ collapsed: true, total: 4 });
     expect(rows.find((r) => r.id === favorite.key)).toMatchObject({ depth: 2, parentKey: middle.key });
+    expect(rows.find((r) => r.id === favorite.key)).toMatchObject({ lastChild: true });
   });
   it("removing a favorite hides it immediately without revealing siblings", () => {
     expect(keys(input(true, []))).toEqual([other.key]);

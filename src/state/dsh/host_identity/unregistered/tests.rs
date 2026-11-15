@@ -253,3 +253,180 @@ fn node_option_values_and_eval_modes_cannot_be_the_entry() {
         assert!(!native_host(&command), "{options:?}");
     }
 }
+
+#[test]
+fn a_registered_host_omitted_by_the_folder_bound_keeps_its_exact_proof() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("tmux")).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "state::dsh::host_identity::unregistered::tests::bounded_registration_probe",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("HGS_STATE_DIR", root.path().join("state"))
+        .env("HGS_CONFIG_DIR", root.path().join("config"))
+        .env("TMUX_TMPDIR", root.path().join("tmux"))
+        .env("HGS_TEST_BOUNDED_REGISTRATION", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn bounded_registration_probe() {
+    if std::env::var_os("HGS_TEST_BOUNDED_REGISTRATION").is_none() {
+        return;
+    }
+    struct Children(Vec<std::process::Child>);
+    impl Drop for Children {
+        fn drop(&mut self) {
+            for child in &mut self.0 {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    let mut children = Children(Vec::new());
+    let state = crate::state::storage::root();
+    let hosts = state.join("dsh/hosts");
+    std::fs::create_dir_all(&hosts).unwrap();
+    let mut homes = Vec::new();
+    for index in 0..=recorded::HOST_FOLDERS {
+        let home = format!("/fixture/native-home-{index}");
+        let folder = hosts.join(crate::state::dsh::host_key(&home));
+        std::fs::create_dir(&folder).unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        super::super::record_this_boot_for_test(&folder, child.id()).unwrap();
+        homes.push((home, folder, child.id()));
+        children.0.push(child);
+    }
+    let records = recorded::observable_records();
+    assert_eq!(records.len(), recorded::HOST_FOLDERS);
+    let (home, folder, pid) = homes
+        .iter()
+        .find(|(_, _, pid)| !records.iter().any(|r| r.named.pid == *pid))
+        .unwrap();
+    let exact = recorded::for_home(home).unwrap();
+    assert_eq!(exact.len(), 1);
+    let birth = exact[0].birth.clone().unwrap();
+    assert_eq!(exact[0].pid, *pid);
+    let chain = vec![Ancestor {
+        pid: *pid,
+        identity: Process {
+            parent: 1,
+            birth: Some(birth),
+        },
+        top: true,
+    }];
+    let mut tokens = args("/fixture/node_modules/@deepseek-ai/dsh/lib/bin.js");
+    let at = tokens.iter().position(|v| v == b"--patch").unwrap() + 1;
+    tokens[at] = folder
+        .join("hgs.patch.json")
+        .to_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    assert_eq!(
+        detect(
+            &records,
+            &chain,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(false),
+        "a prefix cannot establish that the exact recorded native host is unregistered"
+    );
+    let mut wrong_birth = chain.clone();
+    wrong_birth[0].identity.birth = Some("different-birth".into());
+    assert_eq!(
+        detect(
+            &records,
+            &wrong_birth,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+    let mut wrong_pid = chain.clone();
+    wrong_pid[0].pid = i32::MAX as u32;
+    assert_eq!(
+        detect(
+            &records,
+            &wrong_pid,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+    let mut foreign = tokens.clone();
+    foreign[at] = state
+        .join("outside")
+        .join(folder.file_name().unwrap())
+        .join("hgs.patch.json")
+        .to_str()
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    assert_eq!(
+        detect(
+            &records,
+            &chain,
+            |_| Some(foreign.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+    let file = folder.join("host.identity.json");
+    std::fs::write(&file, b"{").unwrap();
+    assert_eq!(
+        detect(
+            &records,
+            &chain,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+    super::super::record_this_boot_for_test(folder, *pid).unwrap();
+    let moved = state.join("held-host");
+    std::fs::rename(folder, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, folder).unwrap();
+    assert_eq!(
+        detect(
+            &records,
+            &chain,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+    std::fs::remove_file(folder).unwrap();
+    std::fs::rename(&moved, folder).unwrap();
+    // The same bounded prefix must still refuse an actually unregistered host.
+    std::fs::remove_file(folder.join("host.identity.json")).unwrap();
+    assert_eq!(
+        detect(
+            &records,
+            &chain,
+            |_| Some(tokens.clone()),
+            native_host,
+            || Ok(())
+        ),
+        Ok(true)
+    );
+}

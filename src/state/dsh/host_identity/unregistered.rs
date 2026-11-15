@@ -42,6 +42,15 @@ fn detect(
             continue;
         };
         if native(&tokens) {
+            // The healthy global scan may be only a bounded prefix. Absence
+            // there cannot override this exact native PID/birth registration.
+            // This withholds only the extra refusal; ordinary proof still runs.
+            if recorded::for_patch(&tokens)
+                .iter()
+                .any(|record| record.pid == process.pid && record.birth.as_deref() == Some(birth))
+            {
+                return Ok(false);
+            }
             recheck()?;
             if read(process.pid).as_ref() != Some(&tokens) {
                 return Err(Refusal::UnreadableAncestry);

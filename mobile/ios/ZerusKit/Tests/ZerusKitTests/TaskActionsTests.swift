@@ -293,4 +293,45 @@ final class TaskActionsTests: XCTestCase {
         XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
     }
 
+    private nonisolated static func awaitPrivateOriginal(_ gate: DispatchSemaphore) -> Bool { gate.wait(timeout: .now() + 10) == .success }
+    func testCancellingAfterOriginalPostKeepsUnknownHold() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Original requirement")
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        computer.update { $0.receipts["task_send"] = { _ in
+            entered.signal()
+            guard Self.awaitPrivateOriginal(release) else { XCTFail("The private original-result gate did not settle"); return ("uncertain", .null, "Private gate timeout") }
+            return ("completed", [:], .null)
+        } }
+        let connection = connection, key = key
+        let original = Task { await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api") }
+        let started = await Task.detached { Self.awaitPrivateOriginal(entered) }.value
+        XCTAssertTrue(started); original.cancel(); release.signal(); _ = await original.value
+        let held = await sync.held(task.uuid); XCTAssertTrue(held)
+        let repeated = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = repeated else { return XCTFail("A cancelled posted original is not new Send authority") }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
+    }
+    func testBoundedUnknownSettlementAdvancesWhileNewHoldsArrive() async throws {
+        let (computer, _, sync) = try world()
+        let tasks = try (1...65).map { try computer.store.filed("Requirement \($0)") }
+        computer.update { $0.receipts["task_send"] = { _ in ("uncertain", .null, "Unknown private outcome") } }
+        for task in tasks {
+            let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+            guard case .uncertain = result else { return XCTFail("Expected an original unknown outcome") }
+        }
+        let ordered = tasks.map(\.uuid).sorted(), refused = Array(ordered.prefix(64)), last = try XCTUnwrap(ordered.last)
+        computer.update { $0.modifyExchange = { Self.refusing($0, refused) } }
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let firstHeld = await sync.held(last); XCTAssertTrue(firstHeld)
+        let arrival = try computer.store.filed("New requirement")
+        let arrivalResult = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: arrival.uuid, session: "codex/api")
+        guard case .uncertain = arrivalResult else { return XCTFail("Expected an arriving original unknown") }
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let lastHeld = await sync.held(last); XCTAssertFalse(lastHeld)
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let arrivalHeld = await sync.held(arrival.uuid); XCTAssertFalse(arrivalHeld)
+        for task in refused { let held = await sync.held(task); XCTAssertTrue(held) }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 66)
+    }
+
 }

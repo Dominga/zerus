@@ -8,11 +8,21 @@ import ZerusReplica
 /// Real encrypted client transport; this private peer scripts outcomes, never native input.
 final class TaskRequestNegotiationTests: XCTestCase {
     private let hostKey = MachineKey(connectionId: "workspace-a", computerId: "computer-1")
+    private final class Features: Sendable {
+        let value: Mutex<[MachineKey: Set<String>]>
+        init(_ value: [MachineKey: Set<String>]) { self.value = Mutex(value) }
+        func read() -> [MachineKey: Set<String>] { value.withLock { $0 } }
+        func clear() { value.withLock { $0.removeAll() } }
+    }
     private final class World: Sendable {
         let connection: Connection, key: ProjectKey, sync: TaskSync, task: String
         let calls = Mutex<[JSONObject]>([]), outcome = Mutex("completed")
-        init(_ connection: Connection, _ key: ProjectKey, _ sync: TaskSync, _ task: String) {
+        let beforeSend = Mutex<(@Sendable () throws -> Void)?>(nil)
+        let modifyExchange = Mutex<(@Sendable (JSONObject) -> JSONObject)?>(nil)
+        let computer: TaskStore, replicas: TaskReplicas, features: Features
+        init(_ connection: Connection, _ key: ProjectKey, _ sync: TaskSync, _ task: String, _ computer: TaskStore, _ replicas: TaskReplicas, _ features: Features) {
             self.connection = connection; self.key = key; self.sync = sync; self.task = task
+            self.computer = computer; self.replicas = replicas; self.features = features
         }
         func payloads(_ operation: String) -> [JSONObject] { calls.withLock { $0.filter { $0.string("operation") == operation }.compactMap { $0.object("payload") } } }
     }
@@ -43,9 +53,9 @@ final class TaskRequestNegotiationTests: XCTestCase {
         let computer = TaskStore(root: root.appendingPathComponent("computer").path, project: key.id, projectName: "Fixture")
         let task = try computer.filed("Private requirement")
         let replicas = try TaskReplicas(root: root.appendingPathComponent("phone"))
-        let advertised = features ?? [hostKey: ["task_session_identity_v2"]]
-        let sync = TaskSync(client: RelayClient(session: StubProtocol.client().session, workspaceJournal: journal), replicas: replicas, capabilities: { advertised })
-        let world = World(connection, key, sync, task.uuid)
+        let advertised = Features(features ?? [hostKey: ["task_session_identity_v2"]])
+        let sync = TaskSync(client: RelayClient(session: StubProtocol.client().session, workspaceJournal: journal), replicas: replicas, capabilities: { advertised.read() })
+        let world = World(connection, key, sync, task.uuid, computer, replicas, advertised)
         StubProtocol.reset { request in
             do {
                 if request.url.path == "/v2/membership" {
@@ -61,10 +71,13 @@ final class TaskRequestNegotiationTests: XCTestCase {
                 } else { clear = outer }
                 world.calls.withLock { $0.append(clear) }
                 let operation = clear.string("operation"), payload = clear.object("payload") ?? [:]
+                if operation == "task_send" { try world.beforeSend.withLock { $0 }?() }
                 let state = operation == "task_send" ? world.outcome.withLock { $0 } : "completed"
                 let result: JSON
                 switch operation {
-                case "task_exchange": result = try JSON.parse(computer.answerExchange(request: JSON.object(payload).compact))
+                case "task_exchange":
+                    let answer = try XCTUnwrap(JSON.parse(computer.answerExchange(request: JSON.object(payload).compact)).object)
+                    result = .object(world.modifyExchange.withLock { $0 }?(answer) ?? answer)
                 case "task_done": result = ["schema": 1, "tasks": [], "next": .null, "total": 0, "recent": 0, "damaged": 0]
                 default: result = .null
                 }
@@ -131,5 +144,68 @@ final class TaskRequestNegotiationTests: XCTestCase {
             XCTAssertEqual(payload.int("schema"), 2); XCTAssertEqual(payload.object("session")?.string("session_id"), "launch_id:original")
         }
     }
+    private func largeMedia(_ w: World) async throws -> Data {
+        try await w.sync.exchangeNow(w.connection, w.key, name: "Fixture", computerId: "computer-1")
+        var state: UInt64 = 7
+        let data = Data((0..<(900 * 1024)).map { _ -> UInt8 in
+            state ^= state << 13; state ^= state >> 7; state ^= state << 17
+            return UInt8(truncatingIfNeeded: state)
+        })
+        let phone = w.replicas.store(w.key, name: "Fixture"), original = try phone.get(reference: w.task)
+        _ = try phone.editContent(reference: w.task, text: original.text, kept: [], files: [TaskMediaInput(name: "fixture.png", mime: "image/png", data: data, reference: "")], expectedRevision: original.contentRevision)
+        w.calls.withLock { $0 = [] }
+        return data
+    }
+    private func uploadFrames(_ w: World) -> [Data] {
+        w.payloads("task_exchange").flatMap { $0.objects("updates") }.compactMap { Data(base64Encoded: $0.string("bytes")) }
+            .filter { $0.starts(with: Data("ZERUSUP1".utf8)) }
+    }
+    private static func verifyMedia(_ computer: TaskStore, _ task: String, _ data: Data) throws {
+        let media = try XCTUnwrap(computer.media(reference: task, entry: nil).only)
+        XCTAssertEqual(try computer.readMedia(reference: task, entry: nil, index: 0, expectedToken: media.token).data, data)
+    }
+    func testAdvertisedUploadDeliversEveryByteBeforeNativeAction() async throws {
+        try await world(features: [hostKey: ["task_media_upload_v1", "task_session_identity_v2"]]) { w in
+            let data = try await largeMedia(w), computer = w.computer, task = w.task, before = Mutex(0)
+            w.beforeSend.withLock { $0 = { try Self.verifyMedia(computer, task, data); before.withLock { $0 += 1 } } }
+            let result = await send(w); XCTAssertEqual(result, .done)
+            XCTAssertEqual(before.withLock { $0 }, 1); XCTAssertGreaterThanOrEqual(uploadFrames(w).count, 2)
+            try Self.verifyMedia(computer, task, data)
+            XCTAssertEqual(w.payloads("task_send").first?.int("schema"), 2)
+        }
+    }
+    func testDownlevelOrForeignUploadFeatureKeepsMediaWithoutSending() async throws {
+        for features: [MachineKey: Set<String>] in [[:], [MachineKey(connectionId: "workspace-a", computerId: "other"): ["task_media_upload_v1"]], [MachineKey(connectionId: "other", computerId: "computer-1"): ["task_media_upload_v1"]]] {
+            try await world(features: features) { w in
+                _ = try await largeMedia(w)
+                let result = await send(w); guard case .refused = result else { return XCTFail("Missing host opt-in must refuse before the action") }
+                XCTAssertTrue(w.payloads("task_send").isEmpty); XCTAssertTrue(uploadFrames(w).isEmpty)
+                XCTAssertTrue(try w.computer.media(reference: w.task, entry: nil).isEmpty)
+                XCTAssertEqual(try w.replicas.store(w.key, name: "Fixture").media(reference: w.task, entry: nil).count, 1)
+            }
+        }
+    }
+    func testWrongUploadAcknowledgementCannotFallbackOrRunAnAction() async throws {
+        try await world(features: [hostKey: ["task_media_upload_v1"]]) { w in
+            _ = try await largeMedia(w)
+            w.modifyExchange.withLock { $0 = { answer in
+                guard let ack = answer.object("upload") else { return answer }
+                return answer.putting("upload", .object(ack.putting("offset", .int(Int64(ack.int("offset") + 1)))))
+            } }
+            let result = await send(w); guard case .refused = result else { return XCTFail("A mismatched frame acknowledgement must refuse") }
+            XCTAssertEqual(uploadFrames(w).count, 1); XCTAssertTrue(w.payloads("task_send").isEmpty)
+            XCTAssertTrue(try w.computer.media(reference: w.task, entry: nil).isEmpty)
+        }
+    }
+    func testUploadModeRemainsBoundAfterAdvertisementChanges() async throws {
+        try await world(features: [hostKey: ["task_media_upload_v1", "task_session_identity_v2"]]) { w in
+            let data = try await largeMedia(w), features = w.features, computer = w.computer, task = w.task
+            w.modifyExchange.withLock { $0 = { answer in if answer["upload"] != nil { features.clear() }; return answer } }
+            w.beforeSend.withLock { $0 = { try Self.verifyMedia(computer, task, data) } }
+            let result = await send(w); XCTAssertEqual(result, .done)
+            XCTAssertGreaterThanOrEqual(uploadFrames(w).count, 2); XCTAssertTrue(features.read().isEmpty)
+        }
+    }
+
 }
 private extension Array { var only: Element? { count == 1 ? first : nil } }

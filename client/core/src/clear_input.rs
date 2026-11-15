@@ -24,6 +24,9 @@ pub struct ComposerState {
     pub text: String,
     pub clearable: bool,
     pub reason: String,
+    /// An exact input the person may review; absent on older or remote peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::input_acknowledgment::PendingInput>,
 }
 
 /// What the clear did.
@@ -128,6 +131,21 @@ pub fn parse_composer(exit: &Exit, target: &Target, request_id: &str) -> Option<
         text: text.chars().take(TEXT_CHARS).collect(),
         clearable: composer["clearable"].as_bool()? && state == "text" && !text.trim().is_empty(),
         reason: composer["reason"].as_str().unwrap_or_default().to_owned(),
+        recovery: if state == "empty" && value["conversation_id"] == target.conversation_id {
+            serde_json::from_value::<crate::input_acknowledgment::PendingInput>(
+                composer["recovery"].clone(),
+            )
+            .ok()
+            .filter(|v| {
+                crate::input_acknowledgment::canonical(&v.original_request_id)
+                    && v.pending_at.is_finite()
+                    && v.pending_at > 0.0
+                    && !target.conversation_id.is_empty()
+                    && target.computer.is_empty()
+            })
+        } else {
+            None
+        },
     })
 }
 
@@ -183,6 +201,38 @@ mod tests {
         }
     }
     const BINDING: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn recovery_is_local_and_bound_to_the_known_conversation() {
+        let answer = json!({"request_id":ID,"name":"claude/p/s","run_id":"r","conversation_id":"c",
+            "status":"composer","terminal_binding_id":BINDING,"composer":{"state":"empty","text":"","clearable":false,
+            "recovery":{"original_request_id":ID,"pending_at":100.0}}});
+        assert!(parse_composer(&exit(answer.clone()), &target(""), ID)
+            .unwrap()
+            .recovery
+            .is_some());
+        assert!(parse_composer(&exit(answer.clone()), &target("peer"), ID)
+            .unwrap()
+            .recovery
+            .is_none());
+        for (field, value) in [
+            ("conversation_id", json!("other")),
+            ("conversation_id", json!("")),
+        ] {
+            let mut changed = answer.clone();
+            changed[field] = value;
+            assert!(parse_composer(&exit(changed), &target(""), ID)
+                .unwrap()
+                .recovery
+                .is_none());
+        }
+        let mut changed = answer;
+        changed["composer"]["recovery"]["original_request_id"] = json!("not-a-request");
+        assert!(parse_composer(&exit(changed), &target(""), ID)
+            .unwrap()
+            .recovery
+            .is_none());
+    }
 
     #[test]
     fn requests_name_the_session_binding_and_exact_text() {

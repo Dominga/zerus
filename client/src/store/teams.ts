@@ -73,6 +73,8 @@ export interface TeamView {
   /** Complete bounded goal for the editor, distinct from the bar preview. */
   edit_goal?: string | null;
   member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
+  /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
+  settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */
   after?: string | null;
@@ -298,6 +300,9 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   /** The list pages by the cursor they were read from ("" is the first),
    * replaced by every read of that page and pruned to the chain from the first. */
   const [listPagesBy, setListPagesBy] = createSignal<ReadonlyMap<string, ListPage>>(new Map());
+  /** One current browser page, independent of the five-page session lookup.
+   * Explicit paging can go further without accumulating more lookup pages. */
+  const [listPage, setListPage] = createSignal<TeamList>();
   const [waitingView, setWaitingView] = createSignal<WaitingView>();
   /** The last first page of Waiting: the rail counts it, never a later page. */
   const [waitingFirst, setWaitingFirst] = createSignal<WaitingView>();
@@ -316,8 +321,9 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const [confirmation, setConfirmation] = createSignal<{ call: TeamCall; confirmation: TeamConfirmation } | null>(null);
   /** Every call whose result is unknown, bounded and never evicted by another. */
   const [unresolved, setUnresolved] = createSignal<UnresolvedCall[]>([]);
-  /** The request ids whose invoke is in flight: each holds an admitted slot. */
-  const [sending, setSending] = createSignal<readonly string[]>([]);
+  /** Each in-flight request holds a slot and the team whose controls it locks. */
+  const [inFlight, setInFlight] = createSignal<ReadonlyMap<string, string>>(new Map());
+  const sending = () => [...inFlight().keys()];
   const [createIntent, setCreateIntent] = createSignal<CreateIntent | null>(null);
   /** Resolvers by team id, for the decisions that wait for that team's revision. */
   const pendingViews = new Map<string, Set<(view: TeamView | null) => void>>();
@@ -333,7 +339,8 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   let followGeneration = 0;
   let lastFollow: TeamFollow | undefined;
 
-  const busy = () => sending().length > 0;
+  const busy = (teamId?: string) => teamId === undefined
+    ? inFlight().size > 0 : [...inFlight().values()].includes(teamId);
   const unresolvedOf = (requestId: string) => unresolved().find((entry) => entry.call.request_id === requestId);
   function putUnresolved(call: TeamCall, detail: string, state: UnresolvedCall["state"]) {
     setUnresolved([...unresolved().filter((entry) => entry.call.request_id !== call.request_id), { call, detail, state }]);
@@ -402,7 +409,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     stopped = true;
     batch(() => {
       setAvailable(false); setOff(code === "unavailable" ? "unavailable" : "inactive");
-      setListPagesBy(new Map()); setTeam(undefined); setWaitingView(undefined); setWaitingFirst(undefined);
+      setListPagesBy(new Map()); setListPage(undefined); setTeam(undefined); setWaitingView(undefined); setWaitingFirst(undefined);
     });
     requestedPages.clear();
     listSelected = null;
@@ -418,6 +425,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
    * refresh, or a stale page read again) or is the chain's next cursor within
    * the bound; a page of no cursor in the chain, or one that left it, is not. */
   function applyList(view: TeamList) {
+    if ((view.after ?? null) === listSelected) setListPage(view);
     const key = view.after ?? "";
     const pages = new Map(listPagesBy());
     if (key !== "") {
@@ -602,7 +610,20 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     await follow(scope());
   }
   async function tasksChanged() { if (followed() && !stopped) await transport.tasksChanged(); }
-  async function page(key: string, cursor: string | null) { if (!stopped) await transport.page(key, cursor); }
+  async function page(key: string, cursor: string | null) {
+    if (stopped) return;
+    const before = listSelected;
+    if (key === "list") listSelected = cursor;
+    try { await transport.page(key, cursor); }
+    catch (error) { if (key === "list" && listSelected === cursor) listSelected = before; throw error; }
+  }
+  /** Browsing and leaving the Teams screen restore the already-followed first page. */
+  async function firstListPage() {
+    if (!stopped && (listSelected !== null || listPage()?.after)) {
+      requestedPages.clear();
+      await page("list", null);
+    }
+  }
 
   // ------------------------------------------------------------- waiting
 
@@ -760,7 +781,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     return send(call, source, () => transport.actAgain(call));
   }
   async function send(call: TeamCall, source: string, act: () => Promise<TeamOutcome>): Promise<TeamOutcome> {
-    setSending([...sending(), call.request_id]);
+    setInFlight((old) => new Map(old).set(call.request_id, call.team));
     try {
       const outcome = await act();
       return accept(call, outcome, source);
@@ -769,7 +790,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
       putUnresolved(call, detail, "uncertain");
       return { outcome: "uncertain", detail, request_id: call.request_id };
     } finally {
-      setSending(sending().filter((id) => id !== call.request_id));
+      setInFlight((old) => { const next = new Map(old); next.delete(call.request_id); return next; });
     }
   }
   function accept(call: TeamCall, outcome: TeamOutcome, source: string): TeamOutcome {
@@ -833,7 +854,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const listNext = () => chainOf(listPagesBy()).next;
 
   return {
-    list, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending,
+    list, listPage, firstListPage, listed, listPages, listNext, team, failure, available, off, followed, visible, catalog, catalogError, newTeamOpen, confirmation, unresolved, uncertain, busy, sending,
     waitingView, waitingCount, waitingLater, apply, probe, recheck, hidden, openTeam, closeTeam, tasksChanged, page, openWaiting, pageWaiting, firstWaitingPage, decide, revisionOf,
     teamOfSession, summaryOf, unresolvedOf, failureFor, readFailureFor, preview, openNewTeam, closeNewTeam, reloadCatalog, createIntent, claimCreate, saveTemplate, project, run, runAgain, confirm, cancelConfirmation, check, dismiss, clearFailure,
   };

@@ -254,7 +254,7 @@ fn diagnostic_refusal(closed: &Closed, detail: &str, project: &str, label: Optio
             let label = label.map(|label| format!("{label:?}")).unwrap_or_else(|| "unavailable".into());
             text.push_str(&format!(" Computer {node} (catalog label, diagnostic only: {label})."));
         }
-        text.push_str(" An offline computer that once wrote this project's tasks blocks new starts until it is reachable again.");
+        text.push_str(" Absent computers do not block starts on reachable computers. This computer must finish its automatic task cutover before starting.");
         text.push_str(&format!(" For details: hgs task cutover --project {} --json", crate::platform::quote(project)));
     }
     (code, text)

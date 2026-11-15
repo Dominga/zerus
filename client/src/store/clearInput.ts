@@ -1,6 +1,6 @@
 import { createRoot, createSignal } from "solid-js";
 import * as bridge from "../bridge";
-import type { ClearOutcome, ComposerState } from "../bridge";
+import type { AcknowledgmentOutcome, ClearOutcome, ComposerState, PendingInput } from "../bridge";
 import type { ComposerView, Target } from "../types";
 import type { Session } from "../ui/sessions/types";
 import { draftKey } from "./draftKeys";
@@ -14,6 +14,7 @@ import { draftKey } from "./draftKeys";
 export interface ClearInputPort {
   read(target: Target): Promise<ComposerState | null>;
   clear(target: Target, binding: string, text: string): Promise<ClearOutcome>;
+  acknowledge?(target: Target, binding: string, pending: PendingInput): Promise<AcknowledgmentOutcome>;
 }
 
 type Shown = Pick<Session, "key" | "catalogKey" | "computer" | "name" | "sessionId" | "status">;
@@ -46,6 +47,13 @@ export function clearableText(read: { key: string; composer: ComposerState } | u
   view: ComposerView | undefined, clearing: boolean): string | undefined {
   if (!read || !s || clearing || read.key !== s.key || !read.composer.clearable || s.status === "working" || delivering(view, s)) return undefined;
   return read.composer.text;
+}
+
+export function recoverableInput(read: { key: string; composer: ComposerState } | undefined, s: Shown | undefined,
+  view: ComposerView | undefined, clearing: boolean): PendingInput | undefined {
+  if (!read || !s || s.computer || clearing || read.key !== s.key || read.composer.state !== "empty"
+    || s.status === "working" || delivering(view, s)) return undefined;
+  return read.composer.recovery;
 }
 
 const same = (a: Target, b: Target) => a.computer === b.computer && a.name === b.name && a.run_id === b.run_id && a.conversation_id === b.conversation_id;
@@ -111,7 +119,23 @@ export function createClearInput(port: ClearInputPort) {
         void refresh(true);
       }
     },
+    async acknowledge(key: string, pending: PendingInput, allowed: () => PendingInput | undefined): Promise<AcknowledgmentOutcome | undefined> {
+      const at = current, read = state(), offered = allowed();
+      if (!at || at.key !== key || !read || read.key !== key || clearing() || read.composer.state !== "empty" || !port.acknowledge
+        || offered?.original_request_id !== pending.original_request_id || offered.pending_at !== pending.pending_at
+        || read.composer.recovery?.original_request_id !== pending.original_request_id || read.composer.recovery.pending_at !== pending.pending_at) return undefined;
+      setClearing(true);
+      try {
+        return await port.acknowledge(at.target, read.composer.binding, pending);
+      } catch (error) {
+        return { status: "unknown", error: String(error) };
+      } finally {
+        setClearing(false);
+        setState(undefined);
+        void refresh(true);
+      }
+    },
   };
 }
 
-export const clearInput = createRoot(() => createClearInput({ read: bridge.composerState, clear: bridge.clearInput }));
+export const clearInput = createRoot(() => createClearInput({ read: bridge.composerState, clear: bridge.clearInput, acknowledge: bridge.acknowledgeInput }));

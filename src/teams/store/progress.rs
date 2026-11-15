@@ -7,16 +7,17 @@ pub(crate) const COUNT_CAP: u32 = 1000;
 /// Existing owner-card kinds that say progress needs intervention. The actor
 /// uses team_actor_blocked for unreadable members and blocked service steps;
 /// silent_lead is its "Lead not working" timer. Approvals and questions do
-/// not establish Stuck, nor does a delivery_uncertain inbox item.
-pub(crate) const STUCK_KINDS: &[&str] = &[
+/// not establish Stuck, nor does a delivery_uncertain inbox item. The
+/// project_limit service item is read separately from the actor ledger.
+const STUCK_KINDS: &[&str] = &[
     "launch_blocked",
     "launch_uncertain",
-    "member_unreadable",
-    "handout_uncertain",
     "silent_lead",
     "team_actor_blocked",
-    "project_limit",
 ];
+
+/// The actor ledger keeps this blocker independently of an acknowledged card.
+pub(crate) const STUCK_SERVICE_KINDS: &[&str] = &["project_limit"];
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct TeamProgress {
@@ -103,7 +104,7 @@ pub(super) fn progress_sql(rows: usize) -> String {
     let task_count = |table: &str, accepted: bool| {
         format!(
         "(SELECT COUNT(*) FROM (SELECT 1 FROM {table} WHERE team=t.id AND COALESCE(json_extract(data,'$.kind'),'task')='task'{} LIMIT {cap}))",
-        if accepted { " AND node_state='accepted'" } else { "" })
+        if accepted { " AND node_state='accepted'" } else { " AND node_state IN ('draft','waiting','pending','in_progress','reported','accepted')" })
     };
     let count = |table: &str, predicate: &str| {
         format!(

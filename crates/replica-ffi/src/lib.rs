@@ -555,7 +555,7 @@ pub struct TaskStore {
 
 impl TaskStore {
     fn store(&self) -> Result<replica::ProjectStore> {
-        replica::ProjectStore::open_within(&self.root, &self.project, LOCK_WAIT)?
+        replica::ProjectStore::open_phone_within(&self.root, &self.project, LOCK_WAIT)?
             .ok_or_else(|| ReplicaError::Failed("the project's tasks are busy; try again".into()))
     }
 
@@ -826,6 +826,18 @@ impl TaskStore {
     /// hold (a Done task the person opens); each then stays with the phone.
     pub fn exchange_fetching(self: Arc<Self>, tasks: Vec<String>) -> Arc<TaskExchange> {
         let mut exchange = replica::phone::Exchange::new();
+        exchange.fetch(tasks);
+        Arc::new(TaskExchange {
+            store: self,
+            state: Mutex::new(exchange),
+        })
+    }
+
+    /// Opt-in uploads for the exact host advertising task_media_upload_v1.
+    /// Old hosts keep exchange/exchange_fetching; never downgrade an in-flight
+    /// upload or turn an uncertain document exchange into native Send.
+    pub fn exchange_uploading(self: Arc<Self>, tasks: Vec<String>) -> Arc<TaskExchange> {
+        let mut exchange = replica::phone::Exchange::with_uploads();
         exchange.fetch(tasks);
         Arc::new(TaskExchange {
             store: self,

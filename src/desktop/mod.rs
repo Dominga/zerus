@@ -42,6 +42,7 @@ mod not_admitted;
 mod owner;
 mod ownership;
 mod pending_reads;
+pub(crate) mod input_acknowledgment;
 pub(crate) mod portable_frontend;
 mod presence_admission;
 mod presence_worker;
@@ -1147,6 +1148,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                             ),
                                         }
                                     }
+                                    Ok(request) if request.operation() == "input_acknowledge" => {
+                                        runtime.acknowledge_input(request, epoch.clone(), queue.clone(), seq);
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
+                                    }
                                     // The reference form prepares off the actor and
                                     // answers later on this same connection.
                                     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1262,6 +1269,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_required",
                             )
+                        } else if hello.request.as_ref().is_some_and(|v| v["op"] == "input_acknowledge_result") {
+                            input_acknowledgment::query(hello.request.as_ref().unwrap())
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
@@ -1433,6 +1442,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 v["op"].as_str(),
                                 Some(
                                     "creation_clone"
+                                        | "input_acknowledge"
                                         | "creation_worktree"
                                         | "creation_launch"
                                         | "task_message"

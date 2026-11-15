@@ -185,3 +185,48 @@ describe("the Teams store", () => {
     expect(teams.listPages()).toHaveLength(1);
   });
 });
+
+// Product-written list pages, including the final empty EOF page. Their Rust
+// producer pins the wire cursors and core views in teams_screen.rs.
+import screenFixture from "../ui/screens/fixtures/teams-screen.json";
+import type { TeamList } from "./teams";
+const screenPages = screenFixture.pages as unknown as TeamList[];
+
+it("keeps one selected browser page beyond the lookup cache and ignores a late prior page", async () => {
+  const { transport, calls } = fake(), teams = createTeams(transport);
+  const apply = (page: TeamList) => teams.apply([entry("list", "list", page)]);
+  apply(screenPages[0]);
+  for (const page of screenPages.slice(1)) { await teams.page("list", page.after!); apply(page); }
+  expect(teams.listPages()).toHaveLength(5);
+  expect(teams.listPage()).toEqual(screenPages.at(-1));
+  await teams.firstListPage();
+  apply(screenPages[0]); apply(screenPages[6]);
+  expect(calls.pages.at(-1)).toEqual(["list", null]);
+  expect(teams.listPage()).toEqual(screenPages[0]);
+  expect(teams.list()).toEqual(screenPages[0]);
+});
+
+it("releases an interrupted lookup request when the browser resets its cursor", async () => {
+  const { transport, calls } = fake(), teams = createTeams(transport);
+  teams.apply([entry("list", "list", screenPages[0])]);
+  const ref = screenPages[1].teams[0].lead_session!;
+  const identity = { machine: ref.machine, launchId: ref.session_id.slice("launch_id:".length), runId: null };
+  expect(teams.teamOfSession(identity)).toMatchObject({ state: "unknown" });
+  expect(calls.pages.at(-1)).toEqual(["list", screenPages[0].next]);
+  await teams.firstListPage();
+  teams.apply([entry("list", "list", screenPages[0])]);
+  calls.pages.length = 0;
+  teams.teamOfSession(identity);
+  expect(calls.pages).toEqual([["list", screenPages[0].next]]);
+});
+
+it("restores the selected list cursor after a transport refusal", async () => {
+  const { transport, calls } = fake(), teams = createTeams(transport);
+  teams.apply([entry("list", "list", screenPages[0])]);
+  transport.page = async () => { throw new Error("private fixture refusal"); };
+  await expect(teams.page("list", screenPages[0].next)).rejects.toThrow("private fixture refusal");
+  transport.page = async (key, cursor) => { calls.pages.push([key, cursor]); };
+  await teams.firstListPage(); expect(calls.pages).toEqual([]);
+  teams.apply([entry("list", "list", screenPages[0])]);
+  expect(teams.listPage()).toEqual(screenPages[0]);
+});

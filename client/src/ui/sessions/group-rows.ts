@@ -8,7 +8,7 @@ import { agentTeamParents, agentTeamSession, orderTeamSessions, type AgentTeamMe
 export type Row =
   /** `project` is the project's id; `name` and the colour come from the organization's header. */
   | { type: "header"; id: string; project: string; name: string; color: string | null; palette: number; collapsed: boolean; total: number; attention: number; unread: number; working: number }
-  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean; agentTeamRole?: string; agentTeamName?: string; agentTeamSummary?: TeamSummary; agentTeamCollapsed?: boolean;
+  | { type: "card"; id: string; session: Session; expandable: boolean; expanded: boolean; compactRow: boolean; agentTeamRole?: string; agentTeamName?: string; agentTeamSummary?: TeamSummary;
       /** Nesting under parent sessions (zerus-sa9qn.2): 0 at top level. */
       depth?: number;
       /** The nested card's parent row key and whether it is its parent's last shown child. */
@@ -196,7 +196,7 @@ export function groupRows(input: ListInput): Row[] {
       const member = input.agentTeams?.get(s.key);
       const presentation = agentTeamSession(s, member, input.online(s));
       const shown = changed ? { ...presentation, subagents: kids } : presentation;
-      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, agentTeamCollapsed: member?.lead ? !!input.teamCollapsed?.(s.key) : undefined, ...extra, team });
+      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, ...extra, team });
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
   };
   // One project group's visible cards in rank order, child sessions nested

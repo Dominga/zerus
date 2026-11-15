@@ -36,7 +36,7 @@ class Activation(unittest.TestCase):
         self.assertEqual(compiled.returncode, 0, compiled.stderr)
         self.frontend.chmod(0o700)
 
-    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False, missing_reference=False, rendezvous=False):
+    def begin(self, operation='activation_wait', wrong_birth=False, marked=False, task_reconcile=False, sealed=None, wrong_config=False, wrong_attempt=False, wrong_frontend=False, termination=False, missing_reference=False, rendezvous=False, acknowledgment=None):
         if sealed is not None:
             # Hosted debuginfo can exceed the 256 MiB image bound. A private
             # stripped CLI normally supplies both service and relay; never raise
@@ -62,6 +62,9 @@ class Activation(unittest.TestCase):
         self.service, status = self.serve(background=True)
         attempt, request_id = str(uuid.uuid4()), str(uuid.uuid4())
         request = dict(op=operation, request_id=request_id)
+        if acknowledgment is not None:
+            request_id = acknowledgment['request_id']
+            request = dict(op='input_acknowledge', acknowledgment=acknowledgment)
         if task_reconcile:
             fixture=json.loads((Path(__file__).resolve().parents[1] / 'client/fixtures/desktop-operation-port-v1.json').read_text())
             record=json.loads(fixture['raw_record'])
@@ -120,7 +123,7 @@ class Activation(unittest.TestCase):
             hello['configuration'] = 'b' * 64
         if wrong_attempt:
             cached['attempt'] = str(uuid.uuid4())
-        if task_reconcile or termination:
+        if task_reconcile or termination or acknowledgment is not None:
             cached['ownership_mode']='service'
         for value in (envelope, dict(hello=hello, request=cached)):
             frontend.stdin.write(json.dumps(value, ensure_ascii=False, separators=(',', ':')) + '\n')

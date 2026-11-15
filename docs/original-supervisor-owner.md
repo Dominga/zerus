@@ -65,8 +65,10 @@ frames and unrelated native images refuse. The test observer has one absolute
 always `effect_authority: false`; no installed observer or effect consumer exists.
 
 A creation failure keeps its reservation. Unknown creation is not retried,
-including the legacy early-resume fallback. This single-original profile does
-not qualify an automatic replacement root. Any owned-mode reservation, including
+including the legacy early-resume fallback when a reservation is published
+while that first child runs. Its original exit evidence still commits without
+rewriting its identity or creating a replacement. This single-original profile
+does not qualify an automatic replacement root. Any owned-mode reservation, including
 malformed metadata or an already-exited root, refuses legacy root-only Terminate
 and archive finalization. Original exit evidence may still commit. Normal records
 without that field retain their existing lifecycle behavior.

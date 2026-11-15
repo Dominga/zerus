@@ -445,7 +445,7 @@ fn run_agent<C: supervisor::ChildStatus>(
             let current =
                 read_own_run(&name, &token)?.ok_or("session changed while launching agent")?;
             !string(&current, "conversation_id").is_empty() || current.get("pausing").is_some()
-                || terminating::pending(&current)
+                || terminating::pending(&current) || supervisor::owned_pending(&current)
         };
         let fallback = nonempty_env("HGS_FALLBACK_SECS")
             .unwrap_or_else(|| "5".into())

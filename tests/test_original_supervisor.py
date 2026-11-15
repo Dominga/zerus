@@ -28,6 +28,81 @@ class OriginalSupervisor(Base):
     def starts(self):
         return (self.root / 'original-starts').read_text().splitlines()
 
+    def failing_resume(self, publish_owner):
+        counter = '''with (home / 'original-starts').open('a') as f:
+    f.write(str(os.getpid()) + '\\n')
+'''
+        failure = '''
+if 'resume' in args or '--resume' in args:
+    import fcntl
+    state = pathlib.Path(os.environ['HGS_STATE_DIR'])
+    with (state / '.lock').open('ab') as writer:
+        fcntl.flock(writer, fcntl.LOCK_EX)
+        records = []
+        for path in state.rglob('*.json'):
+            try:
+                value = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(value, dict) and value.get('run_id') == os.environ['HGS_RUN_ID']:
+                records.append((path, value))
+        assert len(records) == 1, records
+        path, value = records[0]
+        if PUBLISH_OWNER:
+            value['original_owner'] = {'nonce': 'late-unknown-original', 'root': os.getpid()}
+            staged = path.with_suffix('.late-fixture')
+            staged.write_text(json.dumps(value))
+            staged.replace(path)
+        (home / 'failed-resume-original.json').write_text(json.dumps(value))
+    sys.exit(7)
+'''.replace('PUBLISH_OWNER', repr(publish_owner))
+        needle = 'args = sys.argv[1:]\n'
+        self.assertEqual(test_pause.AGENT.count(needle), 1)
+        self.script('codex', test_pause.AGENT.replace(needle, needle + counter + failure))
+
+    def test_late_owned_reservation_blocks_auto_continue_and_keeps_exit_evidence(self):
+        self.failing_resume(publish_owner=True)
+        name = 'codex/p/late-auto'
+        self.hgs('codex', 'p', '-n', 'late-auto', '-c', '-d')
+        self.wait(lambda: (self.root / 'failed-resume-original.json').exists())
+        self.wait(lambda: len(self.starts()) > 1 or self.binding(name).get('exited_at'))
+        self.assertEqual(len(self.starts()), 1, 'reserved original was replayed by auto-continue')
+        original = json.loads((self.root / 'failed-resume-original.json').read_text())
+        final = self.binding(name)
+        for key in ('original_owner', 'pid', 'process_start', 'run_id', 'session_id',
+                    'conversation_id', 'expected_id', 'startup_kind', 'transcript'):
+            self.assertEqual(final.get(key), original.get(key), key)
+        self.assertEqual(final['exit_code'], 7)
+        self.assertEqual(final['completion_source'], 'supervisor')
+        self.assertTrue(final['exited_at'])
+        self.assertFalse(list((self.root / 'state/archives').glob('*.json')))
+
+    def test_unreserved_early_resume_failure_still_starts_fresh(self):
+        self.failing_resume(publish_owner=False)
+        name = 'codex/p/fallback'
+        self.hgs('codex', 'p', '-n', 'fallback', '-c', '-d')
+        self.wait(lambda: (self.root / 'failed-resume-original.json').exists())
+        self.wait(lambda: len(self.starts()) == 2 and self.binding(name).get('activity') == 'idle')
+        record = self.binding(name)
+        self.assertNotIn('original_owner', record)
+        self.assertEqual(record['startup_kind'], 'new')
+        self.assertTrue(record['conversation_id'])
+        self.hgs('pause', name)
+        self.assertEqual(len(self.starts()), 2)
+
+    def test_known_conversation_resume_failure_still_keeps_one_original(self):
+        name = self.start('codex')
+        self.wait(lambda: self.binding(name).get('activity') == 'idle')
+        self.hgs('pause', name)
+        conversation = self.binding(name)['conversation_id']
+        self.failing_resume(publish_owner=False)
+        self.hgs('resume', name, '-d')
+        self.wait(lambda: (self.root / 'failed-resume-original.json').exists())
+        self.wait(lambda: self.binding(name).get('exited_at'))
+        self.assertEqual(len(self.starts()), 2)
+        self.assertEqual(self.binding(name)['conversation_id'], conversation)
+        self.assertEqual(self.binding(name)['exit_code'], 7)
+
     def test_default_route_creates_no_owner_metadata_or_endpoint_for_each_agent(self):
         for agent in ('claude', 'codex', 'kimi'):
             with self.subTest(agent=agent):

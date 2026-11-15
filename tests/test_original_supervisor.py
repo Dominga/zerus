@@ -4,6 +4,7 @@ import subprocess
 import sys
 import time
 import unittest
+import uuid
 
 import test_pause
 
@@ -110,6 +111,66 @@ if 'resume' in args or '--resume' in args:
             self.assert_reserved_exit(name, original)
         finally:
             (self.root / 'decision-release').touch()
+
+    def check_physical_spawn_barrier(self, restoring):
+        import fcntl
+        barrier = self.root / 'spawn-barrier.so'
+        subprocess.run(['cc', '-shared', '-fPIC',
+                        str(test_pause.REPO / 'tests/fixtures/supervisor_spawn_barrier.c'),
+                        '-ldl', '-o', str(barrier)], env=self.env, check=True, capture_output=True)
+        self.failing_resume(publish_owner=False)
+        self.env.update(LD_PRELOAD=str(barrier), G1_FALLBACK_BARRIER=str(self.root))
+        name = 'codex/p/physical-admission'
+        try:
+            self.hgs('codex', 'p', '-n', 'physical-admission', '-c', '-d')
+            self.wait(lambda: (self.root / 'decision-ready').exists())
+            selected = self.binding(name)
+            state = self.root / 'state'
+            with (state / '.lock').open('ab') as writer:
+                fcntl.flock(writer, fcntl.LOCK_EX)
+                records = [path for path in state.rglob('*.json') if self._same_record(path, selected)]
+                self.assertEqual(len(records), 1)
+                original = json.loads(records[0].read_text())
+                original['original_owner'] = {'nonce': 'physical-spawn-original', 'root': int(self.starts()[0])}
+                if restoring:
+                    archive_id = str(uuid.uuid4())
+                    saved = dict(original, archive_id=archive_id, run_id=str(uuid.uuid4()),
+                                 conversation_id=str(uuid.uuid4()))
+                    saved.pop('original_owner')
+                    folder = state / 'archives'
+                    folder.mkdir(exist_ok=True)
+                    archive = folder / (archive_id + '.json')
+                    archive.write_text(json.dumps(saved))
+                    archive_bytes = archive.read_bytes()
+                    original.update(restore_archive_id=archive_id, expected_id=saved['conversation_id'],
+                                    conversation_id=saved['conversation_id'], resume_pending=True)
+                staged = records[0].with_suffix('.fixture')
+                staged.write_text(json.dumps(original))
+                staged.replace(records[0])
+            (self.root / 'decision-release').touch()
+            self.wait(lambda: len(self.starts()) > 1 or subprocess.run(
+                [str(self.bin / 'tmux'), 'has-session', '-t', '=' + name],
+                env=self.env, capture_output=True).returncode != 0)
+            self.assertEqual(len(self.starts()), 1, 'reserved original was replayed at physical spawn')
+            final = self.binding(name)
+            self.assertTrue(final, 'failed Restore removed the reserved original binding')
+            for key in ('original_owner', 'pid', 'process_start', 'run_id', 'session_id',
+                        'conversation_id', 'expected_id', 'startup_kind', 'transcript',
+                        'restore_archive_id', 'resume_pending'):
+                self.assertEqual(final.get(key), original.get(key), key)
+            self.assertIn('Original creation still reserved', final['error'])
+            if restoring:
+                self.assertEqual(archive.read_bytes(), archive_bytes)
+        finally:
+            (self.root / 'decision-release').touch()
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux loader interleaving fixture')
+    def test_physical_spawn_rechecks_a_reservation_after_the_fallback_writer(self):
+        self.check_physical_spawn_barrier(restoring=False)
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux loader interleaving fixture')
+    def test_physical_spawn_refusal_keeps_the_owned_restore_binding_and_archive(self):
+        self.check_physical_spawn_barrier(restoring=True)
 
     def test_unreserved_early_resume_failure_still_starts_fresh(self):
         self.failing_resume(publish_owner=False)

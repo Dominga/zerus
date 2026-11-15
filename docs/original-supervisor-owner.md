@@ -6,8 +6,10 @@ environment variable, CLI command, saved record or channel request enables it.
 It adds no signal, input, Force, Terminating marker or worktree cleanup operation.
 G1 review is required before merge. Enabling it remains a separate reviewed change.
 
-The disabled route retains the existing `supervisor::spawn` body and actual
-`std::process::Child`. Static dispatch forwards the existing status/wait calls
+The disabled route retains the existing native creation operations and actual
+`std::process::Child`. Its fresh writer refuses an owned reservation before
+creating any child, including after the fallback writer has been released.
+Static dispatch forwards the existing status/wait calls
 of the Claude startup appearance executor and Kimi launch-prompt loop directly
 to that child. It creates no ownership endpoint or metadata and makes no
 subreaper or SIGCHLD policy change. Windows always follows that route.
@@ -74,6 +76,8 @@ does not qualify an automatic replacement root. Any owned-mode reservation, incl
 malformed metadata or an already-exited root, refuses legacy root-only Terminate
 and archive finalization. Original exit evidence may still commit. Normal records
 without that field retain their existing lifecycle behavior.
+The failed-Restore error path also keeps the reserved active binding and its
+saved archive; a refusal never clears the reservation to permit another launch.
 
 The private kernel harness is itself a fresh outer subreaper. It retains all
 fixture namespaces through normal and unwind settlement, drains only its owned

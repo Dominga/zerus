@@ -504,7 +504,7 @@ pub(super) fn confirm_restore(record: &mut Value) -> Result<()> {
 }
 
 pub(super) fn failed_restore(record: &mut Value) -> Result<bool> {
-    if terminating::pending(record) {
+    if terminating::pending(record) || supervisor::owned_pending(record) {
         return Ok(false);
     }
     // An accepted SessionStart already synced the active conversation. Retry

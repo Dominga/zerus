@@ -98,7 +98,7 @@ std::thread_local! {
 }
 
 mod refresh;
-pub(super) const INCOMPLETE: &str = refresh::INCOMPLETE;
+pub(crate) const INCOMPLETE: &str = refresh::INCOMPLETE;
 pub(super) fn incomplete(error: &str) -> bool {
     error.starts_with(INCOMPLETE) || error.starts_with("archive metadata index:")
 }
@@ -123,7 +123,14 @@ impl Drop for Catalog {
     }
 }
 fn pin(db: Connection) -> Result<Catalog> {
-    sql(db.execute_batch("BEGIN DEFERRED"))?;
+    pin_transaction(db, false)
+}
+fn pin_transaction(db: Connection, writing: bool) -> Result<Catalog> {
+    sql(db.execute_batch(if writing {
+        "BEGIN IMMEDIATE"
+    } else {
+        "BEGIN DEFERRED"
+    }))?;
     if !refresh::ready(&db)? {
         return Err(refresh::INCOMPLETE.into());
     }
@@ -139,6 +146,51 @@ pub(super) fn catalog() -> Result<Catalog> {
         refresh::request();
     }
     result
+}
+pub(super) fn writer_catalog() -> Result<Catalog> {
+    // Acquire SQLite's writer exclusion before publishing the native file,
+    // so a concurrent worker cannot invalidate this transaction's snapshot.
+    refresh::writer_catalog().and_then(|db| pin_transaction(db, true))
+}
+pub(super) fn published(db: Catalog, path: &Path) {
+    if refresh::published(&db, path, db.complete.get()).is_err() {
+        refresh::request();
+    }
+}
+
+/// Exact run lookup with complete native coverage, never an advisory SQL miss.
+/// The selected body is still read through the caller's original native root.
+pub(crate) fn find_run(state: &Path, name: &str, run: &str) -> Result<Option<String>> {
+    if crate::platform::canonical(state).map_err(|e| e.to_string())?
+        != crate::platform::canonical(&root()).map_err(|e| e.to_string())?
+    {
+        return Err("Archive lookup belongs to another state root".into());
+    }
+    let _guard = lock(None)?;
+    let db = catalog()?;
+    if refresh::proof(&db)? != db.directory {
+        return Err(INCOMPLETE.into());
+    }
+    let mut query = sql(db.prepare(
+        "SELECT substr(id,1,65) FROM archive_identities WHERE valid=1 AND name=? AND run=? ORDER BY id LIMIT 2",
+    ))?;
+    let ids = sql(query.query_map(params![name, run], |row| row.get::<_, String>(0)))?;
+    let ids = sql(ids.collect::<rusqlite::Result<Vec<_>>>())?;
+    if ids.len() > 1
+        || ids.iter().any(|id| {
+            !uuid::Uuid::parse_str(id).is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == *id)
+        })
+    {
+        return Err("No exact unique exit archive".into());
+    }
+    if let Some(id) = ids.first() {
+        let record = archive::read_archive(name, id)?;
+        if record["run_id"] != run {
+            return Err("The exact archive identity changed".into());
+        }
+    }
+    current_proof(&db)?;
+    Ok(ids.into_iter().next())
 }
 fn current_proof(db: &Catalog) -> Result<()> {
     if refresh::directory()? != db.directory {

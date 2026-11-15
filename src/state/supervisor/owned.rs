@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use std::os::unix::process::ExitStatusExt;
 use std::{io, marker::PhantomData, rc::Rc, time::Duration};
 mod channel;
+mod creation;
 mod native;
+pub(in crate::state) use creation::CreationSource;
 
 pub(in crate::state) struct Original {
     #[cfg(target_os = "linux")]
@@ -17,6 +19,7 @@ pub(in crate::state) struct Original {
     exit: Option<ExitStatus>,
     channel: channel::Channel,
     source: native::Source,
+    domain: terminating::OriginalDomain,
     binding: Value,
     startup: bool,
     unresolved: bool,
@@ -111,7 +114,7 @@ impl Original {
         // Continuity is the fixed ORIGINAL program path, not two policy
         // snapshots. There is no setter/attach API, arbitrary borrower or
         // consumer of generic Complete. Kernel/source checks can only revoke.
-        if !self.source.current() || !native::wait_policy() {
+        if !self.source.current() || !native::wait_policy() || self.domain.current().is_err() {
             self.unresolved = true;
         }
     }
@@ -127,6 +130,7 @@ impl Original {
             "original_owner"
         };
         let data = json!({"version":1,"binding":self.binding,"phase":phase,
+            "writer_domain":self.domain.observation(),
             "continuity":"fixed_original_program_only",
             "root_exit":self.exit.map(|s| ExitInfo::of(s).exit_code()),
             "descendant_coverage":if cfg!(target_os="linux") {"retained_linux_cohort"} else {"unproved"},
@@ -141,8 +145,8 @@ pub(in crate::state) fn spawn(
     run_id: &str,
 ) -> Result<Spawned<Original>> {
     // The const-false caller is the only production route. No env/setting/CLI.
-    let _guard = lock(None)?;
-    let mut record = read_own_run(name, run_id)?.ok_or("session changed while launching agent")?;
+    let until = std::time::Instant::now() + Duration::from_secs(30);
+    let (guard, source, mut record) = creation::begin(name, run_id, until)?;
     terminating::check_mutation(&record)?;
     if record.get("original_owner").is_some() {
         return Err("Original creation already reserved; review without replay".into());
@@ -150,9 +154,6 @@ pub(in crate::state) fn spawn(
     if !native::profile() {
         return Err("Original source profile is interposed".into());
     }
-    let state = absolute_root()?;
-    let config = crate::config::config_dir(&home().to_string_lossy());
-    let source = native::Source::capture(&state, &config).map_err(|e| e.to_string())?;
     let channel = channel::Channel::new().map_err(|e| e.to_string())?;
     let binding = json!({"session":record["session_id"],"run":run_id,
         "conversation":record["conversation_id"],"expected":record["expected_id"],
@@ -164,15 +165,19 @@ pub(in crate::state) fn spawn(
     }
     // Durable uncertainty BEFORE native creation. Any failure keeps this fence;
     // no drop, reconnect, status result or fallback clears/replays it.
-    record["original_owner"] = binding.clone();
-    write(&mut record)?;
+    creation::reserve(&source, &guard, &mut record, &binding, until)?;
+    let original = CreationSource::capture(&source, &guard, &record, until)?;
+    let domain = terminating::OriginalDomain::create(&original)?;
     #[cfg(target_os = "linux")]
     let prepared = processes::custody::Custody::prepare_original().map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     native::admit_root().map_err(|e| e.to_string())?;
-    let child = crate::platform::agent_command(argv)
-        .and_then(|mut command| zerus_client_core::child_environment::spawn(&mut command))
+    let mut command = crate::platform::agent_command(argv).map_err(|e| e.to_string())?;
+    original.check()?;
+    domain.current()?;
+    let child = zerus_client_core::child_environment::spawn(&mut command)
         .map_err(|error| format!("{}: {error}", argv[0]))?;
+    drop(original);
     let identity = crate::platform::process_identity(child.id());
     crate::platform::forward_shutdown(&child);
     record["pid"] = json!(child.id());
@@ -196,6 +201,7 @@ pub(in crate::state) fn spawn(
         exit: None,
         channel,
         source,
+        domain,
         binding,
         startup: true,
         unresolved: identity.is_none(),

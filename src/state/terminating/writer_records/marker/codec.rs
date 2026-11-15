@@ -215,7 +215,7 @@ pub(super) fn decode(value: &Value) -> Result<Data> {
 
 /// Preserve ordinary metadata, but never silently discard duplicate keys
 /// before validating the marker/source. Bound both recursion and node work.
-pub(super) fn record(bytes: &[u8]) -> Result<Value> {
+pub(in crate::state::terminating::writer_records) fn record(bytes: &[u8]) -> Result<Value> {
     if bytes.is_empty() || bytes.len() > RECORD_BYTES {
         return Err(super::super::REFUSED.into());
     }

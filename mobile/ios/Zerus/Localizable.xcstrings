@@ -1,0 +1,314 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "Saved execution": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сохранённое выполнение"
+          }
+        }
+      }
+    },
+    "Execution details unavailable.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Сведения о выполнении недоступны."
+          }
+        }
+      }
+    },
+    "Execution records conflict.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Записи о выполнении противоречат друг другу."
+          }
+        }
+      }
+    },
+    "Some attempt delivery is unknown.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Результат доставки одной или нескольких попыток неизвестен."
+          }
+        }
+      }
+    },
+    "Some execution history is unexplained.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Часть истории выполнения не объяснена."
+          }
+        }
+      }
+    },
+    "Legacy execution record": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запись о выполнении старого формата"
+          }
+        }
+      }
+    },
+    "This saved execution could not be refreshed.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось обновить сведения об этом сохранённом выполнении."
+          }
+        }
+      }
+    },
+    "No current attempt recorded.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Текущая попытка не зафиксирована."
+          }
+        }
+      }
+    },
+    "Attempt": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Попытка"
+          }
+        }
+      }
+    },
+    "Generation": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Поколение"
+          }
+        }
+      }
+    },
+    "Requirement revision": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Версия требований"
+          }
+        }
+      }
+    },
+    "Current requirement revision": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Текущая версия требований"
+          }
+        }
+      }
+    },
+    "Request": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Запрос"
+          }
+        }
+      }
+    },
+    "Recorded executor": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Зафиксированный исполнитель"
+          }
+        }
+      }
+    },
+    "Not recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не записано"
+          }
+        }
+      }
+    },
+    "Executor identity unresolved": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Идентификатор исполнителя не разрешён"
+          }
+        }
+      }
+    },
+    "Recorded at": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Время записи"
+          }
+        }
+      }
+    },
+    "Begin recorded at": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Время зафиксированного начала"
+          }
+        }
+      }
+    },
+    "Progress recorded at": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Время зафиксированного прогресса"
+          }
+        }
+      }
+    },
+    "Saved evidence only. Live execution state and executor queue are unavailable.": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Только сохранённые сведения. Текущее состояние выполнения и очередь исполнителя недоступны."
+          }
+        }
+      }
+    },
+    "Submitted — begin unconfirmed": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Отправлено — начало не подтверждено"
+          }
+        }
+      }
+    },
+    "Begin recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Начало зафиксировано"
+          }
+        }
+      }
+    },
+    "Pause recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пауза зафиксирована"
+          }
+        }
+      }
+    },
+    "Ready for review recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Готовность к проверке зафиксирована"
+          }
+        }
+      }
+    },
+    "Cancellation recorded": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Отмена зафиксирована"
+          }
+        }
+      }
+    },
+    "Not started": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не начато"
+          }
+        }
+      }
+    },
+    "Delivery unknown": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Результат доставки неизвестен"
+          }
+        }
+      }
+    },
+    "Begin unconfirmed": {
+      "extractionState": "manual",
+      "localizations": {
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Начало не подтверждено"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

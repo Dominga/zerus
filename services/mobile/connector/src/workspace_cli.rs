@@ -3,7 +3,9 @@ use crate::{
     error::{ConnectorError, Result},
     fsguard, private_state,
 };
-use serde_json::{json, Value};
+#[cfg(test)]
+use serde_json::json;
+use serde_json::Value;
 use std::{
     fs::File,
     io::{Read, Write},
@@ -88,27 +90,7 @@ fn read_at(directory: &File, name: &std::ffi::OsStr) -> Result<Option<Vec<u8>>> 
     read_bounded(file).map(Some)
 }
 pub fn read_config(path: &Path) -> Result<(Value, String)> {
-    let parent = path.parent().ok_or_else(refused)?;
-    if !parent.exists() {
-        return Ok((json!({}), String::new()));
-    }
-    #[cfg(unix)]
-    let bytes = read_at(&directory(parent)?, path.file_name().ok_or_else(refused)?)?;
-    #[cfg(windows)]
-    let bytes = match zerus_windows_private::open_file(path, false, false) {
-        Ok(file) => Some(read_bounded(file)?),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(refused()),
-    };
-    let revision = private_state::Store::revision(bytes.as_deref());
-    let value = match bytes {
-        Some(bytes) => serde_json::from_slice::<Value>(&bytes).map_err(|_| refused())?,
-        None => json!({}),
-    };
-    if !value.is_object() {
-        return Err(refused());
-    }
-    Ok((value, revision))
+    zerus_mobile_endpoint::configuration::read(path).map_err(Into::into)
 }
 pub fn replace_config(path: &Path, expected: &str, value: &Value) -> Result<String> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| refused())?;

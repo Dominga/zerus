@@ -4,4 +4,34 @@
     <string name="activity_reading_previous_own">Поиск ваших предыдущих сообщений…</string>
     <string name="activity_reading_next_own">Поиск ваших следующих сообщений…</string>
     <string name="session_name_unsafe">Имена не могут содержать синтаксис командной оболочки или невидимые символы форматирования.</string>
+
+    <!-- Saved task execution evidence; never native status or controls. -->
+    <string name="saved_execution">Сохранённое выполнение</string>
+    <string name="saved_execution_unavailable">Сведения о выполнении недоступны.</string>
+    <string name="saved_execution_conflict">Записи о выполнении противоречат друг другу.</string>
+    <string name="saved_execution_unknown">Результат доставки одной или нескольких попыток неизвестен.</string>
+    <string name="saved_execution_unexplained">Часть истории выполнения не объяснена.</string>
+    <string name="saved_execution_legacy">Запись о выполнении старого формата</string>
+    <string name="saved_execution_stale">Не удалось обновить сведения об этом сохранённом выполнении.</string>
+    <string name="saved_execution_no_current">Текущая попытка не зафиксирована.</string>
+    <string name="saved_execution_attempt">Попытка</string>
+    <string name="saved_execution_generation">Поколение</string>
+    <string name="saved_execution_requirement">Версия требований</string>
+    <string name="saved_execution_current_requirement">Текущая версия требований</string>
+    <string name="saved_execution_request">Запрос</string>
+    <string name="saved_execution_executor">Зафиксированный исполнитель</string>
+    <string name="saved_execution_not_recorded">Не записано</string>
+    <string name="saved_execution_unresolved">Идентификатор исполнителя не разрешён</string>
+    <string name="saved_execution_at">Время записи</string>
+    <string name="saved_execution_began">Время зафиксированного начала</string>
+    <string name="saved_execution_progress">Время зафиксированного прогресса</string>
+    <string name="saved_execution_footer">Только сохранённые сведения. Текущее состояние выполнения и очередь исполнителя недоступны.</string>
+    <string name="saved_execution_submitted">Отправлено — начало не подтверждено</string>
+    <string name="saved_execution_running">Начало зафиксировано</string>
+    <string name="saved_execution_paused">Пауза зафиксирована</string>
+    <string name="saved_execution_ready">Готовность к проверке зафиксирована</string>
+    <string name="saved_execution_cancelled">Отмена зафиксирована</string>
+    <string name="saved_execution_not_started">Не начато</string>
+    <string name="saved_execution_delivery_unknown">Результат доставки неизвестен</string>
+    <string name="saved_execution_unconfirmed">Начало не подтверждено</string>
 </resources>

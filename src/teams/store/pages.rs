@@ -146,7 +146,7 @@ impl Store {
         }
         let scope = format!("{team}:phases");
         let c = if let Some(c) = cursor {
-            if c.scope != scope {
+            if c.scope != scope || c.after > c.ceiling {
                 return Err(Problem::new(
                     code::INVALID_STATE,
                     "cursor belongs to another list",

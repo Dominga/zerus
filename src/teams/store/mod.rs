@@ -13,6 +13,7 @@ pub(crate) mod dependency_edit;
 mod holder;
 pub(crate) mod editing;
 mod disposition;
+pub(crate) mod drafts;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 pub use decision_state::DecisionState;
@@ -377,6 +378,7 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     handles_schema(db)?;
     key_clear_schema(db)?;
     card_parameters(db)?;
+    drafts::extend(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }

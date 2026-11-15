@@ -241,6 +241,8 @@ pub enum TeamOutcome {
         detail: String,
         #[serde(default, skip_serializing_if = "String::is_empty")]
         code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        field: Option<String>,
         request_id: String,
     },
     /// It may have been applied. Never sent again by the desktop by itself:

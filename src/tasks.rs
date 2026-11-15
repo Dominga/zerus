@@ -53,7 +53,9 @@ const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not recor
 
 // The Teams actor's measurement of a removed reviewer's stage (zerus-63rru.77).
 #[cfg(all(test, unix))]
-pub(crate) use team_deliver::{removed_stage_cancel, with_legacy_cancel, RealCancel};
+pub(crate) use team_deliver::{
+    fence_delivery_cycle, removed_stage_cancel, with_legacy_cancel, RealCancel,
+};
 
 /// Whether a failed send may have pasted its prompt: it was sent but not
 /// recorded, or its delivery is uncertain (the paste began, Enter or the
@@ -62,7 +64,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--team TEAM [--role ROLE] [--pipeline PIPELINE]] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent|team TEAM [--role ROLE] [--pipeline PIPELINE] [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | team-deliver REF --json [--recover-only] | team-done REF --json | team-clear REF --json | team-cancel REF --json | team-stage --json | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-attempt REF --attempt UUID [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | report-attempt REF --attempt UUID [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] [--query TEXT] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--team TEAM [--role ROLE] [--pipeline PIPELINE]] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent|team TEAM [--role ROLE] [--pipeline PIPELINE] [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | team-deliver REF --json [--recover-only] | team-done REF --json | team-clear REF --json | team-cancel REF --json | team-stage --json | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-attempt REF --attempt UUID [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | report-attempt REF --attempt UUID [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -362,6 +364,9 @@ const UNPROVEN_HOSTED_AGENT: &str = "a DeepSeek agent's tool call (HGS_AGENT=dsh
 /// to the session's current name. A send or cancel another computer forwards
 /// (`forwardable`) names its agent with `--agent NODE/SESSION`.
 fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
+    if crate::state::dsh::host_check() == crate::state::dsh::HostCheck::Unregistered {
+        return Err(fail(crate::state::dsh::UNREGISTERED_HOST));
+    }
     let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(agent) = option(args, "--agent")? {
         if !forwardable {
@@ -370,7 +375,9 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         if var("HGS_SESSION").is_some() && var("HGS_RUN_ID").is_some()
             || crate::state::session_graph::hosted_agent_call()
         {
-            return Err(fail("--agent is for commands another computer forwards; an agent acts as its own session"));
+            return Err(fail(
+                "--agent is for commands another computer forwards; an agent acts as its own session",
+            ));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -381,12 +388,16 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         }
         let (machine, session) = agent
             .split_once('/')
-            .filter(|(machine, session)| uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty())
+            .filter(|(machine, session)| {
+                uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty()
+            })
             .ok_or_else(|| fail("--agent is NODE/SESSION, NODE being a computer's identity"))?;
         return Ok(Actor::Agent(SessionKey {
             machine: machine.to_owned(),
             session: session.to_owned(),
-            session_id: option(args, "--agent-session-id")?.unwrap_or_default().into(),
+            session_id: option(args, "--agent-session-id")?
+                .unwrap_or_default()
+                .into(),
         }));
     }
     // A resident DeepSeek host's tool call is an agent's even without markers
@@ -742,7 +753,13 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
         return paged(config, args, (&id, &name), stage, limit, &mut machines);
     }
-    for paging in ["--after", "--before", "--if-revision", "--session"] {
+    for paging in [
+        "--after",
+        "--before",
+        "--if-revision",
+        "--session",
+        "--query",
+    ] {
         if option(args, paging)?.is_some() {
             return Err(fail(format!("{paging} needs --stage and --limit")));
         }
@@ -786,19 +803,12 @@ fn paged(
         .parse::<usize>()
         .ok()
         .filter(|n| (1..=index::MAX_LIMIT).contains(n))
-        .ok_or_else(|| fail(format!("--limit must be between 1 and {}", index::MAX_LIMIT)))?;
-    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
-        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
-        (Some(cursor), None) => {
-            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
-            index::Anchor::After(rank, uuid)
-        }
-        (None, Some(cursor)) => {
-            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
-            index::Anchor::Before(rank, uuid)
-        }
-        (None, None) => index::Anchor::Start,
-    };
+        .ok_or_else(|| {
+            fail(format!(
+                "--limit must be between 1 and {}",
+                index::MAX_LIMIT
+            ))
+        })?;
     let wanted = option(args, "--if-revision")?;
     // One session's view, by its identity (zerus-cg5h.26): never its name.
     let session = match (option(args, "--session")?, option(args, "--host")?) {
@@ -814,7 +824,37 @@ fn paged(
         (None, Some(_)) => return Err(fail("--host needs --session")),
         (None, None) => None,
     };
-    let filter = session.as_ref().map(|(scope, _)| scope);
+    let query = option(args, "--query")?
+        .map(str::trim)
+        .filter(|q| !q.is_empty());
+    if query.is_some_and(|q| q.len() > 1024 || q.chars().any(char::is_control)) {
+        return Err(fail(
+            "--query must be at most 1024 bytes without control characters",
+        ));
+    }
+    let searched = query.map(|query| {
+        index::Scope::searched(
+            session.as_ref().map(|(scope, _)| scope.clone()),
+            query,
+            name,
+        )
+    });
+    let filter = searched
+        .as_ref()
+        .or_else(|| session.as_ref().map(|(scope, _)| scope));
+    let cursor_project = filter.map_or_else(|| id.to_owned(), |scope| scope.cursor_project(id));
+    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
+        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
+        (Some(cursor), None) => {
+            let (rank, uuid) = index::parse_cursor(&cursor_project, stage, cursor)?;
+            index::Anchor::After(rank, uuid)
+        }
+        (None, Some(cursor)) => {
+            let (rank, uuid) = index::parse_cursor(&cursor_project, stage, cursor)?;
+            index::Anchor::Before(rank, uuid)
+        }
+        (None, None) => index::Anchor::Start,
+    };
     let store = store(config, id)?;
     let indexed = index::Index::open(&store).and_then(|mut index| {
         match indexed_page_in(&mut index, stage, limit, &anchor, wanted, filter) {
@@ -833,6 +873,9 @@ fn paged(
         if out.get("unchanged").is_none() {
             out["session"] = echo;
         }
+    }
+    if let Some(query) = query {
+        out["query"] = json!(query);
     }
     if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
         sessions::for_rows(config, machines, rows)?;
@@ -891,23 +934,12 @@ fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &ind
 
 /// `documents_page`, of one session's view when `filter` is set.
 fn documents_page_in(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>, filter: Option<&index::Scope>) -> Result<Value> {
-    let docs = documents(store)?;
-    Ok(match filter {
-        None => page_of(&docs, store.project_id(), stage, limit, anchor, wanted),
-        Some(scope) => page_of(&docs.only(scope), store.project_id(), stage, limit, anchor, wanted),
-    })
-}
-
-impl Documents {
-    /// The rows and counts of one session's view; damage and revision stay
-    /// the project's.
-    fn only(&self, scope: &index::Scope) -> Documents {
-        let rows: BTreeMap<&'static str, Vec<(String, String, Value)>> = self.rows.iter()
-            .map(|(stage, rows)| (*stage, rows.iter().filter(|row| scope.includes(&row.2)).cloned().collect::<Vec<_>>()))
-            .collect();
-        let counts = rows.iter().filter(|(_, rows)| !rows.is_empty()).map(|(stage, rows)| ((*stage).to_owned(), rows.len())).collect();
-        Documents { rows, counts, damaged: self.damaged.clone(), revision: self.revision.clone() }
-    }
+    let docs = documents_in(store, filter)?;
+    let project = filter.map_or_else(
+        || store.project_id().to_owned(),
+        |s| s.cursor_project(store.project_id()),
+    );
+    Ok(page_of(&docs, &project, stage, limit, anchor, wanted))
 }
 
 /// Every task document read once, for pages built without the index: each
@@ -920,6 +952,10 @@ struct Documents {
 }
 
 fn documents(store: &ProjectStore) -> Result<Documents> {
+    documents_in(store, None)
+}
+
+fn documents_in(store: &ProjectStore, filter: Option<&index::Scope>) -> Result<Documents> {
     use sha2::Digest;
     let (tasks, damaged) = store.listing().map_err(fail)?;
     let mut hash = sha2::Sha256::new();
@@ -928,8 +964,13 @@ fn documents(store: &ProjectStore) -> Result<Documents> {
     for task in &tasks {
         let view = task.view().map_err(fail)?;
         let (this, rank, uuid) = (view.stage, view.rank.clone(), view.uuid.clone());
-        let listed = index::capped(row(view, task.revision())?);
+        let listed = row(view, task.revision())?;
+        let included = filter.is_none_or(|scope| scope.includes(&listed));
+        let listed = index::capped(listed);
         hash.update(listed.to_string());
+        if !included {
+            continue;
+        }
         *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
         rows.entry(this.as_str()).or_default().push((rank, uuid, listed));
     }

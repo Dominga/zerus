@@ -170,12 +170,12 @@ class Exchange(test_tasks.DeliveryFixture):
         digests, answer = self.digests(), self.exchange(request)
         self.assertEqual(answer["digest"], digests["project-1"])
         self.assertFalse(cache.exists())
-        index = folder / "task-index-v2.sqlite3"
+        index = folder / "task-index-v3.sqlite3"
         self.assertTrue(index.exists())
 
         def remove():
             for suffix in ("", "-wal", "-shm"):
-                path = folder / f"task-index-v2.sqlite3{suffix}"
+                path = folder / f"task-index-v3.sqlite3{suffix}"
                 if path.is_dir():
                     path.rmdir()
                 elif path.exists():

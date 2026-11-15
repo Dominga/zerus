@@ -9,7 +9,7 @@ use std::{
 
 fn fixture() -> (tempfile::TempDir, native::Source) {
     let d = tempfile::tempdir().unwrap();
-    std::fs::create_dir(d.path().join("state")).unwrap();
+    crate::platform::private_dir(&d.path().join("state")).unwrap();
     std::fs::create_dir(d.path().join("config")).unwrap();
     let source =
         native::Source::capture(&d.path().join("state"), &d.path().join("config")).unwrap();
@@ -180,6 +180,7 @@ fn owned_mac_facade_waits_for_and_caches_its_actual_original_child() {
         .spawn()
         .unwrap();
     let mut original = Original {
+        domain: terminating::OriginalDomain::fixture(&_d.path().join("state")),
         root,
         exit: None,
         channel,

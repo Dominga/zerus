@@ -10,7 +10,7 @@ use std::sync::{
     Arc,
 };
 use tauri::State;
-use zerus_client_core::tasks::{checked_scoped_page, scoped_page_call, PageScope};
+use zerus_client_core::tasks::{checked_queried_page, queried_page_call, PageScope};
 use zerus_client_core::{attachments, reads::CachedAttachment, task_details, tasks_write};
 
 #[derive(Clone, Default)]
@@ -201,6 +201,7 @@ pub async fn task_page(
     after: Option<String>,
     session: Option<String>,
     host: Option<String>,
+    query: Option<String>,
 ) -> Result<Value, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
@@ -208,16 +209,24 @@ pub async fn task_page(
     if session.is_none() && host.is_some() {
         return Err("Invalid task page request.".into());
     }
-    let call = scoped_page_call(
+    let call = queried_page_call(
         &project,
         &stage,
         limit,
         after.as_deref(),
         page_scope(&session, &host),
+        query.as_deref(),
     )?;
     tauri::async_runtime::spawn_blocking(move || {
         let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
-        checked_scoped_page(&reply, &project, &stage, limit, page_scope(&session, &host))
+        checked_queried_page(
+            &reply,
+            &project,
+            &stage,
+            limit,
+            page_scope(&session, &host),
+            query.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?

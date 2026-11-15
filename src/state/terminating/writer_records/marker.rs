@@ -15,6 +15,7 @@ use std::{
 };
 
 mod codec;
+pub(super) use codec::record as source_record;
 mod publication;
 mod source;
 use source::Source;

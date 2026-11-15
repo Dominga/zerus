@@ -5,11 +5,13 @@ import { documentVisibility } from "./visibility";
 import { countedAttention, filterActive, filterAttention, isActive, isWorking, needsAttention } from "./attention";
 import { settings, settingsReady, setSetting, num } from "./settings";
 import { createRowDensity, ROW_DENSITY_KEY } from "./rowDensity";
+import { createTeamPlanPreferences } from "./teamPlan";
 import type { Session, Status } from "../ui/sessions/types";
 import type { FolderScope } from "../ui/sessions/scope-filters";
 import { trNoop } from "../i18n";
 import { archiveReveal, forgetListReveal } from "./listReveal";
 export { isActive, needsAttention };
+export const teamPlanPreferences = createTeamPlanPreferences();
 
 // Interface state of the first screen: page, selection, filters, list layout,
 // menus and toasts. Data lives in store/catalog.ts and store/activity.ts.

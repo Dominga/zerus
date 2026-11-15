@@ -26,9 +26,9 @@ fn publication_removal_and_repair_require_explicit_opt_in() {
         let mut calls = 0;
         match operation {
             "write" => {
-                let result: Result<()> = write_at(root.path(), &path, &value, || {
+                let result: Result<()> = write_at(root.path(), &path, &value, |publication| {
                     calls += 1;
-                    storage::atomic(&path, &value.to_string())?;
+                    storage::atomic_observed(&path, &value.to_string(), publication)?;
                     Err("original unknown outcome".into())
                 });
                 assert_eq!(result.unwrap_err(), "original unknown outcome");
@@ -76,8 +76,8 @@ fn invalid_opt_in_or_the_kill_switch_preserves_an_existing_cache_unchanged() {
         }
         let path = path(root.path());
         let value = record();
-        write_at(root.path(), &path, &value, || {
-            storage::atomic(&path, &value.to_string())
+        write_at(root.path(), &path, &value, |publication| {
+            storage::atomic_observed(&path, &value.to_string(), publication)
         })
         .unwrap();
         remove_at(root.path(), &path, || {
@@ -126,8 +126,8 @@ fn linked_shared_or_unreadable_markers_cannot_enable_advisory_io() {
         assert!(!enabled(root.path()), "{mode}");
         let value = record();
         let path = path(root.path());
-        write_at(root.path(), &path, &value, || {
-            storage::atomic(&path, &value.to_string())
+        write_at(root.path(), &path, &value, |publication| {
+            storage::atomic_observed(&path, &value.to_string(), publication)
         })
         .unwrap();
         assert!(
@@ -172,6 +172,263 @@ fn record() -> Value {
 }
 
 #[test]
+fn overlapping_writes_never_pair_an_old_seed_with_a_later_file_stamp() {
+    for writer in ["instrumented", "legacy-atomic", "legacy-in-place"] {
+        let root = fixture();
+        let selected = path(root.path());
+        let first = record();
+        let mut second = first.clone();
+        second["phase"] = json!("working");
+        second["last_message"] = json!("Newer canonical record");
+        let (mut first_calls, mut second_calls) = (0, 0);
+        write_at(root.path(), &selected, &first, |publication| {
+            first_calls += 1;
+            storage::atomic_observed(&selected, &first.to_string(), publication)?;
+            if writer == "instrumented" {
+                write_at(root.path(), &selected, &second, |publication| {
+                    second_calls += 1;
+                    storage::atomic_observed(&selected, &second.to_string(), publication)
+                })
+            } else {
+                second_calls += 1;
+                if writer == "legacy-in-place" {
+                    fs::write(&selected, second.to_string()).map_err(|e| e.to_string())
+                } else {
+                    storage::atomic(&selected, &second.to_string())
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!((first_calls, second_calls), (1, 1), "{writer}");
+        let actual: Value = serde_json::from_slice(&fs::read(&selected).unwrap()).unwrap();
+        assert_eq!(actual["phase"], "working");
+        assert!(repair_to_end(root.path()).complete, "{writer}");
+        let page = Store::open(root.path()).unwrap().page(None).unwrap();
+        assert!(page.fresh);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(
+            page.rows[0].1["record"]["phase"], actual["phase"],
+            "{writer}: seed provenance cannot be borrowed from another publication"
+        );
+        assert_eq!(
+            page.rows[0].1["record"]["last_message"],
+            actual["last_message"]
+        );
+    }
+}
+
+#[test]
+fn missing_wrong_target_or_reused_publication_evidence_is_never_certified() {
+    for mode in ["missing", "wrong-target", "reused"] {
+        let root = fixture();
+        let selected = path(root.path());
+        let first = record();
+        let mut second = first.clone();
+        second["phase"] = json!("working");
+        storage::atomic(&selected, &second.to_string()).unwrap();
+        let mut calls = 0;
+        write_at(root.path(), &selected, &first, |mut publication| {
+            calls += 1;
+            match mode {
+                "missing" => Ok(()),
+                "wrong-target" => storage::atomic_observed(
+                    &root.path().join("other.json"),
+                    &first.to_string(),
+                    publication,
+                ),
+                _ => {
+                    storage::atomic_observed(
+                        &selected,
+                        &first.to_string(),
+                        publication.as_deref_mut(),
+                    )?;
+                    storage::atomic_observed(&selected, &second.to_string(), publication)
+                }
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            calls, 1,
+            "{mode}: advisory evidence cannot change or replay the callback"
+        );
+        let store = Store::open(root.path()).unwrap();
+        let (rows, pending): (i64, i64) = store
+            .db
+            .query_row(
+                "SELECT (SELECT count(*) FROM sources),(SELECT count(*) FROM intents)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (rows, pending),
+            (0, 1),
+            "{mode}: unproved data cannot settle"
+        );
+        drop(store);
+        assert!(repair_to_end(root.path()).complete);
+        let page = Store::open(root.path()).unwrap().page(None).unwrap();
+        assert!(page.fresh);
+        assert_eq!(page.rows.len(), 1);
+        assert_eq!(page.rows[0].1["record"]["phase"], "working", "{mode}");
+        assert_eq!(calls, 1);
+    }
+}
+
+#[test]
+fn a_changed_or_substituted_staging_object_cannot_certify_a_publication() {
+    for mode in ["in-place-change", "different-object", "unobserved"] {
+        let root = fixture();
+        let selected = path(root.path());
+        let first = record();
+        let mut second = first.clone();
+        second["phase"] = json!("working");
+        storage::atomic(&selected, &first.to_string()).unwrap();
+        let file = File::open(&selected).unwrap();
+        let mut publication = Publication::default();
+        if mode != "unobserved" {
+            publication.staged(&file);
+        }
+        let file = if mode == "in-place-change" {
+            fs::write(&selected, second.to_string()).unwrap();
+            file
+        } else if mode == "different-object" {
+            storage::atomic(&selected, &second.to_string()).unwrap();
+            File::open(&selected).unwrap()
+        } else {
+            file
+        };
+        publication.published(file);
+        let store = Store::open(root.path()).unwrap();
+        let key = Key::at(root.path(), &selected).unwrap();
+        assert!(publication.prove(&store, &key).is_err(), "{mode}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn directory_publications_keep_their_own_objects_and_preserve_later_writers() {
+    let root = fixture();
+    let selected = path(root.path());
+    let name = selected.file_name().unwrap().to_str().unwrap();
+    let directory = checked(Directory::open(
+        &crate::platform::canonical(root.path()).unwrap(),
+    ))
+    .unwrap();
+    let mut value = record();
+    write_at(root.path(), &selected, &value, |publication| {
+        Publication::write_new(
+            publication,
+            &directory,
+            name,
+            format!("{value}\n").as_bytes(),
+        )
+    })
+    .unwrap();
+    assert_eq!(cached(root.path())["record"]["phase"], "interrupted");
+    value["phase"] = json!("input");
+    write_at(root.path(), &selected, &value, |publication| {
+        Publication::replace(
+            publication,
+            &directory,
+            name,
+            format!("{value}\n").as_bytes(),
+        )
+    })
+    .unwrap();
+    assert_eq!(cached(root.path())["record"]["phase"], "input");
+    value["phase"] = json!("approval");
+    let mut later = value.clone();
+    later["phase"] = json!("working");
+    let mut calls = 0;
+    write_at(root.path(), &selected, &value, |publication| {
+        calls += 1;
+        Publication::replace(
+            publication,
+            &directory,
+            name,
+            format!("{value}\n").as_bytes(),
+        )?;
+        storage::atomic(&selected, &later.to_string())
+    })
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(
+        cached(root.path())["record"]["phase"],
+        "input",
+        "unconfirmed publication keeps the prior certified projection"
+    );
+    assert!(repair_to_end(root.path()).complete);
+    assert_eq!(cached(root.path())["record"]["phase"], "working");
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn legacy_seed_rows_are_unavailable_until_bounded_canonical_revalidation() {
+    let root = fixture();
+    let selected = path(root.path());
+    let first = record();
+    write_at(root.path(), &selected, &first, |publication| {
+        storage::atomic_observed(&selected, &first.to_string(), publication)
+    })
+    .unwrap();
+    assert!(repair_to_end(root.path()).complete);
+    let mut second = first.clone();
+    second["phase"] = json!("working");
+    storage::atomic(&selected, &second.to_string()).unwrap();
+    let key = Key::at(root.path(), &selected).unwrap();
+    let mut legacy: Value = serde_json::from_str(&Seed::encode(&key, &first).unwrap()).unwrap();
+    legacy["version"] = json!(1);
+    let legacy = legacy.to_string();
+    assert!(
+        Seed::decode(&key, &legacy).is_err(),
+        "v1 provenance must never be grandfathered"
+    );
+    let store = Store::open(root.path()).unwrap();
+    let later_stamp = store.source_stamp(&key).unwrap().unwrap();
+    store
+        .db
+        .execute(
+            "UPDATE sources SET seed=?1,stamp=?2 WHERE source=?3",
+            params![legacy, later_stamp, key.0],
+        )
+        .unwrap();
+    store
+        .db
+        .execute(
+            "UPDATE snapshots SET seed=?1 WHERE source=?2",
+            params![legacy, key.0],
+        )
+        .unwrap();
+    assert!(
+        store.page(None).is_err(),
+        "legacy generations are unavailable, never fresh"
+    );
+    drop(store);
+    let mut work = None;
+    let mut read = 0;
+    let mut complete = false;
+    for _ in 0..128 {
+        let step = background_at(root.path(), &mut work).unwrap();
+        read += step.bytes;
+        assert!(step.entries <= 256 && step.rows <= 128 && step.bytes <= 16 << 20);
+        if step.done {
+            complete = step.complete;
+            break;
+        }
+    }
+    assert!(complete);
+    assert_eq!(
+        read as u64,
+        fs::metadata(&selected).unwrap().len(),
+        "legacy rows require exactly one bounded canonical read"
+    );
+    let page = Store::open(root.path()).unwrap().page(None).unwrap();
+    assert!(page.fresh);
+    assert_eq!(page.rows[0].1["record"]["phase"], "working");
+}
+
+#[test]
 fn canonical_publication_has_a_durable_pre_file_display_intent() {
     let root = fixture();
     let path = root
@@ -179,7 +436,7 @@ fn canonical_publication_has_a_durable_pre_file_display_intent() {
         .join(format!("{}.json", storage::label_key("codex/example/one")));
     let value = record();
     let mut called = 0;
-    write_at(root.path(), &path, &value, || {
+    write_at(root.path(), &path, &value, |publication| {
         called += 1;
         let db = rusqlite::Connection::open_with_flags(
             root.path().join("listing-metadata/index.sqlite3"),
@@ -190,7 +447,7 @@ fn canonical_publication_has_a_durable_pre_file_display_intent() {
             .query_row("SELECT count(*) FROM intents", [], |r| r.get(0))
             .unwrap();
         assert_eq!(pending, 1);
-        storage::atomic(&path, &value.to_string())
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert_eq!(called, 1, "canonical publication is never replayed");
@@ -206,8 +463,8 @@ fn canonical_publication_settles_only_small_public_display_inputs() {
     value["keep_warm_quiet"] =
         json!({"prompt":"Original public prompt","last_message":"Original public reply"});
     let original = value.clone();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert_eq!(
@@ -301,15 +558,15 @@ fn an_unknown_canonical_outcome_keeps_the_last_projection_and_pending_intent() {
     let root = fixture();
     let path = path(root.path());
     let mut value = record();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     value["phase"] = json!("input");
     let mut calls = 0;
-    let result: Result<()> = write_at(root.path(), &path, &value, || {
+    let result: Result<()> = write_at(root.path(), &path, &value, |publication| {
         calls += 1;
-        storage::atomic(&path, &value.to_string())?;
+        storage::atomic_observed(&path, &value.to_string(), publication)?;
         Err("unknown source outcome".into())
     });
     assert_eq!(calls, 1);
@@ -352,9 +609,9 @@ fn corrupt_disabled_busy_or_oversized_advisory_state_never_fails_or_replays_cano
         }
         let original = value.clone();
         let mut calls = 0;
-        write_at(root.path(), &path, &value, || {
+        write_at(root.path(), &path, &value, |publication| {
             calls += 1;
-            storage::atomic(&path, &value.to_string())
+            storage::atomic_observed(&path, &value.to_string(), publication)
         })
         .unwrap();
         assert_eq!(calls, 1, "{failure}");
@@ -469,15 +726,15 @@ fn repair_observes_an_unknown_write_and_a_lost_deletion_without_replaying_either
     let root = fixture();
     let path = path(root.path());
     let mut value = record();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     value["phase"] = json!("approval");
     let mut calls = 0;
-    let _: Result<()> = write_at(root.path(), &path, &value, || {
+    let _: Result<()> = write_at(root.path(), &path, &value, |publication| {
         calls += 1;
-        storage::atomic(&path, &value.to_string())?;
+        storage::atomic_observed(&path, &value.to_string(), publication)?;
         Err("unknown".into())
     });
     assert!(repair_to_end(root.path()).complete);
@@ -507,8 +764,8 @@ fn incomplete_or_unreadable_coverage_retains_last_known_rows_and_never_publishes
     let root = fixture();
     let path = path(root.path());
     let value = record();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert!(repair_to_end(root.path()).complete);
@@ -553,8 +810,8 @@ fn paged_generation_is_stable_while_new_canonical_records_arrive() {
         "{}.json",
         storage::label_key(string(&value, "name"))
     ));
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert!(repair_to_end(root.path()).complete);
@@ -644,8 +901,8 @@ fn a_corrupt_or_partially_created_display_store_rebuilds_in_background_only() {
         let root = fixture();
         let path = path(root.path());
         let value = record();
-        write_at(root.path(), &path, &value, || {
-            storage::atomic(&path, &value.to_string())
+        write_at(root.path(), &path, &value, |publication| {
+            storage::atomic_observed(&path, &value.to_string(), publication)
         })
         .unwrap();
         let original = fs::read(&path).unwrap();
@@ -664,7 +921,7 @@ fn failed_canonical_publication_is_observed_as_absent_without_recreating_it() {
     let path = path(root.path());
     let value = record();
     let mut calls = 0;
-    let result: Result<()> = write_at(root.path(), &path, &value, || {
+    let result: Result<()> = write_at(root.path(), &path, &value, |_| {
         calls += 1;
         Err("original error".into())
     });
@@ -730,15 +987,15 @@ fn a_changed_root_alias_cannot_attach_new_seed_data_to_an_old_canonical_file() {
     std::os::unix::fs::symlink(&a, &alias).unwrap();
     let at = path(&alias);
     let mut value = record();
-    write_at(&alias, &at, &value, || {
-        storage::atomic(&at, &value.to_string())
+    write_at(&alias, &at, &value, |publication| {
+        storage::atomic_observed(&at, &value.to_string(), publication)
     })
     .unwrap();
     value["phase"] = json!("approval");
-    write_at(&alias, &at, &value, || {
+    write_at(&alias, &at, &value, |publication| {
         fs::remove_file(&alias).unwrap();
         std::os::unix::fs::symlink(&b, &alias).unwrap();
-        storage::atomic(&at, &value.to_string())
+        storage::atomic_observed(&at, &value.to_string(), publication)
     })
     .unwrap();
     assert_eq!(cached(&a)["record"]["phase"], "interrupted");
@@ -756,8 +1013,8 @@ fn an_unknown_future_cache_schema_is_unavailable_without_failing_canonical_io() 
     let store = Store::open(root.path()).unwrap();
     store.db.execute_batch("PRAGMA user_version=2;").unwrap();
     drop(store);
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     let db =
@@ -844,8 +1101,8 @@ fn valid_json_corruption_cannot_be_returned_as_fresh_display_data() {
     let root = fixture();
     let path = path(root.path());
     let value = record();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert!(repair_to_end(root.path()).complete);
@@ -872,9 +1129,9 @@ fn a_full_advisory_intent_queue_still_allows_the_original_canonical_write() {
     store.db.execute_batch("WITH RECURSIVE n(x) AS(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<4096) INSERT INTO intents SELECT CAST(x AS TEXT),'fixture',NULL,0 FROM n;").unwrap();
     drop(store);
     let mut calls = 0;
-    write_at(root.path(), &path, &value, || {
+    write_at(root.path(), &path, &value, |publication| {
         calls += 1;
-        storage::atomic(&path, &value.to_string())
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert_eq!(calls, 1);
@@ -890,8 +1147,8 @@ fn canonical_deletion_is_reserved_before_removal_and_settles_one_tombstone() {
     let root = fixture();
     let path = path(root.path());
     let value = record();
-    write_at(root.path(), &path, &value, || {
-        storage::atomic(&path, &value.to_string())
+    write_at(root.path(), &path, &value, |publication| {
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     let mut calls = 0;
@@ -938,7 +1195,7 @@ fn unsupported_display_inputs_still_reserve_an_unknown_change_before_canonical_i
     let mut value = record();
     value["layout_transition"] = json!({"version":1});
     let mut calls = 0;
-    write_at(root.path(), &path, &value, || {
+    write_at(root.path(), &path, &value, |publication| {
         calls += 1;
         let db = rusqlite::Connection::open_with_flags(
             root.path().join("listing-metadata/index.sqlite3"),
@@ -950,7 +1207,7 @@ fn unsupported_display_inputs_still_reserve_an_unknown_change_before_canonical_i
                 .unwrap(),
             1
         );
-        storage::atomic(&path, &value.to_string())
+        storage::atomic_observed(&path, &value.to_string(), publication)
     })
     .unwrap();
     assert_eq!(calls, 1);

@@ -4,14 +4,14 @@ use super::*;
 use crate::{platform, state::storage};
 use fs2::FileExt;
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs::{File, OpenOptions},
+    io::Read,
     os::unix::{fs::MetadataExt, fs::OpenOptionsExt},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
-const GATE: &[u8] = b"HGS-WRITER-GATE-1\n";
+pub(super) const GATE: &[u8] = b"HGS-WRITER-GATE-1\n";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 struct Identity(u64, u64);
@@ -43,15 +43,6 @@ fn write_file(path: &Path) -> Result<File> {
         return Err(REFUSED.into());
     }
     Ok(file)
-}
-fn create_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut file = platform::no_follow(platform::private_open(
-        OpenOptions::new().read(true).write(true).create_new(true),
-    ))
-    .open(path)
-    .map_err(|_| REFUSED)?;
-    file.write_all(bytes).map_err(|_| REFUSED)?;
-    file.sync_all().map_err(|_| REFUSED.into())
 }
 
 pub(super) struct Directory {
@@ -128,40 +119,11 @@ impl Store {
             .join(&scope.run);
         Ok((root, path))
     }
+    #[cfg(test)]
     pub(super) fn initialize(scope: &Run, until: Instant) -> Result<()> {
-        current(until)?;
-        let (root, path) = Self::location(scope)?;
-        let session = path.parent().ok_or(REFUSED)?;
-        let base = session.parent().ok_or(REFUSED)?;
-        platform::private_dir(base).map_err(|_| REFUSED)?;
-        Directory::open(base)?;
-        platform::private_dir(session).map_err(|_| REFUSED)?;
-        Directory::open(session)?;
-        current(until)?;
-        // Never reset an existing or half-created run. Its original storage
-        // must be inspected; initialization is not crash recovery.
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|_| REFUSED)?;
-        let dir = Directory::open(&path)?;
-        create_file(&path.join("gate"), GATE)?;
-        create_file(&path.join("lock"), &[])?;
-        create_file(
-            &path.join("pending.json"),
-            &Ledger {
-                version: VERSION,
-                scope: scope.clone(),
-                pending: Vec::new(),
-            }
-            .encode()?,
-        )?;
-        dir.file.sync_all().map_err(|_| REFUSED)?;
-        platform::sync_dir(session).map_err(|_| REFUSED)?;
-        dir.current()?;
-        root.current()?;
-        current(until)
+        let path = platform::canonical(storage::root()).map_err(|_| REFUSED)?;
+        let root = crate::state::repositories::directory::Directory::open(&path)?;
+        super::domain::seed(root, scope, until, || current(until)).map(drop)
     }
     pub(super) fn open(scope: &Run, until: Instant) -> Result<Self> {
         current(until)?;

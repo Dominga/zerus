@@ -12,11 +12,11 @@ class SessionQuestionRoutingTest {
         Target("00000000-0000-4000-8000-000000000001",raw.optString("name","claude/project/child"),run,conversation,"workspace")
 
     @Test fun qualifiedProvidersKeepThePersonsSwitch() {
-        for(agent in listOf("claude","kimi","dsh")) {
+        for(agent in listOf("claude","kimi","dsh","opencode")) {
             val raw = JSONObject().put("cmd",agent).put("parent",JSONObject()).put("state","running")
             assertTrue(agent,SessionQuestionRouting.applies(target(raw),raw))
         }
-        for(agent in listOf("opencode","deepseek","codex","unknown")) {
+        for(agent in listOf("deepseek","codex","unknown")) {
             val raw = JSONObject().put("cmd",agent).put("parent",JSONObject()).put("state","running")
             assertFalse(agent,SessionQuestionRouting.applies(target(raw),raw))
         }

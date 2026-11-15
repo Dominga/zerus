@@ -309,11 +309,13 @@ impl<'a> View<'a> {
     ) -> Result<()> {
         storage::ensure_session_id(record);
         processes::compact(record);
-        super::listing_metadata::write_at(&root(), path, record, || {
+        super::listing_metadata::write_at(&root(), path, record, |_| {
             self.atomic(path, format!("{record}\n").as_bytes())
         })
         // No native companion or caller index authority here. Original picker
         // keepers bypass advisory effects and retain their own lifeline fence.
+        // Opaque Effects supply no publication witness; ordinary repair alone
+        // can certify their canonical bytes outside the keeper.
     }
     pub(in crate::state) fn write_record(&mut self, record: &mut Value) -> Result<()> {
         record["updated"] = json!(now());

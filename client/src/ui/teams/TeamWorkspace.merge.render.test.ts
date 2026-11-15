@@ -26,7 +26,7 @@ it("keeps Graph and Board beside drawers and Settings without losing the graph",
     view: graph as unknown as TeamView, busy: false, failure: null,
     onAction: vi.fn(), onPage: vi.fn(), onAddTask: vi.fn(), onSettingsSave: save,
   }), host);
-  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(5);
+  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(6);
   expect(host.querySelector("[data-team-board]")).not.toBeNull();
   host.querySelector<HTMLButtonElement>("[data-team-graph-mode]")!.click();
   const canvas = host.querySelector("[data-team-graph]");
@@ -50,5 +50,5 @@ it("keeps Graph and Board beside drawers and Settings without losing the graph",
   expect(host.querySelector("[data-team-graph]")).toBe(canvas);
   host.querySelector<HTMLButtonElement>(".team-board-head button")!.click();
   expect(host.querySelector("[data-team-board]")).not.toBeNull();
-  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(5);
+  expect(host.querySelectorAll("[data-team-drawer]")).toHaveLength(6);
 });

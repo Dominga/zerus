@@ -1090,7 +1090,8 @@ service reads the child with one bounded `hgs inspect NAME --after
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
 sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook`,
-Kimi's `kimi_wire`, and DeepSeek's `dsh_native` ordinary requests,
+Kimi's `kimi_wire`, DeepSeek's `dsh_native` ordinary requests, and OpenCode's
+`opencode_native` API-verified question tools,
 paired with that child's provider. They must name the main
 agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
 Kimi also requires its qualified `kimi_tui` answer transport and positive
@@ -1100,10 +1101,17 @@ proof. Its single-choice,
 multiple-choice, multi-part and Other-text answers retain the existing native
 request, terminal identity and original answer receipt guards. Routing delivers
 the question; the parent explicitly calls `hgs answer` under its own permissions.
-OpenCode forms and permissions remain person-only. Public form metadata does not
-prove a native question tool is waiting, and duplicate successful answers do not
-yet recover their original receipt. OpenCode is excluded from parent routing and
-its per-child switch until both contracts are qualified.
+OpenCode qualifies only an active exact native session's pending form whose
+referenced assistant message contains the same running `question` tool call and
+whose complete fields match that tool's question input. It uses at most eight
+native message point reads in one 250 ms budget, without scanning history.
+Missing, changed, completed, foreign or ambiguous tool/form evidence stays
+unqualified; public form metadata alone never establishes authority. Generic
+forms and all permissions remain manual. Exact duplicate OpenCode answers return
+the original durable answered receipt before reading live native state, including
+after the form disappears or the run changes. Changed content or target under the
+same UUID is refused; legacy unbound, pending, unknown or unavailable receipts
+never permit another delivery.
 Claude Code's own prompts (`claude_native_question`), every synthetic native
 card, approvals (including Kimi plan and goal approvals), cache choices, trust
 and sign-in never route, even if answerable. Codex async questions are optional,
@@ -5191,12 +5199,27 @@ view before it never shift the page after it. The view reads two bounded
 ranges of the index (the owner's rows and the unassigned rows), never every
 row of the stage.
 
+`--query TEXT` with `--stage` and `--limit` searches literal substrings of the
+short task reference, title and full prompt, ignoring letter case. A reference
+may include the project's name (`orchard/T-xxxxxx`). Queries are at most
+1024 UTF-8 bytes and contain no control characters. The reply echoes `query`;
+`position`, `total` and every stage's `counts` describe matching tasks. Search
+combines with `--session`, and its cursors bind the query and session scope as
+well as the project and stage. The session side panel uses these pages, with
+the same stage filters and Show more controls, rather than searching only the
+loaded window. The index keeps full search text separately from the capped
+preview and applies the query before the page limit.
+With **Only this session** on, a session without a stable launch or run identity
+cannot search: no project-wide request is sent, results and counts stay empty,
+and the panel explains how to turn off the session filter explicitly.
+
 Pages come from a local index of task headers in the project's replica folder
-(`task-index-v2.sqlite3`): a disposable cache, never replicated, rebuilt
+(`task-index-v3.sqlite3`): a disposable cache, never replicated, rebuilt
 silently from the task documents when it is missing, damaged or of another
 version, and never a reason for a read to fail. An older hgs that shares the
-state folder keeps its own `task-index-v1.sqlite3`, which this one never
-opens, migrates or removes, so the two never rebuild each other's index. Each save notes the task in the
+state folder keeps its own `task-index-v1.sqlite3` or `task-index-v2.sqlite3`,
+which this one never opens, migrates or removes, so they never rebuild each
+other's index. Each save notes the task in the
 project's change journal (`changes`, a bounded hint that is only ever replaced,
 never written through), so a read decodes only changed tasks. Every task
 file's stamp (length, modification time, inode) is also checked at least every

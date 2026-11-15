@@ -50,6 +50,12 @@ impl Context<'_> {
             )
             .map_err(storage)
     }
+    /// Work charged to the admitted-task cap includes separate draft rows.
+    pub fn task_capacity_used(&self) -> Result<u32> {
+        Ok(self
+            .count(true)?
+            .saturating_add(store::drafts::count(self.db, &self.team.id)?))
+    }
     pub fn person_stopped(&self, member: &str) -> Result<bool> {
         self.db
             .query_row(

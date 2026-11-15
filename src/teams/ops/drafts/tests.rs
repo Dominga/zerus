@@ -361,7 +361,13 @@ fn draft_capacity_is_also_charged_when_a_report_wants_a_pipeline_stage() {
         let stages = h.store.stage_tasks(TEAM, 200, None).unwrap().rows;
         assert_eq!(stages.len(), usize::from(!reserve_draft));
         if reserve_draft {
-            assert!(h.store.inbox(TEAM, 200, None).unwrap().rows.iter().any(|i| i.text.contains("cap is reached")));
+            assert!(h
+                .store
+                .inbox(TEAM, 200, None)
+                .unwrap()
+                .rows
+                .iter()
+                .any(|i| i.text.contains("cap is reached")));
             assert_eq!(h.store.queue(TEAM, 200, None).unwrap().rows.len(), 1);
         }
     }
@@ -374,7 +380,10 @@ fn settings_cannot_reduce_the_admitted_cap_below_saved_drafts() {
     let before = h.store.team(TEAM).unwrap().unwrap();
     let mut settings = before.settings.clone();
     settings.caps.max_open_tasks = 1;
-    refused(h.run(&person(), Operation::ChangeSettings { settings }), code::OVER_CAP);
+    refused(
+        h.run(&person(), Operation::ChangeSettings { settings }),
+        code::OVER_CAP,
+    );
     assert_eq!(h.store.team(TEAM).unwrap().unwrap(), before);
     assert_eq!(h.store.phase_draft(TEAM, 1).unwrap().nodes.len(), 2);
 }

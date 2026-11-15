@@ -142,10 +142,12 @@ read. Respect the current
 limit and bounded text; never assemble `TeamFixture` in production. Drafts
 count toward the planned-work cap. Whole-phase validation is bounded; page
 counts never prove that a phase is complete or unstarted.
+The same admitted-task capacity accounting includes saved drafts at queue
+admission, pipeline stage creation and settings changes, under the writer lock.
 
 Slice 1 validation also bounds write-set comparison work under the writer
 lock. Barriers and dependencies are checked first, each unordered pair once;
-the sum of each pair's path bytes times the other set's path count is capped
+the sum of each pair's path bytes (plus one per path) times the other set's path count is capped
 at 64 million. Exceeding it refuses atomically with `over_cap`, asking for
 simpler write sets or a smaller phase. The comparison itself remains the
 existing kernel's conservative overlap check.

@@ -163,10 +163,10 @@ fn validate(
             "A draft must contain 1 to the configured phase cap tasks.",
         ));
     }
-    let total = store::drafts::count(ctx.db, &ctx.team.id)?
+    let total = ctx
+        .task_capacity_used()?
         .saturating_sub(old.len() as u32)
-        .saturating_add(input.nodes.len() as u32)
-        .saturating_add(ctx.count(true)?);
+        .saturating_add(input.nodes.len() as u32);
     if total > ctx.team.settings.caps.max_open_tasks {
         return Err(over("Drafts and admitted tasks exceed the team task cap."));
     }

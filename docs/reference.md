@@ -5982,7 +5982,9 @@ an ordering dependency or a later phase's barrier. Validation allows at most
 64 million estimated byte
 comparisons over unordered task pairs, otherwise an atomic `over_cap`
 refusal asks for simpler write sets or a smaller phase. Drafts count against
-the team's planned-work cap but create no task documents, live bindings,
+the team's planned-work cap, including pipeline stage creation. Settings
+cannot lower that cap below admitted tasks and saved drafts. Drafts create
+no task documents, live bindings,
 member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.

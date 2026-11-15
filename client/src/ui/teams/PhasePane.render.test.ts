@@ -82,6 +82,26 @@ it("edits the bounded draft with its frozen read revision and generation", async
   expect(draft.nodes[1].deps).toEqual([{ node: 1 }]);
 });
 
+it("keeps a known validation refusal editable for an explicit corrected save", async () => {
+  const { h, submit } = await pane();
+  submit.mockResolvedValueOnce({ outcome: "failed", code: "over_cap", detail: "Too many write paths.", request_id: "example-request" });
+  button(h, "Edit draft").click();
+  const writes = [...h.querySelectorAll("label")].find((label) => label.textContent?.startsWith("Write paths, one per line"))!.querySelector("textarea")!;
+  const change = (text: string) => { writes.value = text; writes.dispatchEvent(new Event("input", { bubbles: true })); };
+  change(Array.from({ length: 205 }, (_, i) => `src/base-${i}.rs`).join("\n"));
+  const save = h.querySelector<HTMLButtonElement>("[data-save-phase]")!;
+  save.click();
+  await vi.waitFor(() => expect(h.textContent).toContain("Too many write paths."));
+  expect(save.disabled).toBe(false);
+  expect(submit.mock.calls[0][1].nodes[0].writes).toHaveLength(205);
+  change("src/base.rs\nsrc/base-tests.rs");
+  save.click();
+  await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+  expect(submit.mock.calls[1][0].revision).toBe(2);
+  expect(submit.mock.calls[1][0].generation).toBe(1);
+  expect(submit.mock.calls[1][1].nodes[0].writes).toEqual(["src/base.rs", "src/base-tests.rs"]);
+});
+
 it.each(["pending", "uncertain", "stale_revision"])("preserves text and blocks a second save after %s", async (state) => {
   const h = host(), d = view().plan!.draft!;
   const submit = vi.fn().mockResolvedValue(state === "stale_revision"

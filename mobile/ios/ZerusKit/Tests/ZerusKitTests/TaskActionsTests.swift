@@ -191,4 +191,29 @@ final class TaskActionsTests: XCTestCase {
         try await sync.exchangeNow(connection, key, name: "orchard", computerId: "computer-1")
         XCTAssertEqual(try computer.store.get(reference: task.uuid).text, "Filed on the phone")
     }
+    func testDoneRowsRetainOpaqueIdentityAndMissingFieldsRemainLegacy() async throws {
+        let (computer, _, sync) = try world()
+        computer.update {
+            $0.receipts["task_done"] = { _ in
+                ("completed", ["schema": 1, "tasks": [
+                    ["uuid": "task-1", "id": "T-first1", "text": "Original", "session": ["machine": "node-1", "session": "codex/old-label", "session_id": "launch_id:original"], "accepted_at": 2],
+                    ["uuid": "task-2", "id": "T-second", "text": "Legacy", "session": ["machine": "node-1", "session": "codex/legacy"], "accepted_at": 1]
+                ], "next": .null, "total": 2, "recent": 2, "damaged": 0], .null)
+            }
+        }
+        let page = try await sync.donePage(connection, key, computerId: "computer-1", before: nil)
+        XCTAssertEqual(page.rows[0].session?.sessionId, "launch_id:original")
+        XCTAssertEqual(page.rows[1].session?.sessionId, "")
+    }
+    func testMalformedDoneIdentityCannotBecomeLegacy() async throws {
+        let (computer, _, sync) = try world()
+        computer.update {
+            $0.receipts["task_done"] = { _ in
+                ("completed", ["schema": 1, "tasks": [["uuid": "task-1", "id": "T-first1", "text": "Original", "session": ["machine": "node-1", "session": "codex/api", "session_id": 7], "accepted_at": 2]], "next": .null, "total": 1, "recent": 1, "damaged": 0], .null)
+            }
+        }
+        do { _ = try await sync.donePage(connection, key, computerId: "computer-1", before: nil); XCTFail("Malformed identity must stay untrusted") }
+        catch { }
+    }
+
 }

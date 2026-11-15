@@ -20,8 +20,8 @@ final class TasksPresentationTests: XCTestCase {
                         cancelReason: reason, text: "Task \(serial)", log: [])
     }
     private func pinned(_ name: String, _ machine: String = "node-1") -> TaskTarget { .session(session: SessionRef(machine: machine, session: name)) }
-    private func session(_ name: String, _ computer: String = "computer-1", _ raw: JSONObject = ["activity": "idle"]) -> Session {
-        Session(target: Target(computerId: computer, session: name, run: "run", conversation: "conversation", connectionId: "workspace-a"),
+    private func session(_ name: String, _ computer: String = "computer-1", _ raw: JSONObject = ["activity": "idle"], connectionId: String = "workspace-a") -> Session {
+        Session(target: Target(computerId: computer, session: name, run: "run", conversation: "conversation", connectionId: connectionId),
                 title: name, agent: String(name.split(separator: "/").first ?? ""), status: "", project: "orchard", preview: "",
                 pendingCount: 0, raw: raw)
     }
@@ -182,4 +182,58 @@ final class TasksPresentationTests: XCTestCase {
         XCTAssertEqual(TasksPresentation.olderLabel(total: 10, recent: 3, shown: 8, expanded: true, more: true), "Show older (2)")
         XCTAssertNil(TasksPresentation.olderLabel(total: 10, recent: 3, shown: 10, expanded: true, more: false))
     }
+    func testImmutableTaskTargetUsesItsCurrentLabelAfterRename() {
+        let ref = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "launch_id:original")
+        let live = session("codex/current-label", "computer-1", ["activity": "idle", "launch_id": "original", "run_id": "current-run"])
+        guard case .ready(let actual) = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("The original identity must survive a rename") }
+        XCTAssertEqual(actual.session, "codex/current-label")
+    }
+    func testReusedLabelCannotReplaceTheMissingImmutableIdentity() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:original")
+        let live = session("codex/api", "computer-1", ["launch_id": "replacement"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("A reused label is not the original identity") }
+    }
+    func testForeignConnectionCannotSupplyTheTaskRoute() {
+        let foreign = session("codex/api", connectionId: "workspace-b")
+        guard case .blocked = route(task(.todo, pinned("codex/api")), sessions: [foreign]) else { return XCTFail("The original connection is required") }
+    }
+    func testDuplicateImmutableBindingsAreRefused() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:original")
+        let twins = ["codex/api", "codex/other-label"].map { session($0, "computer-1", ["launch_id": "original"]) }
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: twins) else { return XCTFail("An immutable binding must be unique") }
+    }
+    func testNameOnlySelectionDoesNotHighlightIdentityBoundTask() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:original")
+        XCTAssertFalse(TasksPresentation.highlighted(task(.todo, .session(session: ref)), chosen: chosen))
+    }
+    func testGraphIdentityCannotSubstituteForNativeTaskKey() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "graph-session-id")
+        let live = session("codex/api", "computer-1", ["session_id": "graph-session-id", "launch_id": "original", "run_id": "run"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("Graph identity is not a native task key") }
+    }
+    func testRunIdentityIsUsedOnlyWithoutLaunchIdentity() {
+        let ref = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "run_id:original-run")
+        let live = session("codex/current-label", "computer-1", ["launch_id": "", "run_id": "original-run"])
+        guard case .ready = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("A genuine run identity must resolve") }
+        let launched = session("codex/current-label", "computer-1", ["launch_id": "new-launch", "run_id": "original-run"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [launched]) else { return XCTFail("Launch identity takes precedence") }
+    }
+    func testNonStringLaunchMetadataCannotInventIdentity() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:7")
+        let live = session("codex/api", "computer-1", ["launch_id": 7, "run_id": "original-run"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("Never coerce a numeric launch ID") }
+        let run = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "run_id:original-run")
+        guard case .ready = route(task(.todo, .session(session: run)), sessions: [live]) else { return XCTFail("A string run identity remains available") }
+    }
+    func testOpaqueNativeIdentityIsPreservedVerbatim() {
+        let ref = SessionRef(machine: "node-1", session: "codex/old-label", sessionId: "launch_id: original ")
+        let live = session("codex/current-label", "computer-1", ["launch_id": " original "])
+        guard case .ready = route(task(.todo, .session(session: ref)), sessions: [live]) else { return XCTFail("Opaque spaces are significant") }
+    }
+    func testArchivedRowCannotSupplyIdentityBoundSend() {
+        let ref = SessionRef(machine: "node-1", session: "codex/api", sessionId: "launch_id:original")
+        let old = session("codex/api", "computer-1", ["launch_id": "original", "state": "archived"])
+        guard case .blocked = route(task(.todo, .session(session: ref)), sessions: [old]) else { return XCTFail("Archived rows cannot resolve live routes") }
+    }
+
 }

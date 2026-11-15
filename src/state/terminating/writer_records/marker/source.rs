@@ -146,8 +146,16 @@ impl Source {
             .read(&self.path, RECORD_BYTES as u64)?
             .ok_or(super::super::REFUSED)?;
         let record = codec::record(original.bytes())?;
+        // Native reads retain the canonical original directory. The normal
+        // metadata validator compares the configured layout route as data;
+        // it does not open it. check() pins that alias before/after this read.
+        let route = self.configured_root.join(
+            self.path
+                .strip_prefix(&self.root.path)
+                .map_err(|_| super::super::REFUSED)?,
+        );
         storage::verify_metadata_at(
-            &self.path,
+            &route,
             codec::text(&self.binding, "name", 512)?,
             original.bytes(),
         )?;

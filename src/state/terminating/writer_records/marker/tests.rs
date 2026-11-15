@@ -88,6 +88,12 @@ fn a_fresh_original_publishes_one_durable_typed_marker() {
 }
 
 #[test]
+fn configured_alias_preserves_id_layout_and_never_adopts_a_new_directory() {
+    probe("id-alias");
+    probe("alias-retarget");
+}
+
+#[test]
 fn existing_markers_and_changed_originals_cannot_be_adopted() {
     for case in [
         "existing-null",
@@ -167,7 +173,7 @@ fn private_probe() {
     let case = std::env::var("HGS_TEST_TYPED_MARKER").unwrap();
     let until = Instant::now() + Duration::from_secs(5);
     let mut record = fixture();
-    if case == "state-alias" {
+    if matches!(case.as_str(), "state-alias" | "id-alias" | "alias-retarget") {
         let selected = storage::root();
         storage::private_dir(&selected).unwrap();
         let alias = selected.with_extension("alias");
@@ -199,7 +205,7 @@ fn private_probe() {
         assert_eq!(fs::read(path).unwrap(), before);
         return;
     }
-    if case == "id-layout" {
+    if matches!(case.as_str(), "id-layout" | "id-alias") {
         record["layout"] = "id".into();
     }
     storage::private_dir(&crate::config::config_dir(&state::home().to_string_lossy())).unwrap();
@@ -208,12 +214,12 @@ fn private_probe() {
     // Normal session creation has already initialized its optional index
     // parent. The dormant reservation itself never initializes storage.
     storage::private_dir(&storage::root().join("ids")).unwrap();
-    let path = if case == "id-layout" {
+    let path = if storage::in_id_layout(&record) {
         storage::id_record_path(SESSION).unwrap()
     } else {
         storage::own_path(&record).unwrap()
     };
-    if case == "id-layout" {
+    if storage::in_id_layout(&record) {
         storage::private_dir(path.parent().unwrap()).unwrap();
     }
     save(&path, &record);
@@ -244,7 +250,7 @@ fn private_probe() {
     drop(writer);
     match case.as_str() {
         "fresh" | "id-layout" | "drop" | "codec" | "existing-own" | "completion"
-        | "state-alias" => {
+        | "state-alias" | "id-alias" => {
             if case == "completion" {
                 record["last_exit"] = 0.into();
                 record["attention"] = json!({"question":"original completion"});
@@ -338,6 +344,20 @@ fn private_probe() {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o666)).unwrap();
             failed(original);
             absent(&path);
+        }
+        "alias-retarget" => {
+            let original_path = crate::platform::canonical(&path).unwrap();
+            let alias = storage::root();
+            let different = tempfile::tempdir().unwrap();
+            fs::remove_file(&alias).unwrap();
+            std::os::unix::fs::symlink(different.path(), &alias).unwrap();
+            failed(original);
+            absent(&original_path);
+            assert_eq!(
+                fs::read_dir(different.path()).unwrap().count(),
+                0,
+                "changed alias must not initialize or adopt another root"
+            );
         }
         "lock-replaced" => {
             let lock = storage::root().join(".lock");

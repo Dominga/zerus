@@ -65,6 +65,12 @@ After publication, verify the exact reserved envelope and unchanged immutable
 binding before returning a durable reservation. Completion/attention metadata
 outside that immutable projection may still advance.
 
+Native reads and replacements stay below the retained canonical directory.
+The ordinary metadata layout check uses the original configured route as data
+(not a new open), so an ID-layout record also works through a directory alias.
+The configured route must still resolve to that same original native directory
+before and after each read/publication; retargeting it refuses.
+
 Use one captured monotonic deadline, at most the original 30 seconds, and bound
 lock acquisition by its remaining time. There is no serialized expiry that
 unfences a session and no renewed budget at a later stage. Blocking persistence

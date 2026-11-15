@@ -354,6 +354,10 @@ prevents its removal. Run Terminate from outside the target's own process tree.
 The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
 qualified separately. It has no installed caller and does not enable graceful
 Terminate or change the verified tree and cleanup rules above.
+The [dormant original supervisor bridge](original-supervisor-owner.md) retains
+source-bound ownership behind a const-false gate. Its read-only observations
+grant no graceful, signal or cleanup authority; owned-mode records refuse the
+legacy root-only finalizer.
 
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account

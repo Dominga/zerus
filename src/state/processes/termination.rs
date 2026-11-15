@@ -88,6 +88,9 @@ fn process_table(deadline: Instant) -> Result<BTreeMap<u32, ProcessRow>> {
 
 impl Termination {
     pub(in crate::state) fn prepare(record: &Value) -> Result<Option<Self>> {
+        if supervisor::owned_pending(record) {
+            return Err("Original descendant owner requires a cohort-aware controller; terminal kept".into());
+        }
         let root = record["pid"]
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())

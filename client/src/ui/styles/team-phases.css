@@ -1,0 +1,21 @@
+.phase-pane { padding: 14px; min-width: 0; }
+.phase-toolbar, .phase-header, .phase-tabs, .phase-dependency { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.phase-toolbar h2, .phase-header h3 { margin: 0; }
+.phase-tabs { margin: 12px 0; }
+.phase-layers { display: flex; gap: 12px; overflow-x: auto; padding: 12px 0; }
+.phase-layer { flex: 0 0 240px; min-width: 0; }
+.phase-layer h3 { font-size: 12px; }
+.phase-node { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--z-color-border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.phase-node-title { border: 0; background: none; color: inherit; text-align: left; font-weight: 600; cursor: pointer; padding: 0; }
+.phase-description { white-space: pre-wrap; overflow-wrap: anywhere; }
+.phase-editor { width: min(900px, 94vw); max-height: 90vh; }
+.phase-editor .dlg-body { overflow: auto; }
+.phase-field { display: flex; flex-direction: column; gap: 5px; margin: 8px 0; }
+.phase-editor-grid { display: grid; grid-template-columns: minmax(140px, 220px) minmax(0, 1fr); gap: 14px; margin-top: 12px; }
+.phase-editor-list { display: flex; flex-direction: column; gap: 6px; align-self: start; max-height: 55vh; overflow: auto; }
+.phase-editor-list .btn { text-align: left; overflow-wrap: anywhere; white-space: normal; }
+.phase-dependencies { border: 1px solid var(--z-color-border); border-radius: 6px; }
+.phase-dependency { margin: 6px 0; justify-content: space-between; }
+.phase-dependency select { width: auto; }
+.phase-pane pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 620px) { .phase-editor-grid { grid-template-columns: 1fr; } .phase-editor-list { max-height: 160px; } }

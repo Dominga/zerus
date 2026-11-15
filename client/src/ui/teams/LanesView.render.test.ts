@@ -35,6 +35,9 @@ it("offers Lanes beside Board and Graph and opens the existing task detail witho
   button(host, "Graph")!.click(); expect(host.querySelector("[data-team-graph]")).not.toBeNull();
   expect(host.querySelector("[data-team-detail] h3")?.textContent).toBe("Task 1");
   button(host, "Lanes")!.click(); expect(host.querySelector('[data-lane-task="1"]')?.getAttribute("aria-pressed")).toBe("true");
+  expect(button(host, "Layers")).toBeDefined(); button(host, "Layers")!.click();
+  expect(host.querySelector("[data-phase-pane]")).not.toBeNull(); expect(host.querySelector("[data-team-lanes]")).toBeNull();
+  button(host, "Lanes")!.click(); expect(host.querySelector("[data-team-lanes]")).not.toBeNull();
   expect(action).not.toHaveBeenCalled(); expect(page).not.toHaveBeenCalled();
 });
 

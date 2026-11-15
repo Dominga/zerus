@@ -15,6 +15,7 @@ mod harness;
 mod hosted;
 mod lanes;
 mod member_sessions;
+mod phases;
 mod progress;
 mod progress157;
 mod reads;

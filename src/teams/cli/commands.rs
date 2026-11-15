@@ -15,6 +15,8 @@ use zerus_team_plan::Problem;
 /// the operation; `create` is its own function because it reads the catalog.
 pub(super) fn variant(command: &str) -> Option<&'static str> {
     Some(match command {
+        "submit-draft-phase" => "submit_draft_phase",
+        "edit-draft-phase" => "edit_draft_phase",
         "add-member" => "add_member",
         "swap-member" => "swap_member",
         "rename-team" => "rename_team",

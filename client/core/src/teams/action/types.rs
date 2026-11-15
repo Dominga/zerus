@@ -43,6 +43,15 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
+    SubmitDraftPhase {
+        phase: u32,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditDraftPhase {
+        phase: u32,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
     /// Creates a team from a catalog template; the CLI resolves the bundle,
     /// and `team` is the new team's id.
     Create {

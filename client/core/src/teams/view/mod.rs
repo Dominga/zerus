@@ -14,6 +14,7 @@ mod editing;
 pub mod graph;
 pub use editing::MemberRole;
 pub mod list;
+pub mod phases;
 
 pub use board::team;
 pub use list::{list, waiting};
@@ -565,6 +566,8 @@ pub struct TeamBar {
 /// `hgs team status` and `hgs team queue` for the Team tab.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TeamView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan: Option<phases::PhasePane>,
     pub bar: TeamBar,
     /// Complete settings for editing; absent if this version cannot read every field.
     #[serde(skip_serializing_if = "Option::is_none")]

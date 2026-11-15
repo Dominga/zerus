@@ -1,6 +1,5 @@
 """Original main-thread supervisor, private const-true image and fake agent."""
 import json
-import fcntl
 import os
 import subprocess
 from pathlib import Path
@@ -89,6 +88,7 @@ if os.environ.get('HGS_SESSION_ID') and '--version' not in args:
         self.assertEqual(self.binding(name)['original_owner'], original['original_owner'])
         self.assertEqual(self.binding(name)['run_id'], original['run_id'])
         def writer_free():
+            import fcntl  # Only the opted-in Unix fixture reaches this helper.
             try:
                 with (state / '.lock').open('r+b') as writer:
                     fcntl.flock(writer, fcntl.LOCK_EX | fcntl.LOCK_NB)

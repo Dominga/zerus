@@ -260,8 +260,9 @@ impl<'a> CreationSource<'a> {
         let root = Directory::open(path)?;
         use std::os::fd::FromRawFd;
         // Retain/compare the descriptor from the original native root, never a
-        // renderer/stored identity. dup is read-only; no extra lock is acquired.
-        let fd = unsafe { libc::dup(root.descriptor()) };
+        // renderer/stored identity. The temporary duplicate stays close-on-exec;
+        // no extra lock is acquired and a helper cannot inherit it.
+        let fd = unsafe { libc::fcntl(root.descriptor(), libc::F_DUPFD_CLOEXEC, 0) };
         if fd < 0 {
             return Err(REFUSED.into());
         }

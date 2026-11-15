@@ -30,7 +30,7 @@ fn path(d: &tempfile::TempDir, scope: &Run) -> PathBuf {
         .join(&scope.run)
 }
 fn parents(d: &tempfile::TempDir, scope: &Run) {
-    platform::private_dir(&path(d, scope).parent().unwrap()).unwrap();
+    platform::private_dir(path(d, scope).parent().unwrap()).unwrap();
 }
 
 #[test]

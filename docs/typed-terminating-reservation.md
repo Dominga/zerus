@@ -12,7 +12,7 @@ Terminating reservation. The existing Terminate path still performs its legacy
 stop/archive operation, and owned-mode records refuse that path.
 
 This slice adds only an unused typed reservation factory and data lookup under
-`state::terminating` (new `terminating/marker.rs`, plus a minimal borrow seam
+`state::terminating` (new `terminating/writer_records/marker.rs`, plus a minimal borrow seam
 in the existing dormant run-gate module). No installed command, supervisor, action dispatcher,
 answer channel or controller calls the factory. It neither initializes writer
 storage nor enables the owned launch route. No signal, terminal input,
@@ -47,15 +47,20 @@ borrow-only internal seam for the factory's same-writer validation and
 publication; do not clone explicitly unlocking guards. Its empty ledger is
 **not** proof that all real writers are enrolled or physically settled. Those
 host obligations remain unmet, so no installed controller may use this factory
-yet. Original source/IO settlement tokens and generic custody `Complete` also
+yet. The original freshness mint exists only in the test build; there is no
+production constructor or conversion from saved data. Original source/IO settlement tokens and generic custody `Complete` also
 remain data, never Terminate or cleanup permission.
 
 ## Durability, failure and lifetime
 
-Bound the marker to 32 KiB and a selected record read to the existing 1 MiB
-limit. Use the existing authoritative record publication and its file/directory
-durability barriers. Preserve the current legacy/ID binding behavior; do not
+Bound the marker to 32 KiB and each selected record read to 1 MiB (stricter than
+the generic record reader). Use the existing guarded authoritative record publication with native
+file/directory durability barriers. Preserve the current legacy/ID binding behavior; do not
 introduce a second marker store or bypass normal record publication/indexing.
+The guarded publication retains the normal session-ID index and legacy mirror
+updates. As with its existing recovery callers, it conservatively leaves native
+process-companion/SQLite coverage stale until ordinary reconciliation; that
+cache never becomes removal authority.
 After publication, verify the exact reserved envelope and unchanged immutable
 binding before returning a durable reservation. Completion/attention metadata
 outside that immutable projection may still advance.

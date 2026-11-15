@@ -5,29 +5,29 @@ import { STAGES, object, taskItem, text, type Stage, type Task } from "../ui/scr
 /** `hgs task list --session` of an older hgs (client/core `UPDATE_FOR_SESSION_PAGES`). */
 export const UPDATE_FOR_SESSION_PAGES = "Update hgs to read one session's tasks.";
 
-export type ScopedRead = (project: string, stage: Stage, limit: number, after: string | null, scope: TaskScope) => Promise<unknown>;
+export type ScopedRead = (project: string, stage: Stage, limit: number, after: string | null, scope?: TaskScope, query?: string) => Promise<unknown>;
 type Page = { tasks?: unknown; page?: { next?: unknown }; counts?: unknown };
 
 const none = <T,>(value: T) => Object.fromEntries(STAGES.map((s) => [s, value])) as Record<Stage, T>;
 
 /**
- * One session's view of the followed project (Only this session): each
+ * A session's view or a search of the followed project: each
  * stage's rows as hgs pages them for the session's identity (`task list
- * --session`, zerus-cg5h.26), never the loaded window filtered here. A stage
+ * --session`, zerus-cg5h.26), optionally with `--query`, never the loaded window filtered here. A stage
  * the board shows is read from its start when first shown, and again to the
  * extent the user loaded whenever the project's list changes. One read per
  * stage at a time: a change during a read reads that stage once more after
  * it. Totals are the view's own counts from the latest reply.
  */
 export function createSessionView(read: ScopedRead, window: number, pageLimit: number, maxPages: number) {
-  /** `project \n host \n session ID` of the view shown, "" when none. */
+  /** Project, host, session identity and query of the view, "" when none. */
   const [key, setKey] = createSignal("");
   const [view, setView] = createSignal({ rows: none<Task[]>([]), next: none<string | null>(null), read: none(false) });
   const [counts, setCounts] = createSignal<Record<Stage, number> | null>(null);
   const [loading, setLoading] = createSignal(none(false));
   const [error, setError] = createSignal("");
   const [unsupported, setUnsupported] = createSignal(false);
-  let project = "", scope: TaskScope | undefined, watched: readonly Stage[] = [], generation = 0;
+  let project = "", scope: TaskScope | undefined, query = "", watched: readonly Stage[] = [], generation = 0;
   /** Changes of the list so far, and the change the shown totals were read at (zerus-0h8lg). */
   let change = 0, countsAt = 0;
   let extent = none(0), fresh = none(false), reads = none(0), again = none(false);
@@ -47,7 +47,10 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
     countsAt = seen;
     setCounts(Object.fromEntries(STAGES.map((s) => [s, c[s] as number])) as Record<Stage, number>);
   };
-  const failed = (e: unknown) => { if (String(e).includes(UPDATE_FOR_SESSION_PAGES)) setUnsupported(true); else setError(String(e)); };
+  const failed = (e: unknown) => {
+    if (!query && String(e).includes(UPDATE_FOR_SESSION_PAGES)) setUnsupported(true);
+    else setError(String(e));
+  };
   const placed = (stage: Stage, rows: Task[], next: string | null) =>
     setView({ rows: { ...view().rows, [stage]: rows }, next: { ...view().next, [stage]: next }, read: { ...view().read, [stage]: true } });
   /** After a read of `stage`: once more when the list changed meanwhile. */
@@ -58,12 +61,13 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
 
   /** Reads `stage` from its start up to the rows the user loaded, replacing them when still current. */
   async function reread(stage: Stage) {
-    const at = generation, mine = ++reads[stage], want = Math.max(window, extent[stage]), owner = project, as = scope!, seen = change;
+    const at = generation, mine = ++reads[stage], want = Math.max(window, extent[stage]), owner = project, as = scope, search = query, seen = change;
     fresh[stage] = true; busy(stage, true);
     try {
       let found: Task[] = [], after: string | null = null, pages = 0;
       do {
-        const page = await read(owner, stage, Math.min(pageLimit, want - found.length), after, as) as Page;
+        const limit = Math.min(pageLimit, want - found.length);
+        const page = await (search ? read(owner, stage, limit, after, as, search) : read(owner, stage, limit, after, as)) as Page;
         if (at !== generation || mine !== reads[stage]) return;
         const cursor = text(object(page.page).next) || null;
         found = unique([...found, ...(Array.isArray(page.tasks) ? page.tasks : [])], stage);
@@ -86,7 +90,7 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
   }
 
   return {
-    /** Whether the board shows hgs's own view of a session. */
+    /** Whether the board shows hgs's session view or search results. */
     active: () => !!key() && !unsupported(),
     /** An hgs without `--session`: the board filters its loaded rows instead. */
     unsupported, error, loading,
@@ -101,11 +105,12 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
      * `stages` the board shows that this view has not read since the list
      * last changed. Call it untracked.
      */
-    show(nextProject: string | undefined, nextScope: TaskScope | undefined, stages: readonly Stage[]) {
-      const next = nextProject && nextScope ? [nextProject, nextScope.host, nextScope.sessionId].join("\n") : "";
+    show(nextProject: string | undefined, nextScope: TaskScope | undefined, stages: readonly Stage[], nextQuery = "") {
+      const search = nextQuery.trim();
+      const next = nextProject && (nextScope || search) ? [nextProject, nextScope?.host ?? "", nextScope?.sessionId ?? "", search].join("\n") : "";
       if (next !== key()) {
         generation++;
-        project = nextProject ?? ""; scope = nextScope; countsAt = change;
+        project = nextProject ?? ""; scope = nextScope; query = search; countsAt = change;
         extent = none(0); fresh = none(false); again = none(false);
         batch(() => {
           setKey(next); setView({ rows: none([]), next: none(null), read: none(false) }); setCounts(null);
@@ -141,7 +146,7 @@ export function createSessionView(read: ScopedRead, window: number, pageLimit: n
       const at = generation, mine = ++reads[stage], seen = change;
       busy(stage, true);
       try {
-        const page = await read(project, stage, window, after, scope!) as Page;
+        const page = await (query ? read(project, stage, window, after, scope, query) : read(project, stage, window, after, scope)) as Page;
         if (at !== generation || mine !== reads[stage]) return;
         const rows = unique([...view().rows[stage], ...(Array.isArray(page.tasks) ? page.tasks : [])], stage);
         extent = { ...extent, [stage]: rows.length };

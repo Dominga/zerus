@@ -87,8 +87,8 @@ export const resolveTaskReference = (project: string, reference: string) => desk
 /** One further page of a board stage after a cursor (`task list --stage --limit --after`). */
 /** One session's view of a stage: its identity (`launch_id:...` or `run_id:...`) on its computer (empty: this one). */
 export type TaskScope = { host: string; sessionId: string };
-export const readTaskPage = (project: string, stage: string, limit: number, after: string | null, scope?: TaskScope) =>
-  desktop<unknown>("task_page", { project, stage, limit, after, ...(scope ? { session: scope.sessionId, host: scope.host || null } : {}) });
+export const readTaskPage = (project: string, stage: string, limit: number, after: string | null, scope?: TaskScope, query?: string) =>
+  desktop<unknown>("task_page", { project, stage, limit, after, ...(scope ? { session: scope.sessionId, host: scope.host || null } : {}), ...(query ? { query } : {}) });
 export const openTaskAttachment = (path: string) => desktop<string | null>("task_attachment_open", { path });
 /** One file of a task, read when its card needs it, checked against its page and kept in the private cache. */
 export const readTaskAttachment = (project: string, task: string, source: TaskFileSource) =>

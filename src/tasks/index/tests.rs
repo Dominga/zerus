@@ -3,6 +3,8 @@ use std::cell::Cell;
 use std::time::Instant;
 use zerus_replica::{Inventory, NewTask, SessionKey, Target, TaskAttachment};
 
+mod search;
+
 /// What `f` decoded and stamped.
 fn counted<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
     DECODED.with(|n| n.set(0));
@@ -1266,12 +1268,12 @@ fn an_older_hgs_index_is_never_touched() {
     // two never rebuild each other's while both binaries are in use.
     let temp = tempfile::tempdir().unwrap();
     let store = project(temp.path());
-    let old = store.dir().join("task-index-v1.sqlite3");
-    fs::write(&old, b"an older hgs's index").unwrap();
+    let old = ["task-index-v1.sqlite3", "task-index-v2.sqlite3"].map(|name| store.dir().join(name));
+    for path in &old { fs::write(path, b"an older hgs's index").unwrap(); }
     let mut index = Index::open(&store).unwrap();
     index.page(Stage::Todo, 2, &Anchor::Start).unwrap();
     drop(index);
-    assert_eq!(fs::read(&old).unwrap(), b"an older hgs's index");
+    for path in &old { assert_eq!(fs::read(path).unwrap(), b"an older hgs's index"); }
     assert!(store.dir().join(FILE).exists());
     assert_ne!(FILE, "task-index-v1.sqlite3");
 }

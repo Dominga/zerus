@@ -167,6 +167,38 @@ pub(in crate::state) fn wait_small(state: &Path) {
 mod tests {
     use super::*;
     #[test]
+    fn a_deferred_header_does_not_pin_the_preparation_frontier() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        for n in 0..24 {
+            let name = format!("codex/example/deferred-{n}");
+            let record = json!({"version":1,"name":name,"agent":"codex","run_id":format!("run-{n}"),
+                "conversation_id":uuid::Uuid::new_v4().to_string()});
+            fs::write(
+                state.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(&state.join("content-search-v1")).unwrap();
+        let cancel = AtomicBool::new(false);
+        store
+            .discover(state, &DiscoveryBudget::interactive(), &cancel)
+            .unwrap();
+        for _ in 0..32 {
+            let mut budget = Budget::interactive();
+            budget.bytes = 1; // None fits this slice; all remain honestly unknown.
+            store.prepare_metadata(state, &budget, &cancel).unwrap();
+            if store.catalog_status().unwrap()["decoder_pending"] == false {
+                assert_eq!(store.catalog_status().unwrap()["unknown_metadata"], true);
+                assert_eq!(store.catalog_status().unwrap()["pending_paths"], 24);
+                return;
+            }
+        }
+        panic!("a deferred header starved later bounded preparation attempts");
+    }
+
+    #[test]
     fn every_small_catalog_header_precedes_historical_ingestion() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path();

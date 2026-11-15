@@ -14,6 +14,24 @@ fn harness(agent: &str) -> Harness {
     h
 }
 
+pub(super) fn bound() -> Harness {
+    let mut h = harness("claude");
+    let mut e = FakeEffects {
+        empty_conversation: true,
+        worktree_unverified: true,
+        ..Default::default()
+    };
+    advance(&mut runtime(&h), &mut h, &mut e, 60);
+    assert!(h
+        .store
+        .member(TEAM, "lead")
+        .unwrap()
+        .unwrap()
+        .session
+        .is_some());
+    h
+}
+
 #[test]
 fn planning_launches_only_its_lead_for_every_supported_agent() {
     for agent in ["claude", "codex", "kimi", "dsh"] {

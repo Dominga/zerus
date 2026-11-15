@@ -3125,6 +3125,11 @@ pub(super) fn bound151_fixture() -> Harness {
     h
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound161_fixture() -> Harness {
+    planning::bound()
+}
+
 #[test]
 fn launch_card_writers_establish_list_stuck_for_blocked_and_uncertain_launches() {
     let stuck = |h: &Harness| {

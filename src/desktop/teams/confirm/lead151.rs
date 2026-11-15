@@ -6,6 +6,7 @@ use crate::teams::ops::{
     Operation,
 };
 use serde_json::json;
+mod planning;
 
 struct World {
     h: Harness,
@@ -17,7 +18,9 @@ struct World {
 }
 impl World {
     fn new() -> Self {
-        let h = crate::desktop::teams::tests::bound151_fixture();
+        Self::from_harness(crate::desktop::teams::tests::bound151_fixture())
+    }
+    fn from_harness(h: Harness) -> Self {
         let config = crate::config::Config {
             home: h.temp.path().to_string_lossy().into(),
             dir: h.temp.path().join("config"),

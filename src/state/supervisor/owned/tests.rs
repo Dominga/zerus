@@ -66,11 +66,11 @@ fn stale_request_and_partial_peer_do_not_renew_the_server_deadline() {
     assert!(started.elapsed() < Duration::from_secs(1));
     drop(peer);
     let mut peer = UnixStream::connect(channel.path()).unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
     peer.write_all(b"{\"observe\":{\"run\":\"other\"}}\n")
         .unwrap();
     channel.poll(&source, &binding, &json!({}));
-    peer.set_read_timeout(Some(Duration::from_millis(100)))
-        .unwrap();
     let mut byte = [0];
     assert_eq!(std::io::Read::read(&mut peer, &mut byte).unwrap(), 0);
 }

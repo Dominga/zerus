@@ -54,7 +54,20 @@ impl Channel {
             return;
         }
         bytes.push(b'\n');
-        let _ = write(&mut stream, &bytes, until);
+        if write(&mut stream, &bytes, until).is_ok() {
+            // Darwin may stop exposing LOCAL_PEERPID after close. Keep this
+            // same native connection alive through the observer's final check.
+            // A single completion byte has no effect or admission semantics.
+            let mut byte = [0];
+            while Instant::now() < until {
+                match stream.read(&mut byte) {
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1))
+                    }
+                    _ => break,
+                }
+            }
+        }
     }
 }
 fn read(stream: &mut UnixStream, until: Instant) -> io::Result<Vec<u8>> {
@@ -138,6 +151,7 @@ pub(super) fn query(
     {
         return Err(io::Error::other("original observation binding changed"));
     }
+    write(&mut stream, b"!", until)?;
     Ok(reply)
 }
 

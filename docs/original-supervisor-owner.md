@@ -56,6 +56,8 @@ an activation prerequisite.
 
 A private read-only endpoint accepts one exact observation frame per poll,
 with one absolute 25 ms frame budget, an 8 KiB frame cap and no queued history.
+A one-byte completion handshake keeps the same connection open through the
+observer's final native check, within that unchanged original budget.
 Both native socket credentials and the peer's running image are checked; a PID
 in JSON is not peer evidence. Source replacement, stale run/nonce, incomplete
 frames and unrelated native images refuse. The test observer has one absolute

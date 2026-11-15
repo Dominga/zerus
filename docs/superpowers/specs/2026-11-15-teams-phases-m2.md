@@ -89,7 +89,8 @@ The native Person-evidence migration from .31 owns core layout 4. Ordinary
 opens preserve that native allocation and its validated nonce and receipts;
 publication alone raises the private execution floor to 5 in its operation
 transaction. Layout 6 is reserved for rework in slice 4 and remains refused
-by slice 3. Legacy queue 2 and planning 3 remain migration inputs. These core
+by slice 3. Layout 7 is reserved for .31 slice 2 native Person controls and
+also remains refused. Legacy queue 2 and planning 3 remain migration inputs. These core
 allocations live in `src/teams/store/layout.rs`, with the allocation uniqueness
 control; timer layouts 8 through 12 and raw pinned mark 2147483660 are separate.
 The supported ceiling is not the ordinary-open migration target.

@@ -65,6 +65,7 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::ArchiveMember { .. }
         | Operation::SetValidationConfig { .. }
         | Operation::ChangeSettings { .. }
+        | Operation::AdvanceBase { .. }
         | Operation::DecideCard { .. }
         | Operation::SetDeps { .. } => person,
         Operation::AddTask { .. } => true,

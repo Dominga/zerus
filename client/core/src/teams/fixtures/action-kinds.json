@@ -3,6 +3,7 @@
   "accept_phase",
   "add_member",
   "admit",
+  "advance_base",
   "approve_phase",
   "archive",
   "archive_member",

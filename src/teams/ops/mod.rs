@@ -3,6 +3,7 @@
 #![allow(dead_code)] // Used by the following CLI and service packages.
 mod apply;
 mod authority;
+mod base;
 mod common;
 mod decisions;
 mod delegation;
@@ -34,6 +35,8 @@ mod unstaffed;
 pub use unstaffed::{unstaffed_changes, unstaffed_of, unstaffed_stages};
 mod validation;
 use super::store::{self, rows, DecisionState, Store};
+#[cfg(test)]
+pub(crate) use apply::apply_with_repository;
 #[allow(unused_imports)]
 pub use apply::{apply, apply_with_config};
 pub(crate) use apply::{apply_with_gesture, replay};

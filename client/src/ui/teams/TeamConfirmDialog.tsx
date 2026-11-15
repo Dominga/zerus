@@ -3,6 +3,10 @@ import { Icon } from "../lib/icons";
 import { tr } from "../../i18n";
 import { teams } from "../../store/teams";
 
+function advanceText(asking: NonNullable<ReturnType<typeof teams.confirmation>>) {
+  return tr("Advance the base of %1 to %2? Future hand-outs use it. Earlier hand-outs keep their assigned base. Branches are unchanged.", asking.call.team_name || asking.call.team, String(asking.call.action.commit));
+}
+
 // The person's confirmation of a destructive team action: the core refused to
 // send it (`confirm`), so nothing ran yet. The dialog shows the core's own
 // title and text; its action button sends the same intent again marked
@@ -35,8 +39,8 @@ export function TeamConfirmDialog(props: { source?: string } = {}) {
   return (
     <Show when={teams.confirmation()} keyed>
       {(asking) => (
-        <TeamConfirmation name={asking.confirmation.name} title={asking.confirmation.title}
-          text={asking.confirmation.text} action={asking.confirmation.action} onConfirm={() => void teams.confirm(props.source)} onCancel={() => teams.cancelConfirmation()} />
+        <TeamConfirmation name={asking.confirmation.name} title={asking.call.action.kind === "advance_base" ? tr("Advance base?") : asking.confirmation.title}
+          text={asking.call.action.kind === "advance_base" ? advanceText(asking) : asking.confirmation.text} action={asking.call.action.kind === "advance_base" ? tr("Advance base") : asking.confirmation.action} onConfirm={() => void teams.confirm(props.source)} onCancel={() => teams.cancelConfirmation()} />
       )}
     </Show>
   );

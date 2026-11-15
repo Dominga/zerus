@@ -1756,6 +1756,7 @@
       "rows": [
         {
           "admitted": true,
+          "assigned_base": null,
           "deps_editable": true,
           "estimate_minutes": 30,
           "holder": null,
@@ -1782,6 +1783,7 @@
         },
         {
           "admitted": true,
+          "assigned_base": null,
           "deps": [
             {
               "node": 1

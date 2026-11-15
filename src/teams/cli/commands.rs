@@ -26,6 +26,7 @@ pub(super) fn variant(command: &str) -> Option<&'static str> {
         "rename-team" => "rename_team",
         "set-goal" => "set_goal",
         "settings" => "change_settings",
+        "advance-base" => "advance_base",
         "validation-settings" => "set_validation_config",
         "pause" => "pause",
         "resume" => "resume",
@@ -68,6 +69,9 @@ pub(super) fn run(
     }
     let mut store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
+    if command == "advance-base" {
+        actor::person_only(&identity, command)?;
+    }
     if matches!(command, "ask" | "verdict") {
         actor::member_session(&identity, command)?;
     }

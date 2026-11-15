@@ -10,6 +10,7 @@ type Result<T> = std::result::Result<T, zerus_team_plan::Problem>;
 pub(crate) struct Permit(Original);
 enum Original {
     Card(card::Admission),
+    Action(super::original::Admission),
     #[cfg(test)]
     Fixture {
         actor: ops::Actor,
@@ -18,6 +19,7 @@ enum Original {
 }
 pub(crate) enum Evidence {
     Card(zerus_client_core::desktop::team_person::Intent),
+    Action(super::original::Evidence),
     #[cfg(test)]
     Fixture,
 }
@@ -26,12 +28,18 @@ impl From<card::Admission> for Permit {
         Self(Original::Card(original))
     }
 }
+impl From<super::original::Admission> for Permit {
+    fn from(original: super::original::Admission) -> Self {
+        Self(Original::Action(original))
+    }
+}
 impl Permit {
     /// Canonical input binding is checked before first-store setup as well as
     /// under the writer lock. Only the latter consumes the native original.
     pub(crate) fn preflight(&mut self, actor: &ops::Actor, request: &ops::Request) -> Result<()> {
         match &self.0 {
             Original::Card(original) => original.preflight(actor, request),
+            Original::Action(original) => original.preflight(actor, request),
             #[cfg(test)]
             Original::Fixture {
                 actor: expected_actor,
@@ -58,6 +66,9 @@ impl Permit {
             Original::Card(original) => original
                 .consume(db, state, actor, request)
                 .map(Evidence::Card),
+            Original::Action(original) => original
+                .consume(db, state, actor, request)
+                .map(Evidence::Action),
             #[cfg(test)]
             Original::Fixture {
                 actor: expected_actor,
@@ -85,6 +96,7 @@ impl Evidence {
     pub(crate) fn original(&self, db: &Connection) -> Result<()> {
         match self {
             Self::Card(intent) => card::original(db, intent),
+            Self::Action(original) => original.original(db),
             #[cfg(test)]
             Self::Fixture => Ok(()),
         }
@@ -92,13 +104,15 @@ impl Evidence {
     pub(crate) fn fresh(&self, db: &Connection) -> Result<()> {
         match self {
             Self::Card(intent) => card::fresh(db, intent),
+            Self::Action(original) => original.fresh(db),
             #[cfg(test)]
             Self::Fixture => Ok(()),
         }
     }
-    pub(crate) fn record(&self, db: &Connection) -> Result<()> {
+    pub(crate) fn record(self, db: &Connection) -> Result<()> {
         match self {
-            Self::Card(intent) => card::record(db, intent),
+            Self::Card(intent) => card::record(db, &intent),
+            Self::Action(original) => original.record(db),
             #[cfg(test)]
             Self::Fixture => Ok(()),
         }

@@ -157,7 +157,7 @@ fn machine(config: &Config) -> anyhow::Result<String> {
 
 /// Check the opened SQLite object too: a pathname's device/inode alone cannot
 /// authorize a connection which still points at a replaced database.
-fn identity(db: &Connection, state: &Path) -> Result<String> {
+pub(super) fn identity(db: &Connection, state: &Path) -> Result<String> {
     let path = state.join("teams/teams-v1.sqlite3");
     #[cfg(unix)]
     let id = {

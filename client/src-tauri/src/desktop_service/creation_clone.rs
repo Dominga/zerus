@@ -140,11 +140,20 @@ impl Read {
         help: bool,
         extra: Option<zerus_client_core::desktop::drain::Charge>,
     ) -> Result<Vec<u8>, String> {
-        let reply_limit = if matches!(request, Some(Request::TeamPersonDecide { .. }))
+        let reply_limit = if matches!(
+            request,
+            Some(Request::TeamPersonAction { .. } | Request::TeamPersonPlanPiece { .. })
+        ) || matches!(
+            input["op"].as_str(),
+            Some("team_person_action_prepare" | "team_person_action_result")
+        ) {
+            zerus_client_core::desktop::team_person_actions::BYTES
+        } else if matches!(request, Some(Request::TeamPersonDecide { .. }))
             || matches!(
                 input["op"].as_str(),
                 Some("team_person_prepare" | "team_person_result")
-            ) {
+            )
+        {
             zerus_client_core::desktop::team_person::BYTES
         } else {
             wire::REPLY_BYTES

@@ -1,0 +1,194 @@
+//! Resolve data without creating Person authority. The same operation encoder
+//! is used by the CLI and the window; no renderer-supplied Actor is accepted.
+use super::required;
+use crate::{
+    config::Config,
+    teams::{
+        catalog, ops,
+        store::{self, rows},
+    },
+};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::{json, Value};
+use std::sync::Arc;
+use zerus_client_core::{desktop::team_person_actions as wire, teams::action::TeamAction};
+use zerus_team_plan::{model::Team, problem::code, Problem};
+
+type Result<T> = std::result::Result<T, Problem>;
+
+pub(super) struct Prepared {
+    pub plan: Arc<wire::Plan>,
+    pub request: ops::Request,
+}
+
+pub(super) fn actor() -> ops::Actor {
+    ops::Actor::Person {
+        person: "local".into(),
+        origin: ops::PersonOrigin::DesktopUi,
+    }
+}
+
+impl Prepared {
+    pub fn resolve(config: &Config, plan: Arc<wire::Plan>) -> Result<Self> {
+        if !plan.valid() {
+            return Err(required());
+        }
+        let wire::Action::Team { change } = &plan.action else {
+            return Err(required());
+        };
+        let call = plan.call().ok_or_else(required)?;
+        let (invocation, _) =
+            zerus_client_core::teams::action::prepare(&call).map_err(|_| required())?;
+        let mut fields: serde_json::Map<String, Value> =
+            serde_json::from_slice(invocation.stdin.as_deref().ok_or_else(required)?)
+                .map_err(store::storage)?;
+        let variant = match change.as_ref() {
+            TeamAction::Settings { .. } => "change_settings".into(),
+            TeamAction::ValidationConfig { .. } => "set_validation_config".into(),
+            TeamAction::Decide { .. } => "decide_card".into(),
+            // Ask is member-only even when a Person could name a node.
+            TeamAction::Ask { .. } => return Err(required()),
+            _ => change.op().replace('-', "_"),
+        };
+        fields.insert("op".into(), json!(variant));
+        if let TeamAction::Create {
+            template,
+            expected_template,
+            ..
+        }
+        | TeamAction::StartPlanning {
+            template,
+            expected_template,
+            ..
+        } = change.as_ref()
+        {
+            let catalog = catalog::load(&config.dir)?;
+            let bundle = zerus_team_plan::bundle(&catalog, template)?;
+            if catalog::template_digest(&bundle)? != *expected_template {
+                return Err(Problem::new(
+                    code::TEMPLATE_CHANGED,
+                    "The template changed since it was shown. Review it again.",
+                ));
+            }
+            fields.insert(
+                "bundle".into(),
+                serde_json::to_value(bundle).map_err(store::storage)?,
+            );
+        }
+        let request: ops::Request =
+            serde_json::from_value(Value::Object(fields)).map_err(store::storage)?;
+        if store::encode(&request)?.len() > wire::PLAN_BYTES {
+            return Err(required());
+        }
+        Ok(Self { plan, request })
+    }
+
+    pub fn matches(&self, who: &ops::Actor, request: &ops::Request, intent: &wire::Intent) -> bool {
+        who == &actor()
+            && self.request == *request
+            && self.plan.reference().as_ref() == Some(&intent.plan)
+            && wire::digest(request).as_deref() == Some(intent.request.as_str())
+    }
+
+    pub fn bound_facts(
+        &self,
+        db: &Connection,
+        config: Option<&Config>,
+    ) -> Result<(Option<Team>, String)> {
+        let (team, ordinary) = self.facts(db)?;
+        if let ops::Operation::AdvanceBase { .. } = &self.request.operation {
+            let config = config.ok_or_else(required)?;
+            let team = team.ok_or_else(required)?;
+            let repo = crate::desktop::teams::repository(config, &team)?;
+            let path = crate::platform::canonical(&repo.git_dir).map_err(store::storage)?;
+            let identity = crate::platform::file_identity(&path).ok_or_else(required)?;
+            let refs = crate::teams::integrate::main_refs(&repo)?;
+            let digest = wire::digest(&(ordinary, path, identity.device, identity.inode, refs))
+                .ok_or_else(required)?;
+            Ok((Some(team), digest))
+        } else {
+            Ok((team, ordinary))
+        }
+    }
+
+    /// Point reads only. SQL measures bodies before materializing them. The
+    /// fixed projections include native facts which may change independently
+    /// of the team's revision, such as an owner card or a task observation.
+    pub fn facts(&self, db: &Connection) -> Result<(Option<Team>, String)> {
+        let id = &self.request.team;
+        let team = point(db, "teams", "id", id, None,
+            "id,project,name,goal,home,owner,status,lead,settings,bundle,integration_branch,base_commit,revision,person_paused,next_node", 262_144)?;
+        let fields = serde_json::to_value(&self.request).map_err(store::storage)?;
+        let mut facts = vec![team.clone()];
+        if let Some(node) = fields.get("node") {
+            let live = point(db, "nodes", "team", id, Some(("id",node)),
+                "data,rank,admitted,routed,hold,hold_owner,hand_back,task_revision,task_stage,task_cancelled,generation,decided_by,integrated,integration_commit,requested,integration_required", 65536)?;
+            let archived = point(db, "node_archive", "team", id, Some(("id",node)),
+                "data,rank,admitted,routed,hold,hold_owner,hand_back,task_revision,task_stage,task_cancelled,generation,decided_by,integrated,integration_commit,requested,integration_required", 65536)?;
+            facts.extend([live, archived]);
+            if let Some(node) = node.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                facts
+                    .push(serde_json::to_value(rows::deps(db, id, node)?).map_err(store::storage)?);
+            }
+        }
+        for (field, table, key, columns, bound) in [
+            ("member","members","id","data,state,person_stopped,machine,session_id",65536),
+            ("card","cards","seq","kind,node,actor,text,notes,state,decision,decided_actor,created_ms,decision_seq,parameters,decisions",49152),
+            ("item","inbox","seq","kind,node,generation,actor,text,notes,state,reply,reply_actor,created_ms",49152),
+            ("phase","phases","n","data",262144),
+        ] {
+            if let Some(value) = fields.get(field) {
+                facts.push(point(db,table,"team",id,Some((key,value)),columns,bound)?);
+            }
+        }
+        let current = if team.is_null() {
+            None
+        } else {
+            rows::team(db, id)?
+        };
+        let digest = wire::digest(&(&self.request, facts)).ok_or_else(required)?;
+        Ok((current, digest))
+    }
+}
+
+/// All identifiers and projections are fixed by the calls above, never input.
+fn point(
+    db: &Connection,
+    table: &str,
+    first: &str,
+    team: &str,
+    second: Option<(&str, &Value)>,
+    columns: &str,
+    bound: u64,
+) -> Result<Value> {
+    let lengths = columns
+        .split(',')
+        .map(|c| format!("coalesce(length(CAST({c} AS BLOB)),0)"))
+        .collect::<Vec<_>>()
+        .join("+");
+    let suffix = second.map_or(String::new(), |(key, _)| format!(" AND {key}=?2"));
+    let sql = format!("SELECT {lengths},CASE WHEN {lengths}<=?3 THEN json_array({columns}) END FROM {table} WHERE {first}=?1{suffix}");
+    let key = second.map_or(Value::Null, |(_, v)| v.clone());
+    let key = match key {
+        Value::String(s) => rusqlite::types::Value::Text(s),
+        Value::Number(n) => rusqlite::types::Value::Integer(n.as_i64().ok_or_else(required)?),
+        Value::Null => rusqlite::types::Value::Null,
+        _ => return Err(required()),
+    };
+    let row: Option<(u64, Option<String>)> = db
+        .query_row(&sql, params![team, key, bound], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .optional()
+        .map_err(store::storage)?;
+    match row {
+        None => Ok(Value::Null),
+        Some((bytes, Some(text))) if bytes <= bound => {
+            serde_json::from_str(&text).map_err(store::storage)
+        }
+        _ => Err(Problem::new(
+            code::OVER_CAP,
+            "The exact team action exceeds its native review bound.",
+        )),
+    }
+}

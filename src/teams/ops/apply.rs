@@ -178,7 +178,7 @@ fn apply_inputs(
         return result;
     }
     save(&tx, actor, request, &result)?;
-    if let Some(intent) = &gesture {
+    if let Some(intent) = gesture {
         intent.record(&tx)?;
     }
     tx.commit().map_err(storage)?;

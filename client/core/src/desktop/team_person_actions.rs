@@ -57,7 +57,7 @@ impl Plan {
         let plan = Self {
             request_id: call.request_id.clone(),
             team: call.team.clone(),
-            expected_revision: if matches!(call.action, TeamAction::Create { .. }) {
+            expected_revision: if !call.action.names_team() {
                 0
             } else {
                 call.expected_revision?
@@ -99,8 +99,7 @@ impl Plan {
                 // The existing CLI reserves Ask for a proved member session.
                 // A new native Person lane must preserve that restriction.
                 !matches!(change.as_ref(), TeamAction::Ask { .. })
-                    && (!matches!(change.as_ref(), TeamAction::Create { .. })
-                        || self.expected_revision == 0)
+                    && (change.names_team() || self.expected_revision == 0)
                     && self
                         .call()
                         .is_some_and(|call| crate::teams::action::prepare(&call).is_ok())
@@ -157,6 +156,25 @@ pub struct Piece {
     pub payload: String,
 }
 impl Piece {
+    pub fn from_bytes(
+        request_id: String,
+        scope: Scope,
+        plan: Reference,
+        ordinal: u16,
+        bytes: &[u8],
+    ) -> Option<Self> {
+        if bytes.len() > PIECE_BYTES {
+            return None;
+        }
+        let piece = Self {
+            request_id,
+            scope,
+            plan,
+            ordinal,
+            payload: base64::engine::general_purpose::STANDARD.encode(bytes),
+        };
+        piece.valid().then_some(piece)
+    }
     pub fn valid(&self) -> bool {
         zerus_desktop_migration::canonical_uuid(&self.request_id)
             && self.scope.valid()
@@ -199,6 +217,8 @@ pub struct Intent {
     pub machine: String,
     pub store: StoreBinding,
     pub facts: String,
+    /// Digest of the canonical store request, including a resolved template.
+    pub request: String,
     pub plan: Reference,
 }
 impl Intent {
@@ -207,6 +227,7 @@ impl Intent {
             && zerus_desktop_migration::canonical_uuid(&self.machine)
             && self.store.valid()
             && super::digest(&self.facts)
+            && super::digest(&self.request)
             && self.plan.valid()
     }
 }
@@ -227,7 +248,7 @@ impl Review {
             && text(&self.team_name, 4096)
             && text(&self.title, 256)
             && self.subject.len() <= 8192
-            && self.details.len() <= 32
+            && self.details.len() <= 64
             && self
                 .details
                 .iter()
@@ -313,6 +334,7 @@ mod tests {
                 fingerprint: "b".repeat(64),
             },
             facts: "c".repeat(64),
+            request: "d".repeat(64),
             plan: plan.reference().unwrap(),
         };
         let piece = Piece {

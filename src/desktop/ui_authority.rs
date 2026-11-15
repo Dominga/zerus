@@ -2995,6 +2995,7 @@ mod tests {
             },
             facts: "c".repeat(64),
             plan: plan.reference().unwrap(),
+            request: "d".repeat(64),
         };
         let piece = wire::Piece {
             request_id: id(94),

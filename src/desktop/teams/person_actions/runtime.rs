@@ -1,0 +1,325 @@
+//! Bounded metadata workers keep filesystem, SQLite and Git reads off the
+//! desktop actor. An original retains the service owner until it settles.
+use super::{
+    original::{self, Admission},
+    plans::Cache,
+    prepared::{self, Prepared},
+    required,
+};
+use crate::{
+    config::Config,
+    desktop::{fanout::Queue, ui_authority::Validated},
+    platform,
+    teams::{
+        ops,
+        store::{self, Store},
+    },
+};
+use rusqlite::OptionalExtension;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Weak,
+    },
+    thread::{self, JoinHandle},
+};
+use zerus_client_core::desktop::{creation_clone::Scope, team_person_actions as wire};
+use zerus_team_plan::{problem::code, Problem};
+
+const WORKERS: usize = 8;
+type Result<T> = std::result::Result<T, Problem>;
+
+pub(in crate::desktop) struct Runtime {
+    config: Config,
+    scope: Scope,
+    plans: Cache,
+    owner: Weak<platform::FileLock>,
+    stopped: Arc<AtomicBool>,
+    workers: Vec<JoinHandle<()>>,
+}
+#[derive(Deserialize)]
+#[serde(tag = "op", deny_unknown_fields)]
+enum Query {
+    #[serde(rename = "team_person_action_prepare")]
+    Prepare { scope: Scope, plan: wire::Reference },
+    #[serde(rename = "team_person_action_result")]
+    Result { intent: wire::Intent },
+}
+
+impl Runtime {
+    pub fn new(
+        config: &Config,
+        scope: Scope,
+        owner: Arc<platform::FileLock>,
+        stopped: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            config: config.clone(),
+            plans: Cache::new(scope.clone()),
+            scope,
+            owner: Arc::downgrade(&owner),
+            stopped,
+            workers: Vec::new(),
+        }
+    }
+
+    pub fn stage(&mut self, authority: Validated) -> Value {
+        let id = authority.id().to_owned();
+        let result = authority
+            .team_person_plan_piece()
+            .map_err(|_| required())
+            .and_then(|piece| self.plans.stage(piece).map_err(store::storage));
+        match result {
+            Ok(complete) => json!({"ok":true,"request_id":id,"complete":complete}),
+            Err(problem) => refusal(&id, problem),
+        }
+    }
+
+    pub fn query(&mut self, value: &Value, queue: Arc<Queue>, seq: u64) -> Result<()> {
+        let query: Query = serde_json::from_value(value.clone()).map_err(|_| required())?;
+        let plan = match &query {
+            Query::Prepare { scope, plan } if scope == &self.scope => {
+                Some(self.plans.get(plan).map_err(store::storage)?)
+            }
+            Query::Result { intent }
+                if intent.valid() && intent.scope.configuration == self.scope.configuration =>
+            {
+                None
+            }
+            _ => return Err(required()),
+        };
+        let config = self.config.clone();
+        let scope = self.scope.clone();
+        self.start(queue,seq, move || {
+            let result = match query {
+                Query::Prepare { .. } => review(&config,&scope,plan.expect("checked native plan")),
+                Query::Result { intent } => lookup(&config,&scope,&intent),
+            };
+            result.unwrap_or_else(|_| json!({"ok":false,"code":"team_person_action_evidence_unavailable","message":"The exact native team action evidence is unavailable. Nothing was replayed."}))
+        })
+    }
+
+    pub fn action(&mut self, authority: Validated, queue: Arc<Queue>, seq: u64) -> Result<()> {
+        let intent = authority
+            .team_person_action_intent()
+            .ok_or_else(required)?
+            .clone();
+        if intent.scope != self.scope {
+            return Err(required());
+        }
+        let plan = self.plans.get(&intent.plan).map_err(store::storage)?;
+        let config = self.config.clone();
+        let scope = self.scope.clone();
+        let stopped = self.stopped.clone();
+        self.start(queue, seq, move || {
+            let result = (|| -> Result<Value> {
+                if !cfg!(unix) || stopped.load(Ordering::Acquire) {
+                    return Err(required());
+                }
+                let prepared = Arc::new(Prepared::resolve(&config, plan)?);
+                let request = prepared.request.clone();
+                let admission = Admission::new(authority, prepared, config.clone(), scope, stopped);
+                // Before opening a writer (which may migrate an existing
+                // schema), check the exact original and canonical request.
+                admission.preflight(&prepared::actor(), &request)?;
+                let mut store = Store::open(&config.state)?;
+                let result = ops::apply_with_native_context(
+                    &mut store,
+                    &prepared::actor(),
+                    &request,
+                    chrono::Utc::now().timestamp_millis(),
+                    Some(&config),
+                    &|team| crate::desktop::teams::repository(&config, team),
+                    admission.into(),
+                );
+                Ok(json!({"intent":intent,"reply":reply(&request,result)}))
+            })();
+            result.unwrap_or_else(
+                |problem| json!({"intent":intent,"reply":refusal(&intent.plan.request_id,problem)}),
+            )
+        })
+    }
+
+    pub fn poll(&mut self) {
+        let mut index = 0;
+        while index < self.workers.len() {
+            if self.workers[index].is_finished() {
+                let _ = self.workers.swap_remove(index).join();
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn start(
+        &mut self,
+        queue: Arc<Queue>,
+        seq: u64,
+        run: impl FnOnce() -> Value + Send + 'static,
+    ) -> Result<()> {
+        self.poll();
+        if self.stopped.load(Ordering::Acquire) || self.workers.len() >= WORKERS {
+            return Err(Problem::new(
+                code::STORE_BUSY,
+                "Native team action workers are busy. Nothing was admitted.",
+            ));
+        }
+        let owner = self.owner.upgrade().ok_or_else(required)?;
+        let scope = self.scope.clone();
+        let worker = thread::Builder::new()
+            .name("team-person-metadata".into())
+            .spawn(move || {
+                struct ReplyQueue(Arc<Queue>);
+                impl Drop for ReplyQueue {
+                    fn drop(&mut self) {
+                        self.0.close();
+                    }
+                }
+                let reply = ReplyQueue(queue);
+                let _owner = owner;
+                let value = run();
+                if let Ok(frame) = crate::desktop::protocol::encode(&crate::desktop::frame(
+                    &scope.service_epoch,
+                    seq,
+                    "response",
+                    value,
+                )) {
+                    reply.0.offer(frame.into());
+                }
+            })
+            .map_err(store::storage)?;
+        self.workers.push(worker);
+        Ok(())
+    }
+}
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Every worker is one bounded metadata operation. Normal service
+        // shutdown cannot relinquish its owner while a writer is still live.
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value> {
+    let prepared = Prepared::resolve(config, plan.clone())?;
+    let store = Store::person_evidence(&config.state)?;
+    let db = store.db.as_ref().ok_or_else(required)?;
+    let tx = db.unchecked_transaction().map_err(store::storage)?;
+    let (team, facts) = prepared.bound_facts(&tx, Some(config))?;
+    let team = team.ok_or_else(required)?;
+    ops::authority(&prepared::actor(), &prepared.request.operation, &team)?;
+    if team.revision != plan.expected_revision {
+        return Err(Problem::new(
+            code::STALE_REVISION,
+            "Read the current team before confirming its action.",
+        ));
+    }
+    let wire::Action::Team { change } = &plan.action else {
+        return Err(required());
+    };
+    let mut details = Vec::new();
+    for (key, value) in change.input() {
+        let text = if let Value::String(s) = value {
+            s
+        } else {
+            serde_json::to_string_pretty(&value).map_err(store::storage)?
+        };
+        // The complete bounded payload is displayed; no truncation can hide
+        // a permission, dependency or phase node from native confirmation.
+        let mut start = 0;
+        let mut part = 1;
+        while start < text.len() {
+            let mut end = (start + 8192).min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            details.push((
+                format!("{} ({part})", key.replace('_', " ")),
+                text[start..end].to_owned(),
+            ));
+            start = end;
+            part += 1;
+        }
+    }
+    let review = wire::Review {
+        intent: wire::Intent {
+            scope: scope.clone(),
+            machine: original::machine(config)?,
+            store: wire::StoreBinding::Existing {
+                fingerprint: super::super::person_gesture::identity(&tx, store.state())?,
+            },
+            facts,
+            request: wire::digest(&prepared.request).ok_or_else(required)?,
+            plan: plan.reference().ok_or_else(required)?,
+        },
+        team_name: team.name,
+        title: "Confirm team action".into(),
+        subject: change.op().replace('-', " "),
+        details,
+    };
+    if !review.valid() {
+        return Err(required());
+    }
+    Ok(json!({"ok":true,"review":review}))
+}
+
+fn lookup(config: &Config, scope: &Scope, intent: &wire::Intent) -> Result<Value> {
+    if !intent.valid()
+        || intent.scope.configuration != scope.configuration
+        || intent.machine != original::machine(config)?
+    {
+        return Err(required());
+    }
+    let store = Store::person_evidence(&config.state)?;
+    let db = store.db.as_ref().ok_or_else(required)?;
+    let tx = db.unchecked_transaction().map_err(store::storage)?;
+    let wire::StoreBinding::Existing { fingerprint } = &intent.store else {
+        return Err(required());
+    };
+    if super::super::person_gesture::identity(&tx, store.state())? != *fingerprint {
+        return Err(required());
+    }
+    original::receipt_bound(&tx, &intent.plan.request_id)?;
+    original::original(&tx, intent)?;
+    let body: Option<String> = tx
+        .query_row(
+            "SELECT content FROM requests WHERE id=?1 AND length(CAST(content AS BLOB))<=262144",
+            [&intent.plan.request_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(store::storage)?;
+    let request: ops::Request = store::decode(&body.ok_or_else(required)?)?;
+    if request.request_id != intent.plan.request_id
+        || request.team != intent.plan.team
+        || request.expected_revision != intent.plan.expected_revision
+        || wire::digest(&request).as_deref() != Some(&intent.request)
+    {
+        return Err(required());
+    }
+    let result = ops::replay(&tx, &prepared::actor(), &request)?.ok_or_else(required)?;
+    Ok(json!({"intent":intent,"reply":reply(&request,result)}))
+}
+
+fn reply(request: &ops::Request, result: Result<ops::Reply>) -> Value {
+    match result {
+        Ok(result) => {
+            let mut value = serde_json::to_value(result).expect("fixed team receipt");
+            value["actor"] = json!(prepared::actor());
+            value["team"] = json!(request.team);
+            value["request_id"] = json!(request.request_id);
+            value
+        }
+        Err(problem) => refusal(&request.request_id, problem),
+    }
+}
+fn refusal(id: &str, problem: Problem) -> Value {
+    json!({"ok":false,"code":problem.code,"message":problem.message,"request_id":id})
+}
+
+#[cfg(all(test, unix))]
+mod tests;

@@ -688,6 +688,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
+    let mut person_actions = teams::person_actions::Runtime::new(
+        config,
+        zerus_client_core::desktop::creation_clone::Scope {
+            configuration: location.configuration.clone(),
+            service_epoch: epoch.clone(),
+        },
+        owner.clone(),
+        stopped.clone(),
+    );
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
@@ -893,6 +902,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 &mut heartbeat,
             );
             frontend.tick(&location);
+            person_actions.poll();
             store.recover_operation_custody(&location);
             if let Some(runtime) = task_runtime.as_mut() {
                 runtime.poll(
@@ -1051,6 +1061,37 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
+                            (Some(authority), _)
+                                if matches!(
+                                    authority.operation(),
+                                    "team_person_plan_piece" | "team_person_action"
+                                ) =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request)
+                                        if request.operation() == "team_person_plan_piece" =>
+                                    {
+                                        person_actions.stage(request)
+                                    }
+                                    Ok(request) => {
+                                        match person_actions.action(request, queue.clone(), seq) {
+                                            Ok(()) => {
+                                                activation_waiting = true;
+                                                streaming = true;
+                                                Value::Null
+                                            }
+                                            Err(problem) => frontend_refused(
+                                                hello.request.as_ref(),
+                                                &problem.code,
+                                            ),
+                                        }
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
                             (Some(authority), _)
                                 if authority.operation() == "team_person_decide" =>
                             {
@@ -1274,6 +1315,26 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
                         let result = if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("team_person_action_prepare" | "team_person_action_result")
+                            )
+                        }) {
+                            match person_actions.query(
+                                hello.request.as_ref().unwrap(),
+                                queue.clone(),
+                                seq,
+                            ) {
+                                Ok(()) => {
+                                    activation_waiting = true;
+                                    streaming = true;
+                                    Value::Null
+                                }
+                                Err(problem) => {
+                                    frontend_refused(hello.request.as_ref(), &problem.code)
+                                }
+                            }
+                        } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
                                 Some("team_person_prepare" | "team_person_result")
@@ -1789,6 +1850,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     if let Some(runtime) = task_runtime.as_mut() {
         runtime.drain();
     }
+    drop(person_actions);
     let drained = if replaced {
         // Even an unrelated listener/store error during replacement must not
         // turn the normal four-second shutdown wait into abandonment. An

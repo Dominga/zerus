@@ -5,6 +5,7 @@ import type { RouteActivity } from "../../store/questionRouteActivity";
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
+import { matchesOwnPreview, ownMessageText, ownMessageTruncated, restoreOwnMessages } from "./full-own-text";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -152,23 +153,36 @@ export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary
   const receipts = Array.isArray(summary?.attachment_messages) ? summary.attachment_messages as ActivityEvent[] : [];
   if (!receipts.length) return given;
   const events = [...given];
+  const valid = receipts.filter(receipt => receipt.source === "hgs_delivery" && receipt.attachments?.length
+    && typeof receipt.submitted_text === "string" && receipt.submitted_text.trim() && echoMatchesFiles(receipt.submitted_text, receipt.attachments));
+  const matches = (event: ActivityEvent, receipt: ActivityEvent) => {
+    if (event.source === "hgs_voice" || childEvent(event) || event.origin || event.turn_origin && event.turn_origin !== "user"
+      || event.inherited_from || event.attachments?.length || !PROMPTS.has(event.type ?? "")) return false;
+    const full = String(receipt.submitted_text);
+    if (ownMessageText(event).trim() === full.trim()) return true;
+    // The legacy 1200-character hook projection is deterministic. Require
+    // one timed receipt and one row; a common prefix alone is insufficient.
+    return event.message_text === undefined && matchesOwnPreview(event.detail ?? "", full)
+      && typeof event.at === "number" && Number.isFinite(event.at) && event.at > 0
+      && typeof receipt.at === "number" && Number.isFinite(receipt.at) && receipt.at > 0
+      && Math.abs(event.at - receipt.at) <= 10;
+  };
   let changed = false;
-  for (const receipt of receipts) {
+  for (const receipt of valid) {
     const files = Array.isArray(receipt.attachments) ? receipt.attachments : [];
     const submitted = typeof receipt.submitted_text === "string" ? receipt.submitted_text.trim() : "";
     if (receipt.source !== "hgs_delivery" || !files.length || !submitted || !echoMatchesFiles(submitted, files)) continue;
     if (receipts.filter((other) => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
     const exact: number[] = [];
-    events.forEach((event, index) => {
-      if (event.source !== "hgs_voice" && !childEvent(event) && !event.attachments?.length && PROMPTS.has(event.type ?? "")
-        && (event.detail ?? "").trim() === submitted) exact.push(index);
-    });
+    events.forEach((event, index) => { if (matches(event, receipt)) exact.push(index); });
     if (exact.length !== 1) continue;
     const at = exact[0];
     const event = events[at];
+    if (valid.filter(other => matches(event, other)).length !== 1) continue;
     events[at] = {
       ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: files,
-      attachment_echo: event.detail, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
+      message_text: typeof receipt.detail === "string" ? receipt.detail : "", message_text_truncated: false,
+      attachment_echo: receipt.submitted_text, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
     };
     changed = true;
   }
@@ -357,6 +371,7 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       claimed.add(match);
       source[match] = {
         ...source[match], activity_journal_key: eventKey(source[match]), activity_key: `local-${row.id}`, activity_display_key: `local-${row.id}`, detail: row.text,
+        message_text: row.text, message_text_truncated: false,
         attachments: source[match].attachments?.length ? source[match].attachments : row.attachments as ActivityEvent["attachments"], attachment_submitted_text: row.submitted_text,
         [LOCAL_FILES]: row.attachments,
       } as DisplayEvent;
@@ -425,8 +440,9 @@ const isExcerpt = (excerpt: string, full: string) => {
  * bounded provider window at render time, including progress between tools.
  */
 export function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
-  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return given;
-  const events = [...given];
+  const restored = restoreOwnMessages(given, summary);
+  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return restored;
+  const events = [...restored];
   const matchedStops = new Set<number>();
   const identities = new Set<string>();
   const seconds = new Map<number, number[]>();
@@ -636,7 +652,8 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       // Qt's order: a queued prompt first, then an answer (ActivityView.cpp:1036-1038).
       const label = role !== "user" ? undefined : e.type === "UserPromptQueued" ? tr("You (queued)")
         : e.type === "QuestionAnswered" || replies ? tr("You (answer)") : undefined;
-      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
+      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: role === "user" ? ownMessageText(e) : e.detail ?? "",
+        ...(role === "user" ? { bodyTruncated: ownMessageTruncated(e) } : {}),
         echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
         attachments: attachments(e), receipt, label, replies, ...(inbox ? { inbox } : {}) });
       i++; continue;

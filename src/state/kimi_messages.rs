@@ -107,6 +107,56 @@ fn assistant_message(event: &Value) -> Option<Value> {
         "detail":journal::clipped(&json!(text), 32000)}))
 }
 
+/// Main user parts are display candidates only. Preserve all parts (including
+/// startup-hook context) rather than trusting hook-looking tags as provenance.
+fn user_message(event: &Value) -> Option<Value> {
+    if event["type"] != "turn.prompt"
+        || !["", "main"].contains(&string(event, "agentId"))
+        || event["origin"]["kind"] != "user"
+        || event["turnId"]
+            .as_u64()
+            .is_none_or(|id| id > i64::MAX as u64)
+    {
+        return None;
+    }
+    let id = string(event, "promptId");
+    let at = event["time"].as_f64()? / 1000.0;
+    let parts = event["input"].as_array()?;
+    if id.is_empty()
+        || id.len() > 160
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+        || !at.is_finite()
+        || at <= 0.0
+        || parts.is_empty()
+        || parts.len() > 64
+        || !parts
+            .iter()
+            .all(|part| part["type"] == "text" && part["text"].is_string())
+    {
+        return None;
+    }
+    let text = parts
+        .iter()
+        .map(|part| string(part, "text"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut body = journal::activity_message_body("kimi_wire", &text, at, id);
+    let mut remaining = journal::MESSAGE_TEXT_LIMIT;
+    let retained: Vec<_> = parts
+        .iter()
+        .map(|part| {
+            let text = string(part, "text");
+            let shown = journal::clipped(&json!(text), remaining);
+            remaining = remaining.saturating_sub(text.chars().count());
+            shown
+        })
+        .collect();
+    body["message_parts"] = json!(retained);
+    Some(body)
+}
+
 // Kimi's live loop records text as it becomes visible in the TUI. The older
 // agent.message.appended envelopes can arrive together only at the end of the
 // turn. step.end links those copies by messageId, without guessing from text or
@@ -124,6 +174,7 @@ fn wire_messages(bytes: &[u8], clipped_start: bool) -> Vec<Value> {
         if ![
             b"agent.message.appended".as_slice(),
             b"context.append_loop_event".as_slice(),
+            b"turn.prompt".as_slice(),
         ]
         .iter()
         .any(|kind| line.windows(kind.len()).any(|part| part == *kind))
@@ -134,6 +185,10 @@ fn wire_messages(bytes: &[u8], clipped_start: bool) -> Vec<Value> {
             continue;
         };
         if !["", "main"].contains(&string(&event, "agentId")) {
+            continue;
+        }
+        if let Some(message) = user_message(&event) {
+            messages.push(message);
             continue;
         }
         if let Some(message) = assistant_message(&event) {
@@ -203,9 +258,14 @@ fn wire_messages(bytes: &[u8], clipped_start: bool) -> Vec<Value> {
             .unwrap_or(0.0)
             .total_cmp(&b["at"].as_f64().unwrap_or(0.0))
     });
-    if messages.len() > 50 {
-        messages.drain(..messages.len() - 50);
-    }
+    let (mut bodies, mut replies) = (0, 0);
+    messages.reverse();
+    messages.retain(|message| {
+        let count = if message["type"] == "UserMessageBody" { &mut bodies } else { &mut replies };
+        *count += 1;
+        *count <= 50
+    });
+    messages.reverse();
     messages
 }
 
@@ -516,5 +576,53 @@ mod tests {
         event["agentId"] = json!("main");
         event["message"]["meta"]["finish"]["finishReason"] = json!("length");
         assert!(assistant_message(&event).is_none());
+    }
+}
+
+#[cfg(test)]
+mod full_own_message {
+    use super::*;
+    #[test]
+    fn native_main_user_text_is_available_without_admitting_peer_or_system_input() {
+        let text = "before ".repeat(170) + "[Image #1] AFTER IMAGE";
+        let row = json!({"type":"turn.prompt","agentId":"main","turnId":3,"promptId":"msg_3","origin":{"kind":"user"},"time":100000,
+            "input":[{"type":"text","text":text}]});
+        let messages = wire_messages((row.to_string() + "\n").as_bytes(), false);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["detail"], text);
+        for changed in [
+            json!({"agentId":"peer"}),
+            json!({"origin":{"kind":"system"}}),
+        ] {
+            let mut other = row.clone();
+            other
+                .as_object_mut()
+                .unwrap()
+                .extend(changed.as_object().unwrap().clone());
+            assert!(wire_messages((other.to_string() + "\n").as_bytes(), false).is_empty());
+        }
+    }
+
+    #[test]
+    fn handwritten_native_parts_stay_bounded_and_malformed_turns_stay_hidden() {
+        let row = json!({"type":"turn.prompt","agentId":"main","turnId":3,"promptId":"msg_3","origin":{"kind":"user"},"time":100000,
+            "input":[{"type":"text","text":"Startup context"},{"type":"text","text":"x".repeat(40000)}]});
+        let shown = user_message(&row).unwrap();
+        assert_eq!(shown["message_text_truncated"], true);
+        assert_eq!(shown["message_parts"][0], "Startup context");
+        assert!(
+            shown["message_parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part.as_str().unwrap().chars().count())
+                .sum::<usize>()
+                <= 32002
+        );
+        for invalid in [json!(false), json!({}), json!("3"), json!(-1)] {
+            let mut other = row.clone();
+            other["turnId"] = invalid;
+            assert!(user_message(&other).is_none());
+        }
     }
 }

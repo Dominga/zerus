@@ -1,5 +1,5 @@
-//! Native assistant messages and Claude's recorded thinking from the exact
-//! conversation. Hook Stop events alone miss progress between tools.
+//! Native public messages and Claude's recorded thinking from the exact
+//! conversation. User bodies hydrate Activity previews without adding rows.
 use super::*;
 use sha2::{Digest, Sha256};
 use std::fs::File;
@@ -65,8 +65,19 @@ fn line_messages(agent: &str, id: &str, line: &[u8]) -> Vec<Value> {
     if agent == "claude" {
         messages.extend(claude_thinking(&event));
     }
-    if let Some((message, "assistant")) = search::provider_event(agent, &event) {
-        messages.push(message);
+    if let Some((message, role)) = search::provider_event(agent, &event) {
+        if role == "user" {
+            let mut body = journal::activity_message_body(
+                string(&message, "source"),
+                string(&message, "detail"),
+                message["at"].as_f64().unwrap_or(0.0),
+                string(&message, "message_id"),
+            );
+            body["conversation_id"] = json!(id);
+            messages.push(body);
+        } else {
+            messages.push(message);
+        }
     }
     messages
 }
@@ -83,6 +94,16 @@ fn repeated(recent: &[Value], message: &Value) -> bool {
 }
 
 pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
+    // Subagent-history callers still receive only visible native rows.
+    read_activity(record).map(|messages| {
+        messages
+            .into_iter()
+            .filter(|message| message["type"] != "UserMessageBody")
+            .collect()
+    })
+}
+
+pub(super) fn read_activity(record: &Value) -> Result<Vec<Value>> {
     if string(record, "agent") == "kimi" {
         return kimi_messages::read(record);
     }
@@ -115,9 +136,16 @@ pub(super) fn read(record: &Value) -> Result<Vec<Value>> {
         }
     }
     messages.sort_by(|a,b|a["at"].as_f64().unwrap_or(0.).total_cmp(&b["at"].as_f64().unwrap_or(0.)));
-    if messages.len() > 100 {
-        messages.drain(..messages.len() - 100);
-    }
+    // Body candidates have their own bounded window; they do not evict the
+    // existing newest hundred assistant messages.
+    let (mut bodies, mut replies) = (0, 0);
+    messages.reverse();
+    messages.retain(|message| {
+        let count = if message["type"] == "UserMessageBody" { &mut bodies } else { &mut replies };
+        *count += 1;
+        *count <= 100
+    });
+    messages.reverse();
     Ok(messages)
 }
 
@@ -499,5 +527,74 @@ mod tests {
         assert!(Tail::open(&json!({"agent":"kimi","conversation_id":id,"transcript":path})).is_none());
         assert!(Tail::open(&json!({"agent":"claude","conversation_id":uuid::Uuid::new_v4().to_string(),"transcript":path})).is_none());
         assert!(Tail::open(&json!({"agent":"claude","conversation_id":id,"transcript":temp.path().join(format!("{id}-missing.jsonl"))})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod full_own_message {
+    use super::*;
+    #[test]
+    fn native_codex_and_claude_user_text_is_available_for_activity_hydration() {
+        let text = "before ".repeat(170)
+            + "[Image #1] (Inspect the attached image at \"/example/image.png\") AFTER IMAGE";
+        let codex = json!({"type":"response_item","timestamp":100.0,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+        let claude = json!({"type":"user","sessionId":"cid","timestamp":100.0,"uuid":"user-1","message":{"role":"user","content":[{"type":"text","text":text}]}});
+        for (agent, row) in [("codex", codex), ("claude", claude)] {
+            let messages = line_messages(agent, "cid", row.to_string().as_bytes());
+            assert_eq!(messages.len(), 1, "{agent}");
+            assert_eq!(messages[0]["detail"], text);
+            assert_eq!(messages[0]["type"], "UserMessageBody");
+        }
+    }
+
+    #[test]
+    fn handwritten_native_user_rows_keep_scope_and_explicit_body_limits() {
+        let text = "x".repeat(40000);
+        let claude = json!({"type":"user","sessionId":"cid","timestamp":100.0,"uuid":"user-1","message":{"role":"user","content":[{"type":"text","text":text}]}});
+        let shown = line_messages("claude", "cid", claude.to_string().as_bytes());
+        assert_eq!(shown[0]["detail"].as_str().unwrap().chars().count(), 32001);
+        assert_eq!(shown[0]["message_text_truncated"], true);
+        assert!(line_messages("claude", "foreign", claude.to_string().as_bytes()).is_empty());
+        for hidden in [
+            json!({"isMeta":true}),
+            json!({"isSidechain":true}),
+            json!({"isCompactSummary":true}),
+        ] {
+            let mut row = claude.clone();
+            row.as_object_mut()
+                .unwrap()
+                .extend(hidden.as_object().unwrap().clone());
+            assert!(line_messages("claude", "cid", row.to_string().as_bytes()).is_empty());
+        }
+    }
+
+    #[test]
+    fn handwritten_native_body_rows_do_not_replace_subagent_rows_or_evict_replies() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("rollout-{id}.jsonl"));
+        let mut lines = json!({"type":"session_meta","payload":{"id":id}}).to_string() + "\n";
+        for index in 0..120 {
+            for role in ["user", "assistant"] {
+                lines.push_str(&(json!({"type":"response_item","timestamp":100.0+index as f64*10.0,"payload":{"type":"message","role":role,
+                    "content":[{"type":if role=="user" {"input_text"} else {"output_text"},"text":format!("{role} {index}")}]}}).to_string()+"\n"));
+            }
+        }
+        std::fs::write(&path, lines).unwrap();
+        let record = json!({"agent":"codex","conversation_id":id,"transcript":path});
+        let visible = read(&record).unwrap();
+        assert_eq!(visible.len(), 100);
+        assert!(visible
+            .iter()
+            .all(|message| message["type"] == "AgentMessage"));
+        let activity = read_activity(&record).unwrap();
+        assert_eq!(activity.len(), 200);
+        assert_eq!(
+            activity
+                .iter()
+                .filter(|message| message["type"] == "UserMessageBody")
+                .count(),
+            100
+        );
     }
 }

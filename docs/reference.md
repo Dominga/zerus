@@ -2210,7 +2210,14 @@ Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the project list on the Projects
 
 Activity shows recorded public messages and tool events rather than a full copy
 of native history. User messages preserve literal text, Markdown markers and
-line breaks; agent replies render Markdown. The copy button at the right of a
+line breaks; agent replies render Markdown. New main-session prompt hooks retain
+up to 32,000 characters for Activity separately from their short list previews.
+Larger displayed messages have **Show more** and **Show less** controls. If only
+part of a message is available, Activity says so and points to Terminal. Older
+clipped previews can recover their body from the bounded native-message window
+or one unambiguous attached-message receipt. This display repair adds no row,
+sends no input and never confirms delivery or native acceptance.
+The copy button at the right of a
 reply's header puts its Markdown source on the clipboard; a text selection still
 copies the visible text. Claude's recorded thinking appears in
 full as a quieter **Thinking** card: the same Markdown at the same size, without

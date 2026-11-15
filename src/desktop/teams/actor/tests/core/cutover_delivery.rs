@@ -224,3 +224,86 @@ fn an_old_outcome_can_only_be_reconciled_with_its_exact_original_proof() {
         .iter()
         .all(|i| i.state == "open"));
 }
+
+/// Only an exact cutting_over reply from a child that exited 0 is proof of
+/// non-delivery; every unknown child end stays uncertain.
+#[test]
+fn only_an_exact_cutting_over_reply_from_a_settled_child_proves_non_delivery() {
+    use super::super::super::native::delivery_reply;
+    use crate::desktop::teams::child::Ended;
+    let id = "11111111-1111-4111-8111-111111111111";
+    let reply = |state: &str, schema: u64, for_id: &str| {
+        serde_json::to_vec(&serde_json::json!({"schema":schema,"id":for_id,"team":TEAM,"node":1,"member":"m1","state":state,"error":"Nothing was sent."})).unwrap()
+    };
+    let cases: Vec<(&str, Ended)> = vec![
+        (
+            "exact cutting_over",
+            Ended::Exited {
+                code: 0,
+                output: reply("cutting_over", 1, id),
+            },
+        ),
+        (
+            "cutting_over, failed exit",
+            Ended::Exited {
+                code: 1,
+                output: reply("cutting_over", 1, id),
+            },
+        ),
+        (
+            "cutting_over, other id",
+            Ended::Exited {
+                code: 0,
+                output: reply("cutting_over", 1, "22222222-2222-4222-8222-222222222222"),
+            },
+        ),
+        (
+            "cutting_over, schema 2",
+            Ended::Exited {
+                code: 0,
+                output: reply("cutting_over", 2, id),
+            },
+        ),
+        (
+            "uncertain",
+            Ended::Exited {
+                code: 0,
+                output: reply("uncertain", 1, id),
+            },
+        ),
+        (
+            "pending",
+            Ended::Exited {
+                code: 0,
+                output: reply("pending", 1, id),
+            },
+        ),
+        (
+            "storage_failed",
+            Ended::Exited {
+                code: 0,
+                output: reply("storage_failed", 1, id),
+            },
+        ),
+        (
+            "not JSON",
+            Ended::Exited {
+                code: 0,
+                output: b"cutting_over".to_vec(),
+            },
+        ),
+        ("timeout", Ended::Unknown("deadline")),
+    ];
+    for (name, ended) in cases {
+        let outcome = delivery_reply(ended, id);
+        eprintln!("DELIVERY-DECODE {name} -> {outcome:?}");
+        let proof = matches!(outcome, HandoutOutcome::CuttingOver { .. });
+        assert_eq!(proof, name == "exact cutting_over", "{name}");
+        if !proof {
+            assert!(
+                matches!(outcome, HandoutOutcome::Uncertain { .. }),
+                "{name}: {outcome:?}"
+            );
+        }
+    }
+}

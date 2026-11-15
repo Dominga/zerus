@@ -227,6 +227,9 @@ it("uses Russian team statuses consistently in the list, session strip and Team 
   const { TeamBar } = await import("../teams/team-bar");
   const bar = show(() => createComponent(TeamBar, { view: data.team, busy: false, width: 1000, onAction() {} }));
   expect(bar.querySelector("[data-state]")?.textContent).toBe(tr("Running"));
+  const { MemberCard } = await import("../teams/MemberCard");
+  const card = show(() => createComponent(MemberCard, { member: data.team.members.find((member) => member.state === "not_created")!, teamStatus: data.team.bar.status, busy: false, onAction() {} }));
+  expect(card.querySelector(".team-member-state")?.textContent).toBe("Не создан");
 });
 
 it("offers sibling header and row action hooks without opening the lead from a drawer control", () => {

@@ -29,15 +29,11 @@ pub(super) fn check(action: &TeamAction) -> Result<(), String> {
                 return Err("A bounded, nonblank rejection comment is required.".into());
             }
         }
-        TeamAction::UndoRejectPhase { rejection, .. } => {
-            if !canonical_uuid(rejection) {
-                return Err("Not a rejection identity.".into());
-            }
+        TeamAction::UndoRejectPhase { rejection, .. } if !canonical_uuid(rejection) => {
+            return Err("Not a rejection identity.".into());
         }
-        TeamAction::AcceptPhase { publication, .. } => {
-            if !canonical_uuid(publication) {
-                return Err("Not a publication identity.".into());
-            }
+        TeamAction::AcceptPhase { publication, .. } if !canonical_uuid(publication) => {
+            return Err("Not a publication identity.".into());
         }
         _ => {}
     }

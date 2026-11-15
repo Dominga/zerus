@@ -87,7 +87,7 @@ fn published_missing_or_incomplete_live_scopes_never_reuse_the_frozen_draft_metr
 #[test]
 fn malformed_live_scopes_are_unavailable_in_the_actual_model_read_path() {
     let base = cases()["published"].clone();
-    for fault in 0..7 {
+    for fault in 0..8 {
         let mut context = base.clone();
         let live = &mut context["draft"]["draft"]["live"];
         match fault {
@@ -99,7 +99,8 @@ fn malformed_live_scopes_are_unavailable_in_the_actual_model_read_path() {
                 live["nodes"].as_array_mut().unwrap().pop();
             }
             5 => live["nodes"][0]["future_runtime"] = true.into(),
-            _ => live["nodes"] = serde_json::json!([]),
+            6 => live["nodes"] = serde_json::json!([]),
+            _ => live["nodes"][0]["task"] = Value::Null,
         }
         let out = wire_from(&context);
         assert!(!out["plan"]["draft_failure"].is_null(), "fault {fault}");

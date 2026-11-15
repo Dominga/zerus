@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
-use zerus_team_plan::model::Node;
+use zerus_team_plan::model::{Node, NodeKind};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +46,9 @@ pub(super) fn read(value: Value, phase: u32, revision: u64) -> Result<PhaseNodeS
         let deps: BTreeSet<_> = n.deps.iter().map(|d| d.node).collect();
         if deps.len() != n.deps.len() || deps.contains(&0) || deps.contains(&n.id) {
             return Err("A live phase node has ambiguous dependencies.".into());
+        }
+        if n.kind != NodeKind::Stage && n.task.is_none() {
+            return Err("A published task has no task identity.".into());
         }
         if n.task
             .as_ref()

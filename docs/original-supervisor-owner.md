@@ -15,7 +15,16 @@ to that child. It creates no ownership endpoint or metadata and makes no
 subreaper or SIGCHLD policy change. Windows always follows that route.
 
 The dormant route reserves an `original_owner` binding under the session writer
-before native creation. It holds the original state/configuration directories,
+before native creation. Its fresh writer-domain bootstrap then exclusively
+creates the exact session/run namespace, confirms native file and directory
+durability and readback, and retains the original handles before starting the
+child. Existing or partial scopes refuse; failures retain the reservation and
+partial namespace without retry or adoption. Creation has one thirty-second
+monotonic budget, including its existing-writer wait, without unrelated recovery.
+The domain is explicitly `initialized_not_enrolled`: no real input/mutation/IO
+writer has been enrolled, and an empty ledger grants no effect or completion
+authority. See [the bootstrap design](original-writer-domain-bootstrap.md).
+It holds the original state/configuration directories,
 selected running image and supervisor birth, and records the original SID,
 run and launch-conversation/expected identity. Unconfirmed conversation identity
 stays unconfirmed; this observation does not promote it into a native binding.

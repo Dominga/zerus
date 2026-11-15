@@ -131,7 +131,7 @@ export interface TeamCall {
 }
 export type TeamOutcome =
   | { outcome: "done"; receipt: unknown; request_id: string }
-  | { outcome: "failed"; detail: string; code?: string; request_id: string }
+  | { outcome: "failed"; detail: string; code?: string; field?: string; request_id: string }
   | { outcome: "uncertain"; detail: string; request_id: string }
   | { outcome: "confirm"; confirmation: TeamConfirmation }
   | { outcome: "pending"; request_id: string };
@@ -222,7 +222,7 @@ export interface SessionIdentity { machine?: string | null; launchId?: string | 
 
 /** What the scanned list says about a session's team; an incomplete list says
  * `unknown`, never `none`. */
-export interface TeamOfSession { state: "lead" | "none" | "unknown"; team?: string }
+export interface TeamOfSession { state: "lead" | "none" | "unknown"; team?: string; exhausted?: boolean }
 
 /** The preview switch's answer: a refusal keeps hgs's own reason, and an
  * unknown result changes nothing on screen except a notice. */
@@ -485,7 +485,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     if (!found && scan.missing !== null) { requestListPage(scan.missing); return { state: "unknown" }; }
     requestListPage(null);
     if (found) return { state: "lead", team: found.id };
-    return scan.complete ? { state: "none" } : { state: "unknown" };
+    return scan.complete ? { state: "none" } : { state: "unknown", exhausted: scan.views.length > 0 };
   }
 
   /**

@@ -1605,6 +1605,7 @@
   "The background service is not connected.": "Фоновая служба не подключена.",
   "The background service is not running its connections.": "Фоновая служба сейчас не ведёт подключения.",
   "The background service was refreshed.": "Фоновая служба обновлена.",
+  "The bounded lookup could not locate this team. Open the session from Teams.": "Команда не найдена в пределах ограниченного поиска. Откройте сессию из раздела «Команды».",
   "The branch %1 is kept.": "Ветка %1 сохраняется.",
   "The cache lasts about %1, as Kimi Code estimates it.": "Кэш живёт около %1, по оценке Kimi Code.",
   "The cache lasts about %1, as the agent reported.": "Кэш живёт около %1, по данным агента.",

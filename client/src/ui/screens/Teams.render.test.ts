@@ -275,3 +275,40 @@ it("keeps the Catalog header entry disabled until Teams are available", () => {
   store.apply([entry("list", "failed", { code: "teams_inactive", message: "fixture refusal" })]);
   expect(catalog().disabled).toBe(true); catalog().click(); expect(ui.page()).toBe("teams");
 });
+
+it("drops the explicit lead navigation when leaving Sessions, even if the same row remains selected (review130 X1)", () => {
+  const team = data.running.teams[0]; f.rows = [session(team)]; publish(data.running);
+  createRoot((dispose) => { disposers.push(dispose); nav.watchTeamNavigation(); });
+  expect(nav.openTeamLead(team, f.rows[0])).toBe(true);
+  expect(nav.navigationTeamFor(f.rows[0])).toBe(team.id);
+  ui.setPage("projects"); expect(nav.navigationTeamFor(f.rows[0])).toBeUndefined();
+  ui.setPage("sessions"); expect(nav.navigationTeamFor(f.rows[0])).toBeUndefined();
+});
+
+it.each([
+  ["English", "The bounded lookup could not locate this team. Open the session from Teams."],
+  ["Russian", "Команда не найдена в пределах ограниченного поиска. Откройте сессию из раздела «Команды»."],
+])("shows an explicit bounded-lookup notice for a directly selected seventh-page lead in %s", async (_language, message) => {
+  f.rows = [session(data.pages[6].teams[0])]; ui.setSelectedKey(f.rows[0].key); ui.setPage("sessions"); ui.setDetailTab("team");
+  const { TeamTab } = await import("../teams/TeamTab");
+  const host = show(TeamTab);
+  for (const page of data.pages.slice(0, 5)) publish(page);
+  expect(host.textContent).toContain(message);
+  expect(host.textContent).not.toContain("Finding the team"); expect(host.textContent).not.toContain("not a team lead");
+  expect(f.pages.every(([, cursor]) => cursor === null || data.pages.slice(0, 4).some((page) => page.next === cursor))).toBe(true);
+  expect(f.calls).not.toContain("team_action");
+});
+
+it("keeps the lower-bound marker on a synthetic future member count over a product row (review130 X4)", () => {
+  const page = structuredClone(data.running); page.teams[0].progress!.members_more = true;
+  publish(page); const host = show(); expect(host.querySelector(".teams-member-count")?.textContent).toBe("4+ members");
+});
+
+it("renders the one-member count from the actual product-written first page (review130 X5)", () => {
+  publish(data.pages[0]); const host = show(); expect(host.querySelector(".teams-member-count")?.textContent).toBe("1 member");
+});
+
+it.each([["planning", "Планирование"], ["paused", "Приостановлено"]])("renders a synthetic %s status over a product row in Russian (review130 X3)", (state, label) => {
+  const page = structuredClone(data.running); page.teams[0].status = state;
+  publish(page); const host = show(); expect(host.querySelector(".tm-state-badge")?.textContent).toBe(label);
+});

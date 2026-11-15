@@ -1,6 +1,6 @@
 import { For, Show, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js";
 import { tr } from "../../i18n";
-import { setPage } from "../../store/ui";
+import { openTeamCatalog } from "./catalog-navigation";
 import { Icon } from "../lib/icons";
 import { progress, stateLabel, stateTone } from "./team-model";
 import { TeamBarActions } from "./TeamActions";
@@ -63,7 +63,7 @@ export function TeamBar(props: {
         <span class="chip team-chip" title={tr("Open inbox items")}><Icon name="inbox" size={12} />{props.view.bar.counts.inbox === 1 ? tr("%n inbox item", 1) : tr("%n inbox items", props.view.bar.counts.inbox)}</span>
         <span class="chip team-chip" title={tr("Open cards")}><Icon name="layers" size={12} />{props.view.bar.counts.cards === 1 ? tr("%n card", 1) : tr("%n cards", props.view.bar.counts.cards)}</span>
       </span>
-      <button type="button" class="btn ghost small" onClick={() => setPage("team-catalog")}>{tr("Catalog")}</button>
+      <button type="button" class="btn ghost small" onClick={openTeamCatalog}>{tr("Catalog")}</button>
       <Show when={props.onSettings}><button type="button" class="btn small" data-team-settings-open
         disabled={props.busy || props.settingsBlocked || !["running", "paused"].includes(props.view.bar.status)}
         onClick={() => props.onSettings?.()}><Icon name="settings" size={12} />{tr("Settings")}</button></Show>

@@ -2,7 +2,7 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount, 
 import { tr } from "../../i18n";
 import { orderedRows } from "../../store/catalog";
 import { projectsPage } from "../../store/projects";
-import { setPage } from "../../store/ui";
+import { openTeamCatalog } from "../teams/catalog-navigation";
 import { teams, type TeamFailure, type TeamProgress, type TeamSummary } from "../../store/teams";
 import { Icon } from "../lib/icons";
 import type { Session } from "../sessions/types";
@@ -83,7 +83,7 @@ export function TeamsScreen(props: TeamsScreenProps = {}) {
   };
   return <section class="teams-screen" aria-label={tr("Teams")} data-teams-page>
     <TeamsHeader actions={<>
-      <button type="button" class="btn ghost" disabled={teams.available() !== true} onClick={() => setPage("team-catalog")}>{tr("Catalog")}</button>
+      <button type="button" class="btn ghost" disabled={teams.available() !== true} onClick={openTeamCatalog}>{tr("Catalog")}</button>
       {props.headerActions}
     </>}>
       <button type="button" class="btn primary" disabled={teams.available() !== true} onClick={() => void teams.openNewTeam()}><Icon name="plus" size={14} />{tr("New team")}</button>

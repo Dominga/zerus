@@ -47,6 +47,7 @@ pub mod session_question_routing;
 pub mod session_selector;
 pub mod speech;
 pub mod startup;
+mod task_edit;
 pub mod url;
 pub mod validate;
 pub mod watch_listing;

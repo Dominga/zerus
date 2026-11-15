@@ -41,6 +41,7 @@ unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
 zerus-replica = { path = "crates/replica" }
+zerus-mobile-task-edit = { path = "crates/mobile-task-edit" }
 zerus-team-plan = { path = "crates/team-plan" }
 zerus-file-lock = { path = "crates/file-lock" }
 zerus-watch-protocol = { path = "crates/watch-protocol" }

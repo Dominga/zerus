@@ -396,6 +396,8 @@ pub struct Flags {
     pub task_session_identity: bool,
     /// Bounded upload frames inside task exchange, independently negotiated.
     pub task_media_upload: bool,
+    /// Native admitted edits; advertised only on the qualified encrypted route.
+    pub task_admitted_edit: bool,
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
@@ -481,6 +483,7 @@ impl Flags {
             task_media_upload: help
                 .lines()
                 .any(|line| line.trim() == TASK_UPLOAD_HELP_MARKER),
+            task_admitted_edit: false,
             task_session_identity: help
                 .lines()
                 .any(|line| line.trim() == TASK_IDENTITY_HELP_MARKER),

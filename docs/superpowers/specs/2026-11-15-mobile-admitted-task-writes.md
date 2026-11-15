@@ -84,6 +84,12 @@ The host issues a bounded source-specific receipt bound to:
 - exact admitted immutable seal and complete baseline version;
 - the original qualification request and a fresh retained nonce.
 
+The phone chooses and durably retains the future edit UUID before requesting
+qualification. The host receipt also pins that UUID. A captured receipt cannot
+be applied under a fresh UUID after a lost outcome. Earlier media chunks have
+their own retained request IDs; only the receipt's original edit UUID may
+perform the final commit. A new explicit edit requires a new qualification.
+
 This receipt is delivered only in the authenticated result of that exact
 request. The phone obtains the complete history through bounded document
 pages; a shallow projection cannot qualify itself. The source stays frozen

@@ -25,7 +25,7 @@ beforeAll(async () => {
         if (id === stores) return `export const state = {usage: {}, now: 0};
           export const sessionUsage = () => state.usage, useNow = () => () => state.now, computerOffline = () => false, text = () => 'rails';
           export const startSessionUsage = () => {}, stopSessionUsage = () => {}, followSessionUsage = () => {}, refreshSessionUsage = () => {};
-          export const setAccountMachine = () => {}, setRequestedProfile = () => {}, loadAccounts = () => {}, setPage = () => {}, openInspector = () => {}, AgentBadge = () => "";
+          export const accountsPage = () => ({accounts: []}), setAccountMachine = () => {}, setRequestedProfile = () => {}, loadAccounts = () => {}, setPage = () => {}, openInspector = () => {}, AgentBadge = () => "";
           export const composer = {view: () => undefined}, followedFor = () => undefined;`;
         if (id === entry) return `import {createComponent} from 'solid-js';
           import {renderToString} from 'solid-js/web';

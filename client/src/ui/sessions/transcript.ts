@@ -480,8 +480,13 @@ export function mergeProvider(given: readonly ActivityEvent[], summary?: Record<
     // reached its transcript (05:16:54 and 05:17:00), and the reply showed
     // twice. A later Stop whose own text is this reply's excerpt is the same
     // reply, within two minutes and with no other agent message between.
+    // Only the indexed Stops of the two minutes after the reply, never a scan of
+    // every loaded page per provider row.
     if (stop === undefined && message.type === "AgentMessage" && message.detail) {
-      for (let i = 0; i < events.length; i++) {
+      const later: number[] = [];
+      for (let second = Math.floor(when); second <= Math.floor(when) + STOP_LAG_SECONDS; second++) later.push(...seconds.get(second) ?? []);
+      later.sort((a, b) => a - b);
+      for (const i of later) {
         const e = events[i];
         const gap = at(e) - when;
         if (e.type !== "Stop" || matchedStops.has(i) || !e.detail || gap < 0 || gap > STOP_LAG_SECONDS || childEvent(e)) continue;

@@ -87,7 +87,7 @@
       "process_work": {
         "command": "",
         "count": 0,
-        "sampled_at": 1794614695.477948,
+        "sampled_at": 1794709212.7850845,
         "started_at": null
       },
       "project": "example",
@@ -216,7 +216,7 @@
       "process_work": {
         "command": "",
         "count": 0,
-        "sampled_at": 1794614695.562708,
+        "sampled_at": 1794709212.8368928,
         "started_at": null
       },
       "project": "example",
@@ -307,11 +307,16 @@
       "process_work": {
         "command": "",
         "count": 0,
-        "sampled_at": 1794614695.6633613,
+        "sampled_at": 1794709212.9056892,
         "started_at": null
       },
       "project": "example",
       "prompt": null,
+      "question_routing": {
+        "person_off": false,
+        "revision": 0,
+        "send_to_parent": true
+      },
       "read": null,
       "recovery_capability": "continue_message",
       "recovery_error_class": "manual",
@@ -372,7 +377,7 @@
       "effort_options": [],
       "effort_scope": "session",
       "fork_parent_id": null,
-      "fork_reason": "Saved launch arguments are unavailable",
+      "fork_reason": "Pause or close this Kimi session before forking its saved context",
       "fork_source_name": null,
       "fork_supported": false,
       "git_branch": "",
@@ -421,7 +426,7 @@
       "process_work": {
         "command": "",
         "count": 0,
-        "sampled_at": 1794614695.6503654,
+        "sampled_at": 1794709212.8955164,
         "started_at": null
       },
       "project": "example",

@@ -167,7 +167,9 @@ mod tests {
         .unwrap();
         assert!(stale.floor().unwrap());
         stale.lower_stored_schema_for_test(5);
-        store.save(&mut stale).unwrap();
+        // Preserve the literal old writer's lowered schema, before a native
+        // birth seal could turn this into an already repaired current task.
+        store.save_legacy_for_test(&mut stale).unwrap();
         let old = stale.inventory_version();
         let digest = Indexed::new(&store).live_digest().unwrap();
         assert!(!store.load(stale.uuid()).unwrap().needs_schema_repair());

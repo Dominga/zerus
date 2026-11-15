@@ -1109,6 +1109,7 @@ mod tests {
             id: "m1".into(),
             role: "developer".into(),
             agent: "claude".into(),
+            launch: None,
             account: String::new(),
             state: MemberState::Active,
             session: None,

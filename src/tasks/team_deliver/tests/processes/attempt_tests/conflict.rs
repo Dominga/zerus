@@ -114,6 +114,8 @@ fn flag_only_difference() -> (Fixture, Vec<u8>) {
     let mut f = Fixture::new();
     let mut baseline = f.document();
     baseline.floor().unwrap();
+    // Both branches must descend from the same durably saved first floor.
+    save(&f, &mut baseline);
     let baseline = baseline.snapshot().unwrap();
     refused_first(&mut f);
     decide(&mut f);

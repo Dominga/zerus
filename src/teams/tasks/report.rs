@@ -195,6 +195,8 @@ mod tests {
             .unwrap();
             id
         };
+        // Save native birth before constructing the first attempt/floor.
+        store.save(&mut doc).unwrap();
         let first = send(&mut doc, 2);
         store.save(&mut doc).unwrap();
         drop(store);

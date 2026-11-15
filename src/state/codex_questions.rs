@@ -1841,14 +1841,17 @@ mod tests {
         // This test process stands in for the live agent.
         record["pid"] = json!(std::process::id());
         record["process_start"] = json!(process_start(std::process::id()));
-        let budget = || Instant::now() + Duration::from_millis(200);
+        // Positive recovery includes process checks and filesystem work; it
+        // does not promise completion within 200 ms on a loaded runner.
+        let recovery_budget = || Instant::now() + Duration::from_secs(5);
+        let held_budget = || Instant::now() + Duration::from_millis(200);
         // An answer's unbounded index reconciles the locator and recovers.
         assert_eq!(questions::current(&record).unwrap().len(), 1);
-        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        let (pending, complete) = questions::inspection(&record, true, recovery_budget()).unwrap();
         assert!(complete);
         assert_eq!(pending.as_array().unwrap().len(), 1, "{pending}");
         let held = lock(Some(&cache_path(&record).unwrap().with_extension("lock"))).unwrap();
-        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        let (pending, complete) = questions::inspection(&record, true, held_budget()).unwrap();
         assert!(!complete, "a held index was reported complete");
         assert!(
             pending
@@ -1858,9 +1861,12 @@ mod tests {
                 .all(|card| card["source"] != "codex_async"),
             "{pending}"
         );
-        assert_eq!(questions::current_until(&record, budget()).unwrap(), None);
+        assert_eq!(
+            questions::current_until(&record, held_budget()).unwrap(),
+            None
+        );
         drop(held);
-        let (pending, complete) = questions::inspection(&record, true, budget()).unwrap();
+        let (pending, complete) = questions::inspection(&record, true, recovery_budget()).unwrap();
         assert!(complete);
         assert_eq!(pending[0]["question_id"], "codex-async:call_two:0");
     }

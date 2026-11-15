@@ -15,7 +15,7 @@ mod native;
 // Unconnected support resource; no installed caller or signal authority.
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
-mod custody;
+pub(in crate::state) mod custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod termination;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

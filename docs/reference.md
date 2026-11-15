@@ -354,6 +354,10 @@ prevents its removal. Run Terminate from outside the target's own process tree.
 The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
 qualified separately. It has no installed caller and does not enable graceful
 Terminate or change the verified tree and cleanup rules above.
+The [dormant original supervisor bridge](original-supervisor-owner.md) retains
+source-bound ownership behind a const-false gate. Its read-only observations
+grant no graceful, signal or cleanup authority; owned-mode records refuse the
+legacy root-only finalizer.
 
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
@@ -5139,6 +5143,19 @@ page, and only an empty stage has no rows. `--if-revision` with the last
 `revision` answers `{"unchanged": true, "revision": ...}` without rows when
 nothing changed, after checking that page's rows against their files.
 
+Task lists check the caller before discovering session bindings. Only session
+references in the selected rows need routing metadata; an empty or unchanged
+page, or one containing only remote references, reads no session bodies for
+routing. The caller's own record is still checked for agent proof.
+The disposable `task-routing-v1` cache keeps routing fields without command
+output and verifies the canonical binding namespaces and file versions on each
+lookup. Cold or changed metadata is refreshed in bounded slices, with a finite
+background helper when needed. While coverage is incomplete, the command
+returns `Task session routing is incomplete` and asks the caller to retry;
+unreadable canonical evidence returns an unavailable error. Neither case
+reports a referenced session as missing. This cache supplies task-list labels
+only; caller proof and task changes still verify canonical session records.
+
 `--session ID` (`launch_id:...` or `run_id:...`, with `--host` for a session on
 another computer) pages one session's view of the stage: the tasks its
 identity owns, the session of a task in progress, in review or done, or the
@@ -5881,6 +5898,7 @@ hgs team current
 hgs team settings|pause|resume|stop|archive|decide < request.json
 hgs team admit|route|accept|return|reassign|hold|release|cancel|reply < request.json
 hgs team pause-member|resume-member|stop-member|archive-member < request.json
+hgs team add-member|swap-member|rename-team|set-goal < request.json
 hgs team ask|verdict < request.json
 ```
 
@@ -5944,8 +5962,32 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `reply` | yes | with the delegation | | `item`, `text` |
 | `pause-member`, `resume-member` | yes | yes | | `member` |
 | `stop-member`, `archive-member` | yes | | | `member` |
+| `add-member` | yes | | | `role`, `agent`, optional `model`, `effort`, `account` |
+| `swap-member` | yes | | | `member`, `agent`, optional `model`, `effort`, `account` |
+| `rename-team` | yes | | | `name` |
+| `set-goal` | yes | | | `goal` |
 | `ask` | | | the attempt's holder | `node`, `generation`, `text` |
 | `verdict` | | | the stage's holder | `node`, `generation`, `pass`, `text` |
+
+Live-team edits use the same receipt and revision rules below. `add-member`
+chooses a role from the team's pinned catalog and reserves a new, never reused
+member ID. `account` is `{"mode":"freest"}` (the default) or
+`{"mode":"named","account":"example"}`. Model and effort are optional;
+empty strings use the selected account's defaults. Seat choices leave the
+pinned role and all other members unchanged. The service launches an added
+member through its ordinary launch ledger.
+
+`swap-member` requires a member already stopped by the person, with a known
+completed launch and no open tasks, unsettled attempts or unknown receipts.
+An active member is refused with `Stop the member first; open work: N`.
+Swap does not stop or archive the old session: it loses its team binding and
+stays outside the team. The new agent keeps the member ID, task history,
+owned folder and branch. The old original and receipts remain immutable; a
+new launch original verifies the same checkout before launching. There is no
+active cutover or existing-session adoption. A changed generation fences stale
+launch admission. `rename-team` changes the display name only; already reserved
+session, worktree and branch names stay. `set-goal` accepts an empty string to
+clear the goal. These four edits require a running or paused team.
 
 The envelope of every write is `request_id` (a fresh lowercase UUID), `team`
 (the team's UUID, chosen by the caller for `create`) and `expected_revision`

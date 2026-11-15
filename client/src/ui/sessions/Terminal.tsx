@@ -242,7 +242,7 @@ export function InputAcknowledgmentConfirm(props: { origin: HTMLElement; cancel(
     onCancel={(event) => { event.preventDefault(); props.cancel(); }} onClose={props.cancel}>
     <div class="dlg-head"><h2 id="release-input-title">{tr("Release unconfirmed input")}</h2></div>
     <div class="dlg-body"><div class="confirm-body">
-      <p>{tr("The previous input may or may not have reached Claude. Nothing will be sent again. Only continue after checking Terminal.")}</p>
+      <p>{tr("The previous input may or may not have reached the agent. Nothing will be sent again. Only continue after checking Terminal.")}</p>
     </div></div>
     <div class="dlg-foot"><span class="spacer" />
       <button type="button" class="btn solid-danger" onClick={props.confirm}>{tr("I checked Terminal: mark the previous input as handled")}</button>

@@ -156,6 +156,52 @@ class AcknowledgeInput(unittest.TestCase):
         self.assertEqual(json.loads(self.execute(request)["stdout"]), answer)
         self.assertIn("previous input has not been confirmed", self.f.send(self.f.payload(text="third"), success=False))
 
+    def provider_recovery(self, provider, busy=False):
+        self.f.record = dict(self.pending, agent=provider,
+            activity='busy' if busy else 'idle', phase='working' if busy else 'idle')
+        if provider == 'codex':
+            self.f.screen('\x1b[2J\x1b[H\x1b[1m›\x1b[0m ', '2:0')
+        else:
+            self.f.screen('\x1b[2J\x1b[H ╭──────────────────────────────╮\r\n │ >                            │\r\n ╰──────────────────────────────╯\r\n Never Ask  fixture\x1b[2;6H', '5:1')
+        if busy:
+            session = self.f.root / '.kimi-code/sessions/workspace' / self.f.conversation_id
+            wire = session / 'agents/main/wire.jsonl'
+            wire.parent.mkdir(parents=True)
+            (session / 'state.json').write_text(json.dumps(dict(id=self.f.conversation_id, version=2)))
+            at = (self.pending['input_pending_at'] - 10) * 1000
+            rows = [dict(type='turn.prompt', agentId='main', turnId=1, promptId='msg_old', time=at,
+                         origin=dict(kind='user'), input=[dict(type='text', text='Previous native turn')]),
+                    dict(type='turn.ended', agentId='main', turnId=1, time=at+1, reason='completed')]
+            wire.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+        self.f.write_record()
+        self.assertIn('recovery', self.f.terminal_request(action='composer')['composer'])
+        request = self.request()
+        self.assertNotEqual(self.execute(request, person=False)['exit'], 0)
+        result = self.execute(request)
+        self.assertEqual(result['exit'], 0, result)
+        self.assertEqual(json.loads(result['stdout'])['status'], 'person-acknowledged-unknown')
+        current = json.loads(self.f.record_path.read_text())
+        self.assertEqual(current['input_seen_at'], self.pending['input_seen_at'])
+        self.assertEqual(current['input_pending_at'], self.pending['input_pending_at'])
+        self.assertEqual(self.f.received(), self.before)
+        self.f.composer_for(provider)
+        following = self.f.send(self.f.payload(text='Deliberately new provider input'))
+        self.assertEqual(following['status'], 'submitted')
+        self.before = self.f.received()
+        # Repeating the old person UUID returns its old receipt and must never
+        # settle the deliberately new pending input.
+        self.assertEqual(json.loads(self.execute(request)['stdout'])['status'], 'person-acknowledged-unknown')
+        self.assertIn('previous input has not been confirmed', self.f.send(self.f.payload(text='third provider input'), success=False))
+
+    def test_person_can_release_hookless_codex_without_native_acceptance(self):
+        self.provider_recovery('codex')
+
+    def test_person_can_release_hookless_kimi_without_native_acceptance(self):
+        self.provider_recovery('kimi')
+
+    def test_person_can_review_kimi_native_completed_with_stale_busy_cache(self):
+        self.provider_recovery('kimi', busy=True)
+
     def test_an_agent_cannot_release_input_even_after_clearing_session_markers(self):
         result = self.execute(self.request(), person=False)
         self.assertNotEqual(result["exit"], 0)

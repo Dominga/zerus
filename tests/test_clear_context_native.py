@@ -168,6 +168,9 @@ wire_api="responses"
                 type='agent_message', message='Previous fixture answer'))])
         path.write_text('\n'.join([json.dumps(metadata), *map(json.dumps, messages), events[1]]) + '\n')
         self.native_home = native_home
+        prepare = getattr(self, 'prepare_native_hooks', None)
+        if prepare:
+            prepare()
         # Suites reusing this setUp are not subclasses: call this class's launch.
         NativeCodexClear.launch(self, self.root, 'resume', self.conversation_id)
         # Resume is a native event a loaded runner reaches late; wait_for's

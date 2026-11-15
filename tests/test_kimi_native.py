@@ -1011,6 +1011,35 @@ class NativeKimi(lifecycle.Harness):
         self.assertFalse(self.requests, 'declining trust delivered the initial message')
         self.assertFalse((self.root / 'state/input_receipts' / (pending['request_id'] + '.json')).exists())
 
+    def test_exact_native_wire_repairs_a_lost_acceptance_write_without_replay(self):
+        name = self.launch()
+        initial = self.send(name, self.payload(name, 'Initialize native acceptance fixture'))
+        self.until(lambda: self.settled(name, initial), name)
+        text = 'Exact Kimi acceptance repair ' + str(uuid.uuid4())
+        request = self.payload(name, text)
+        receipt = self.send(name, request)
+        self.until(lambda: self.settled(name, receipt), name)
+        paths = [path for folder in [self.root/'state',self.root/'state/sessions',self.root/'state/bindings']
+                 for path in folder.glob('*.json')
+                 if json.loads(path.read_text()).get('name') == name
+                 and not json.loads(path.read_text()).get('rename_shadow')]
+        self.assertEqual(len(paths),1)
+        path=paths[0]; record=json.loads(path.read_text())
+        # Model the lost record write, after real Kimi has consumed the exact
+        # request and emitted its current native main-wire representation.
+        record['input_seen_at']=0
+        record.pop('input_acceptance',None)
+        path.write_text(json.dumps(record))
+        receipt_path=self.root/'state/input_receipts'/(request['request_id']+'.json')
+        original=receipt_path.read_bytes()
+        self.inspect(name)
+        repaired=json.loads(path.read_text())
+        self.assertGreaterEqual(repaired['input_seen_at'],repaired['input_pending_at'])
+        self.assertEqual(repaired['input_acceptance']['request_id'],request['request_id'])
+        self.assertEqual(receipt_path.read_bytes(),original)
+        self.assertEqual(self.send(name,request),receipt)
+        self.assertEqual(self.held(text),1)
+
     def test_exact_input_reaches_the_model_once(self):
         # Existing account-wide tracking entries predate the managed TOML
         # block. A supervised launch must retain them without adding another

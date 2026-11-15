@@ -7536,13 +7536,15 @@ it. The read is `action: "composer"`, which returns the text, `clearable` and
 the reason when it is not.
 
 **Release unconfirmed input** uses the same Terminal toolbar slot for a local
-Claude session whose conversation identity is already known, whose native
+Claude, Codex or Kimi session whose conversation identity is already known, whose native
 composer is verified empty, and whose previous input remains unconfirmed
 (zerus-iitw8.9). It requires the person's explicit **I checked Terminal: mark
 the previous input as handled** confirmation. The message may or may not have
-reached Claude. This action sends no keys, does not send or retype the message,
-and does not claim that Claude accepted it. A busy agent, copy mode, an active
+reached the agent. This action sends no keys, does not send or retype the message,
+and does not claim that the agent accepted it. A busy agent, copy mode, an active
 delivery proof, a changed input or terminal, and unknown native state refuse it.
+For Codex and Kimi, a positive completed native main turn can establish eligibility
+when cached hook status is stale. That older completion never confirms a later input.
 If hooks never established a conversation identity, the identity refusal stays;
 finish startup or repair the hooks in Terminal instead.
 
@@ -7556,6 +7558,15 @@ The composer read supplies the exact original request and timestamp in
 `composer.recovery`; review that input before authorizing the command. A JSON
 role or confirmation flag grants no authority. The desktop uses its native
 frontend request authority instead of this CLI terminal path.
+
+Codex and Kimi can also repair a missed acceptance hook from bounded native
+history: the exact full submitted text must occur as a main user input after
+the pending timestamp in that same conversation. The original request, receipt
+digest and run must still match; new sends additionally bind the submitted-text
+hash in the record. This updates native acceptance only and never replays or
+rewrites the original receipt. Completion, tool activity, age, partial text,
+other conversations and absent or unreadable evidence never prove acceptance.
+Attachments or text outside the bounded native window remain unconfirmed.
 
 The settlement is audited as `person-acknowledged-unknown`, with the original
 request, run, conversation and terminal binding. The record keeps only its

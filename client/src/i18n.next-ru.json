@@ -1514,7 +1514,7 @@
   "The preview state is unknown.": "Состояние предпросмотра неизвестно.",
   "The previous approval setting is unconfirmed.": "Предыдущее изменение автоматических разрешений не подтверждено.",
   "The previous change was not applied.": "Предыдущее изменение не было применено.",
-  "The previous input may or may not have reached Claude. Nothing will be sent again. Only continue after checking Terminal.": "Предыдущий ввод мог дойти до Claude, а мог и не дойти. Ничего не будет отправлено повторно. Продолжайте только после проверки в Терминале.",
+  "The previous input may or may not have reached the agent. Nothing will be sent again. Only continue after checking Terminal.": "Предыдущий ввод мог дойти до агента, а мог и не дойти. Ничего не будет отправлено повторно. Продолжайте только после проверки в Терминале.",
   "The previous notification setting is unconfirmed. Check its result before making another change.": "Предыдущее изменение настройки уведомлений не подтверждено. Проверьте результат, прежде чем менять её снова.",
   "The previous settings change is unconfirmed.": "Предыдущее изменение настроек не подтверждено.",
   "The previous settings change is unconfirmed. Check its result before making another change.": "Предыдущее изменение настроек не подтверждено. Проверьте его результат перед следующим изменением.",

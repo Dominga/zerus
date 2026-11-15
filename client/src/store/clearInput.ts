@@ -52,7 +52,9 @@ export function clearableText(read: { key: string; composer: ComposerState } | u
 export function recoverableInput(read: { key: string; composer: ComposerState } | undefined, s: Shown | undefined,
   view: ComposerView | undefined, clearing: boolean): PendingInput | undefined {
   if (!read || !s || s.computer || clearing || read.key !== s.key || read.composer.state !== "empty"
-    || s.status === "working" || delivering(view, s)) return undefined;
+    || delivering(view, s)) return undefined;
+  // The native recovery offer checks current eligibility, including a positive
+  // native completed turn when the display's hook-derived busy state is stale.
   return read.composer.recovery;
 }
 

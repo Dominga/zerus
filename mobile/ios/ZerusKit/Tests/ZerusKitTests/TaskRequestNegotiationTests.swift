@@ -31,13 +31,15 @@ final class TaskRequestNegotiationTests: XCTestCase {
         let connection = Connection(id: "workspace-a", label: "Fixture", url: "https://gateway.example", token: "synthetic", protocolVersion: protocolVersion)
         let key = ProjectKey(connectionId: connection.id, swarmId: "swarm-1", id: "project-1")
         let journal = SQLiteWorkspaceJournal(directory: root.appendingPathComponent("journal"), testKeys: StaticKeyProvider(SymmetricKey(data: Data(repeating: 9, count: 32))))
-        let pending = WorkspaceState(identity: phone, candidate: candidate, issuer: host.device, pinnedRevision: 0, pinnedHead: bootstrap.state.head)
-        try journal.create(connection, state: pending)
-        var first = pending; first.membership = bootstrap.state; first.enrollment = approval
-        try journal.update(connection, expected: pending, next: first)
-        var active = first; active.membership = roster
-        active.routes = ["computer-1": WorkspaceRoute(computerId: "computer-1", gatewayId: host.device.deviceId, routeId: "route-fixture", machineId: "computer-1")]
-        try journal.update(connection, expected: first, next: active, changes: [approval.membership])
+        if protocolVersion == 2 {
+            let pending = WorkspaceState(identity: phone, candidate: candidate, issuer: host.device, pinnedRevision: 0, pinnedHead: bootstrap.state.head)
+            try journal.create(connection, state: pending)
+            var first = pending; first.membership = bootstrap.state; first.enrollment = approval
+            try journal.update(connection, expected: pending, next: first)
+            var active = first; active.membership = roster
+            active.routes = ["computer-1": WorkspaceRoute(computerId: "computer-1", gatewayId: host.device.deviceId, routeId: "route-fixture", machineId: "computer-1")]
+            try journal.update(connection, expected: first, next: active, changes: [approval.membership])
+        }
         let computer = TaskStore(root: root.appendingPathComponent("computer").path, project: key.id, projectName: "Fixture")
         let task = try computer.filed("Private requirement")
         let replicas = try TaskReplicas(root: root.appendingPathComponent("phone"))

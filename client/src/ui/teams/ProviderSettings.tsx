@@ -7,7 +7,7 @@ import { overrideText, parseOverride, sourceLine } from "./provider-settings";
 
 // Adapted from WhiteWh's Tests section: source, override, read-only Check.
 // Builds share this metadata; neither checking nor selecting starts work.
-export function ProviderSettings(props: { view: TeamView; locked: boolean; onSave: (call: TeamCall) => Promise<TeamOutcome>; port?: ProviderPort }) {
+export function ProviderSettings(props: { view: TeamView; home?: string; locked: boolean; onSave: (call: TeamCall) => Promise<TeamOutcome>; port?: ProviderPort }) {
   const [shown, setShown] = createSignal<ProviderInspection>();
   const [text, setText] = createSignal("");
   const [checked, setChecked] = createSignal<ProviderInspection>();
@@ -19,13 +19,14 @@ export function ProviderSettings(props: { view: TeamView; locked: boolean; onSav
   onCleanup(() => { closed = true; generation++; });
   const read = async (candidate = false) => {
     if (closed) return;
+    if (!props.home) { setError(tr("The team’s home computer is missing from the loaded team list.")); return; }
     const parsed = parseOverride(text());
     if (candidate && parsed.error) { setError(parsed.error); return; }
-    const team = props.view.bar.id, home = props.view.bar.home, project = props.view.bar.project, revision = props.view.revision, token = ++generation;
+    const team = props.view.bar.id, home = props.home, project = props.view.bar.project, revision = props.view.revision, token = ++generation;
     setBusy(true); setError(""); setChecked(undefined);
     try {
       const value = await (props.port ?? readProviderConfig)({ team, ...(candidate ? { candidate: { override_config: parsed.value } } : {}) });
-      if (token !== generation || team !== props.view.bar.id || home !== props.view.bar.home || project !== props.view.bar.project || revision !== props.view.revision) return;
+      if (token !== generation || team !== props.view.bar.id || home !== props.home || project !== props.view.bar.project || revision !== props.view.revision) return;
       if (value.schema !== 1 || value.team !== team || value.home !== home || value.project !== project || value.revision !== revision || value.providers.length > 16) throw new Error(tr("The team changed. Read its provider configuration again."));
       setShown(value);
       if (!candidate) setText(overrideText(value.override_config));
@@ -33,10 +34,10 @@ export function ProviderSettings(props: { view: TeamView; locked: boolean; onSav
     } catch (e) { if (token === generation) setError(String(e instanceof Error ? e.message : e).slice(0, 2000)); }
     finally { if (token === generation) setBusy(false); }
   };
-  createEffect(() => { props.view.bar.id; props.view.bar.home; props.view.bar.project; props.view.revision; generation++; setShown(undefined); setChecked(undefined); untrack(() => { void read(); }); });
+  createEffect(() => { props.view.bar.id; props.home; props.view.bar.project; props.view.revision; generation++; setShown(undefined); setChecked(undefined); untrack(() => { void read(); }); });
   const save = async () => {
     const value = checked();
-    if (closed || !value || busy() || props.locked || unknown() || value.team !== props.view.bar.id || value.revision !== props.view.revision) return;
+    if (closed || !value || busy() || props.locked || unknown() || value.team !== props.view.bar.id || value.home !== props.home || value.revision !== props.view.revision) return;
     setBusy(true); setError("");
     try {
       const outcome = await props.onSave({ team: value.team, team_name: props.view.bar.name, expected_revision: value.revision, request_id: newRequestId(), action: { kind: "validation_config", selection: { source_digest: value.source_digest, digest: value.digest, override_config: value.override_config } } });

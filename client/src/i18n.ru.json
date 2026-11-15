@@ -3817,6 +3817,7 @@
   "The team's lead session has changed. Open it from Teams again.": "Сессия лида команды изменилась. Откройте её заново из раздела «Команды».",
   "The team's lead session is not on the session list.": "Сессия лида команды отсутствует в списке сессий.",
   "The team's service could not finish a step and keeps trying.": "Сервис команды не смог завершить шаг и продолжает попытки.",
+  "The team’s home computer is missing from the loaded team list.": "Основной компьютер команды отсутствует в загруженном списке команд.",
   "The template brings the roles, the pipelines and the team's settings.": "Шаблон задаёт роли, конвейеры и настройки команды.",
   "The template changed since you saw it, and nothing was created: review it as it is now, then create the team again.": "Шаблон изменился с тех пор, как вы его видели, и ничего не создано: проверьте его в нынешнем виде и создайте команду снова.",
   "The upgrade notice could not be saved. Try again.": "Не удалось сохранить подтверждение уведомления об обновлении. Попробуйте ещё раз.",

@@ -16,6 +16,7 @@ import { ProviderSettings } from "./ProviderSettings";
 export interface TeamSettingsDialogProps {
   /** The live view; only a stale refusal admits a newer revision into the draft. */
   view: TeamView;
+  providerHome?: string;
   busy: boolean;
   onSave: (call: TeamCall) => Promise<TeamOutcome>;
   onClose: () => void;
@@ -146,7 +147,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
         </fieldset>
         <Show when={!value()}><p class="notice danger" role="alert">{tr("Enter whole numbers within the shown limits.")}</p></Show>
       </Show>
-      <ProviderSettings view={props.view} locked={locked()} onSave={props.onSave} />
+      <ProviderSettings view={props.view} home={props.providerHome} locked={locked()} onSave={props.onSave} />
       <Show when={stale()}><p class="hint">{tr("Waiting for the current team settings…")}</p></Show>
     </div>
     <Show when={error()}><p class="notice danger" role="alert" data-settings-error>{error()}</p></Show>

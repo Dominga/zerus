@@ -52,6 +52,7 @@ export const OPEN_NODE_PAGES = 4;
 /** The workspace, from a view the store has already projected. */
 export function TeamWorkspace(props: {
   view: TeamView;
+  providerHome?: string;
   busy: boolean;
   failure: { code: string; message: string } | null;
   actionFailure?: string | null;
@@ -117,7 +118,7 @@ export function TeamWorkspace(props: {
       <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
         onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked}
         drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
-      <Show when={settingsView()}><TeamSettingsDialog view={props.view} busy={props.busy || !!props.settingsBlocked}
+      <Show when={settingsView()}><TeamSettingsDialog view={props.view} providerHome={props.providerHome} busy={props.busy || !!props.settingsBlocked}
         onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} /></Show>
       <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
       <TeamEditButtons view={props.view} busy={props.busy} open={editors.open} />
@@ -304,6 +305,7 @@ export function TeamTab() {
         <span class="dim">{leadChanged() ? tr("The team's lead session has changed. Open it from Teams again.") : binding().state === "none" ? tr("This session is not a team lead.") : tr("Finding the team of this session…")}</span>
       </div>
     }>{(current) => <TeamWorkspace view={current()} busy={teams.busy(current().bar.id)} failure={readFailure()} actionFailure={actionReason(source())}
+      providerHome={teams.listed().find((row) => row.id === current().bar.id && row.project === current().bar.project)?.home}
       onSettingsSave={(call) => teams.run(call, source())}
       settingsBlocked={teams.unresolved().some((entry) => entry.call.team === current().bar.id && ["settings", "validation_config"].includes(entry.call.action.kind))}
       onAction={act} onPage={(cursor) => void teams.page(`team:${current().bar.id}`, cursor)} onAddTask={() => setPage("projects")} />}</Show>

@@ -11,12 +11,12 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
 const tick = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
 const inspection = () => structuredClone(payload.inspection) as ProviderInspection;
-const view = (): TeamView => ({ ...structuredClone(teamView), revision: inspection().revision, bar: { ...teamView.bar, id: inspection().team, home: inspection().home, project: inspection().project, revision: inspection().revision } });
-function setup(port = vi.fn(async (_: ProviderRead) => inspection()), outcome: TeamOutcome = { outcome: "done", receipt: {}, request_id: "example" }) {
+const view = (): TeamView => ({ ...structuredClone(teamView), revision: inspection().revision, bar: { ...teamView.bar, id: inspection().team, project: inspection().project, revision: inspection().revision } });
+function setup(port = vi.fn(async (_: ProviderRead) => inspection()), outcome: TeamOutcome = { outcome: "done", receipt: {}, request_id: "example" }, home = inspection().home) {
   const host = document.createElement("div"); document.body.append(host);
   const [shown, show] = createSignal(view());
   const save = vi.fn(async (_: TeamCall) => outcome);
-  dispose = render(() => createComponent(ProviderSettings, { get view() { return shown(); }, locked: false, onSave: save, port }), host);
+  dispose = render(() => createComponent(ProviderSettings, { get view() { return shown(); }, home, locked: false, onSave: save, port }), host);
   const button = (key: string) => host.querySelector<HTMLButtonElement>(`[data-provider-${key}]`)!;
   const input = (text: string) => { const field = host.querySelector<HTMLTextAreaElement>("[data-provider-override]")!; field.value = text; field.dispatchEvent(new Event("input", { bubbles: true })); };
   return { host, save, show, button, input, port };
@@ -80,4 +80,11 @@ it("does not launch a reread when a save completes after the dialog closed", asy
   dispose?.(); dispose = undefined;
   finish({ outcome: "done", receipt: {}, request_id: "original" }); await tick();
   expect(f.save).toHaveBeenCalledOnce(); expect(f.port).toHaveBeenCalledTimes(2);
+});
+
+it("cannot inspect or save without a team home from the followed list", async () => {
+  const f = setup(undefined, undefined, ""); await tick();
+  expect(f.port).not.toHaveBeenCalled(); expect(f.save).not.toHaveBeenCalled();
+  expect(f.button("save").disabled).toBe(true);
+  expect(f.host.textContent).toContain("The team’s home computer is missing from the loaded team list.");
 });

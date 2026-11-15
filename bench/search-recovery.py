@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Private reproducible search campaign; all state is synthetic and removed."""
-import hashlib,json,os,subprocess,sys,tempfile,time,uuid
+import hashlib,json,os,re,subprocess,sys,tempfile,time,uuid
 from pathlib import Path
 repo=Path(__file__).resolve().parents[1];out=repo/'artifacts/test-results/search-recovery';out.mkdir(parents=True,exist_ok=True)
 binary=Path(sys.argv[1]).resolve();count=int(sys.argv[2]);size=int(sys.argv[3]) if len(sys.argv)>3 else 270_000
@@ -21,9 +21,10 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
   (state/(hashlib.sha256(record['name'].encode()).hexdigest()+'.json')).write_text(json.dumps(record,separators=(',',':'),sort_keys=True))
  results=[]
  def call(label,args,timeout=30):
-  start=time.monotonic();io={};usage=None
+  start=time.monotonic();io={};usage=None;usage_path=root/(label+'.usage')
+  command=(['/usr/bin/time','-f','%M','-o',str(usage_path)] if sys.platform.startswith('linux') else ['/usr/bin/time','-l'])+[str(binary),*args]
   with tempfile.TemporaryFile() as stdout,tempfile.TemporaryFile() as stderr:
-   p=subprocess.Popen([str(binary),*args],env=env,stdout=stdout,stderr=stderr,start_new_session=True)
+   p=subprocess.Popen(command,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
    if sys.platform.startswith('linux'):
     while not os.waitid(os.P_PID,p.pid,os.WEXITED|os.WNOHANG|os.WNOWAIT):
      if time.monotonic()-start>timeout:
@@ -36,10 +37,14 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
    else:
     _,status,usage=os.wait4(p.pid,0);p.returncode=os.waitstatus_to_exitcode(status)
    stdout.seek(0);stderr.seek(0)
-   (out/f"bench-stderr-{binary.name}-{count}-{label}.log").write_bytes(stderr.read());stderr.seek(0)
+   errors=stderr.read();(out/f"bench-stderr-{binary.name}-{count}-{label}.log").write_bytes(errors);stderr.seek(0)
+   if sys.platform.startswith('linux'):
+    peak=int(usage_path.read_text().strip().splitlines()[-1])
+   else:
+    peak=int(re.search(rb'(\d+)\s+maximum resident set size',errors).group(1))/1024
    try:value=json.load(stdout)
    except Exception:value=dict(error=stderr.read().decode(errors='replace')[:500])
-  item=dict(label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=usage.ru_maxrss/(1024 if sys.platform=='darwin' else 1),reply=value)
+  item=dict(label=label,count=count,record_payload_bytes=size,seconds=time.monotonic()-start,exit=p.returncode,logical_read_bytes=io.get('rchar'),physical_read_bytes=io.get('read_bytes'),peak_rss_kib=peak,peak_rss_source='time-child',reply=value)
   results.append(item);print(json.dumps(item),flush=True);return value
  try:
   if order=='legacy-first':

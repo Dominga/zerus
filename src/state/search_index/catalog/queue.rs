@@ -151,8 +151,9 @@ impl Store {
         reader: &mut metadata::Reader,
         metadata_only: bool,
     ) -> Result<()> {
-        if metadata_only {
-            // This version records an attempt, not coverage. A deferred header
+        let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
+        if metadata_only && matches!(&record, Ok(metadata::Record::OverBudget)) {
+            // This version records an attempt, not coverage. An oversized header
             // stays pending/unknown and the rotating ingestion queue retries it;
             // it must not pin all later preparation at the same directory prefix.
             self.index
@@ -163,7 +164,6 @@ impl Store {
                 )
                 .map_err(|e| e.to_string())?;
         }
-        let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
         let mut record = match record {
             Ok(metadata::Record::Ready(record)) => record,
             Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {

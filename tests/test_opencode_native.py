@@ -905,7 +905,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assertTrue(data.get('attention_id'))
         [card] = data['pending_questions']
         self.assertEqual((card['kind'], card['can_answer'], card['approval']), ('opencode_form', True, False))
-        self.assertIs(card.get('blocking'), False)
+        self.assertIs(card.get('blocking'), True)
         self.assertIsInstance(data.get('question_routing'),dict)
         self.assertIs(data['question_routing']['send_to_parent'],True)
         listed=self.hgs(['ls','--local','--json'])
@@ -921,8 +921,9 @@ class OpenCodeNative(unittest.TestCase):
         request = self.payload(b, question_id=card['question_id'], expected_question_hash=card['question_hash'],
                                answers=[{'question_id': item['id'], 'selected_option_ids': [green], 'text': ''}])
         self.hgs(['answer', name, '--json'], {**request, 'expected_question_hash': 'changed'}, success=False)
-        self.assertEqual(self.hgs(['answer', name, '--json'], request)['status'], 'answered')
-        self.hgs(['answer', name, '--json'], request, success=False)
+        receipt = self.hgs(['answer', name, '--json'], request)
+        self.assertEqual(receipt['status'], 'answered')
+        self.assertEqual(self.hgs(['answer', name, '--json'], request), receipt)
         final = self.wait(name, lambda v: v['phase'] == 'idle' and v.get('reply_id'))
         self.assertTrue(any(e['type'] == 'PreToolUse' and e['tool'] == 'question' for e in final['events']))
         self.assertTrue(any(e['type'] == 'PostToolUse' and e['tool'] == 'question' and '"Green"' in e['detail']
@@ -946,7 +947,7 @@ class OpenCodeNative(unittest.TestCase):
         self.assert_private(data, final)
 
     def test_04_question_routing_identity_and_spent_answers(self):
-        """Person-only native forms keep existing manual identity and no-replay checks."""
+        """Qualified questions keep exact manual identity and no-replay checks."""
         previous = None
         for mode in ('MULTIPLE', 'PARTS', 'OTHER'):
             with self.subTest(mode=mode):
@@ -958,7 +959,7 @@ class OpenCodeNative(unittest.TestCase):
                 [card] = data['pending_questions']
                 self.assertEqual((card['source'], card['kind'], card['answer_transport']),
                                  ('opencode_native', 'opencode_form', 'native_opencode'))
-                self.assertIs(card.get('blocking'), False)
+                self.assertIs(card.get('blocking'), True)
                 self.assertIs(card['can_answer'], True)
                 self.assertEqual(len([r for r in self.model.requests
                                       if r['last_user'] == text and 'question' in r['tools']]), 1)
@@ -991,8 +992,9 @@ class OpenCodeNative(unittest.TestCase):
                     self.hgs(['answer', name, '--json'], {**request, 'request_id': previous}, success=False)
                 self.assertEqual(self.hgs(['inspect', name])['pending_questions'][0]['question_hash'],
                                  card['question_hash'])
-                self.assertEqual(self.hgs(['answer', name, '--json'], request)['status'], 'answered')
-                self.hgs(['answer', name, '--json'], request, success=False)
+                receipt = self.hgs(['answer', name, '--json'], request)
+                self.assertEqual(receipt['status'], 'answered')
+                self.assertEqual(self.hgs(['answer', name, '--json'], request), receipt)
                 self.hgs(['answer', name, '--json'], {**request, 'answers': []}, success=False)
                 previous = request['request_id']
                 final = self.wait(name, lambda value: value['phase'] == 'idle' and value.get('reply_id'))
@@ -1004,6 +1006,71 @@ class OpenCodeNative(unittest.TestCase):
                 for value in expected:
                     self.assertIn(value, replies[0]['detail'])
                 self.assertEqual(final['pending_questions'], [])
+
+    def test_04_exact_duplicate_answer_survives_question_removal_and_run_change(self):
+        binding = self.create()
+        name = binding['name']
+        self.hgs(['send', name, '--json'], self.payload(binding, text='QUESTION_NATIVE duplicate answer'))
+        [card] = self.wait(name, lambda v: v['pending_questions'])['pending_questions']
+        request = self.payload(binding, question_id=card['question_id'],
+                               expected_question_hash=card['question_hash'],
+                               answers=[dict(question_id=card['questions'][0]['id'],
+                                             selected_option_ids=['Green'], text='')])
+        receipt = self.hgs(['answer', name, '--json'], request)
+        self.wait(name, lambda v: v['phase'] == 'idle' and not v['pending_questions'])
+        native_requests = len(self.model.requests)
+        self.assertEqual(self.hgs(['answer', name, '--json'], request), receipt)
+        self.stop_service()
+        self.assertEqual(self.hgs(['answer', name, '--json'], request), receipt)
+        path = self.binding_path(name)
+        record = json.loads(path.read_text())
+        record['run_id'] = str(uuid.uuid4())
+        path.write_text(json.dumps(record))
+        self.assertEqual(self.hgs(['answer', name, '--json'], request), receipt)
+        for changed in ({'answers': []}, {'expected_run_id': record['run_id']},
+                        {'expected_conversation_id': 'ses_other'}, {'question_id': 'frm_other'}):
+            self.hgs(['answer', name, '--json'], {**request, **changed}, success=False)
+        self.assertEqual(len(self.model.requests), native_requests, 'Duplicates never resume native work')
+
+    def test_04_native_question_provenance_refuses_cloned_foreign_and_settled_tools(self):
+        binding = self.create()
+        name, cid = binding['name'], binding['conversation_id']
+        self.hgs(['send', name, '--json'], self.payload(binding, text='QUESTION_NATIVE provenance'))
+        [card] = self.wait(name, lambda v: v['pending_questions'])['pending_questions']
+        self.assertIs(card['blocking'], True)
+        status, response = self.api('GET', f'/api/session/{cid}/form')
+        self.assertEqual(status, 200)
+        [form] = response['data']
+        body = {k: form[k] for k in ('title', 'fields', 'metadata')}
+        status, message = self.api('GET', f'/api/session/{cid}/message/{form["metadata"]["tool"]["messageID"]}')
+        self.assertEqual(status, 200)
+        self.assertEqual(message['data']['content'][0]['state']['status'], 'running')
+        status, clone = self.api('POST', f'/api/session/{cid}/form', body)
+        self.assertIn(status, (200, 201))
+        cards = self.hgs(['inspect', name, '--after', str(2**63-1), '--skip-processes'])['pending_questions']
+        self.assertEqual(len(cards), 2)
+        self.assertTrue(all(c['blocking'] is False for c in cards), 'Two forms claiming one tool are ambiguous')
+        clone_card = next(c for c in cards if c['question_id'] != card['question_id'])
+        def answer(b, c):
+            return self.hgs(['answer', b['name'], '--json'], self.payload(b,
+                question_id=c['question_id'], expected_question_hash=c['question_hash'],
+                answers=[dict(question_id=c['questions'][0]['id'], selected_option_ids=['Green'], text='')]))
+        self.assertEqual(answer(binding, clone_card)['status'], 'answered')
+        [again] = self.hgs(['inspect', name])['pending_questions']
+        self.assertIs(again['blocking'], True)
+        other = self.create()
+        status, _ = self.api('POST', f'/api/session/{other["conversation_id"]}/form', body)
+        self.assertIn(status, (200, 201))
+        [foreign] = self.hgs(['inspect', other['name']])['pending_questions']
+        self.assertIs(foreign['blocking'], False)
+        self.assertEqual(answer(other, foreign)['status'], 'answered')
+        self.assertEqual(answer(binding, again)['status'], 'answered')
+        self.wait(name, lambda v: v['phase'] == 'idle' and not v['pending_questions'])
+        status, _ = self.api('POST', f'/api/session/{cid}/form', body)
+        self.assertIn(status, (200, 201))
+        [stale] = self.hgs(['inspect', name])['pending_questions']
+        self.assertIs(stale['blocking'], False)
+        self.assertEqual(answer(binding, stale)['status'], 'answered')
 
     def test_04_current_read_names_what_read_accepts_on_the_shown_observation(self):
         """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts

@@ -36,17 +36,18 @@ pub fn escalates(state: &str) -> bool {
 /// Claude's own AskUserQuestion from its PreToolUse hook.
 pub const ROUTED_SOURCE: &str = "hook";
 /// Qualified blocking questions only: Claude's hook, Kimi's foreground
-/// AskUserQuestion and DeepSeek's ordinary request. Each uses its
+/// AskUserQuestion, DeepSeek's ordinary request and OpenCode's API-verified
+/// pending question tool. Each uses its
 /// existing exact-identity answer path and durable original request journal.
 /// Approvals, trust, cache choices and other synthetic prompts never route.
-/// OpenCode stays person-only until native tool provenance and original
-/// duplicate-answer receipts are qualified; form metadata is caller supplied.
-pub const ROUTED_SOURCES: [&str; 3] = [ROUTED_SOURCE, "kimi_wire", "dsh_native"];
+/// OpenCode form metadata alone never qualifies a question.
+pub const ROUTED_SOURCES: [&str; 4] = [ROUTED_SOURCE, "kimi_wire", "dsh_native", "opencode_native"];
 fn routed_source(agent: &str) -> Option<&'static str> {
     match agent {
         "claude" => Some(ROUTED_SOURCE),
         "kimi" => Some("kimi_wire"),
         "dsh" => Some("dsh_native"),
+        "opencode" => Some("opencode_native"),
         _ => None,
     }
 }
@@ -320,6 +321,7 @@ pub fn routable(card: &Value) -> bool {
             || (card["answer_transport"] == "kimi_tui" && card["blocking"] == true))
         && (card["source"] != "dsh_native"
             || (card["answer_transport"] == "native_dsh" && card["blocking"] == true))
+        && (card["source"] != "opencode_native" || opencode_question(card))
         && card["approval"] != true
         && card["approval_choices"] != true
         && card["agent_id"] == "main"
@@ -329,6 +331,28 @@ pub fn routable(card: &Value) -> bool {
         && card["questions"]
             .as_array()
             .is_some_and(|items| !items.is_empty())
+}
+
+fn opencode_question(card: &Value) -> bool {
+    let proof = &card["native_question"];
+    let id = |value: &Value, prefix: &str| {
+        value.as_str().is_some_and(|id| {
+            id.starts_with(prefix)
+                && id.len() > prefix.len()
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        })
+    };
+    card["kind"] == "opencode_form"
+        && card["status"] == "pending"
+        && card["answer_transport"] == "native_opencode"
+        && card["blocking"] == true
+        && id(&card["question_id"], "frm_")
+        && proof.as_object().is_some_and(|p| p.len() == 2)
+        && id(&proof["message_id"], "msg_")
+        && id(&proof["tool_call_id"], "call_")
 }
 
 /// The routable questions of `inspect` (one bounded metadata read of the

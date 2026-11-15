@@ -9,7 +9,7 @@ export function phaseHeader(phase: PhaseRecord) {
     done: tr("Done"), rejected: tr("Rejected"),
   };
   return {
-    title: phase.title || (phase.kind === "queue" ? tr("Queue") : tr("Phase %1", phase.n)),
+    title: phase.kind === "queue" && phase.title === "Queue" ? tr("Queue") : phase.title || (phase.kind === "queue" ? tr("Queue") : tr("Phase %1", phase.n)),
     state: states[phase.state] ?? tr("Unknown phase state"),
     mode: phase.mode === "free" ? tr("Free") : tr("Standard"),
     barrier: phase.barrier ? tr("Waits for earlier phases") : "",

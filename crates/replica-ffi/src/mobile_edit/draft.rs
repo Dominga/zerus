@@ -231,6 +231,9 @@ impl TaskEditDraft {
         if state.unknown || state.pending.is_some() {
             return Err(refused("The original edit still needs its verified result; your draft was kept and will not execute again."));
         }
+        if phone_store_id(&self.qualification.store)? != self.qualification.phone_store {
+            return Err(refused("The original phone store changed; your draft was kept and will not be sent from another store."));
+        }
         if state.frozen.is_none() {
             return Err(refused(
                 "Freeze and retain the original task draft before transport.",

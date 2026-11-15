@@ -524,3 +524,25 @@ fn a_verified_native_refusal_and_unknown_stay_distinct_from_completion() {
         }
     }
 }
+
+#[test]
+fn replacing_the_phone_store_after_qualification_cannot_rehome_a_frozen_draft() {
+    let f = Fixture::new();
+    let q = f.qualification();
+    let draft = q.clone().accept(f.proof(&q.request())).unwrap();
+    draft
+        .comment("Keep the original store scope".into(), vec![])
+        .unwrap();
+    let frozen = draft.freeze().unwrap();
+    std::fs::write(f.api.root.join("store-id"), replica::ids::new_uuid()).unwrap();
+    assert!(
+        draft.next_request().is_err(),
+        "a replaced store reused the old qualification"
+    );
+    assert_eq!(draft.freeze().unwrap(), frozen);
+    let native = ProjectStore::open(&f.root.path().join("native-replica"), "project-1").unwrap();
+    assert_eq!(
+        native.load(f.task.uuid()).unwrap().revision(),
+        f.task.revision()
+    );
+}

@@ -87,6 +87,13 @@ describe("actual session-row favorites menu and model", () => {
     setup(); const unbound = { ...catalog.rows[key(2)], sessionId: undefined };
     expect(sessionMenu(unbound).find((v) => "label" in v && v.label === "Add to favorites")).toMatchObject({ disabled: true });
   });
+  it("refuses an Add menu snapshot after its row key was reused for another session", () => {
+    setup();
+    const add = sessionMenu(catalog.rows[key(2)]).find((v) => "label" in v && v.label === "Add to favorites");
+    applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: "run:favorite-2", row: raw(2, { session_id: id(20) }) }] });
+    if (add && "action" in add) add.action?.();
+    expect(favorite(catalog.rows[key(2)])).toBe(false);
+  });
   it("distinguishes identical names/session UUIDs on two computers and follows a canonical computer alias", () => {
     setup(); setFavorite(catalog.rows[key(2)], true);
     applyMachines({ ...emptyBatch(), machines: [{ computer: "peer", machine: { machine_id: id(90) } as never }] });

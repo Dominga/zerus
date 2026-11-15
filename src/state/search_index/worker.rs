@@ -61,7 +61,6 @@ pub(in crate::state) fn request(state: &Path) {
 }
 
 pub(in crate::state) fn run() -> Result<i32> {
-    lower_own_priority();
     let state = crate::platform::canonical(root()).map_err(|e| e.to_string())?;
     let original = super::super::repositories::directory::Directory::open(&state)?;
     let Some(_owner) = guard(&state, "worker.lock")? else {
@@ -89,14 +88,20 @@ fn workload(
     state: &Path,
     original: &super::super::repositories::directory::Directory,
 ) -> Result<bool> {
+    let launched = Instant::now();
     let mut store = Store::open(&state.join("content-search-v1"))?;
     let cancel = AtomicBool::new(false);
     let until = Instant::now() + Duration::from_secs(120);
+    let mut background = false;
     for _ in 0..8192 {
         if Instant::now() >= until {
             return Ok(false);
         }
         original.verify()?;
+        if !background && !preparation_priority(&store.catalog_status()?, launched.elapsed()) {
+            lower_own_priority();
+            background = true;
+        }
         step(&mut store, state, &cancel)?;
         let status = store.catalog_status()?;
         if status["discovery"] == "complete"
@@ -108,6 +113,17 @@ fn workload(
         std::thread::sleep(Duration::from_millis(1));
     }
     Ok(false)
+}
+
+fn preparation_priority(catalog: &Value, elapsed: Duration) -> bool {
+    // A waiting small search needs its headers promptly under CPU load. Bulk
+    // work and history use idle priority; the initial window is finite even
+    // when a missing/unreadable source never becomes ready.
+    elapsed < Duration::from_secs(2)
+        && catalog["queued_paths"]
+            .as_u64()
+            .is_some_and(|count| count <= 500)
+        && (catalog["discovery"] != "complete" || catalog["decoder_pending"] == true)
 }
 
 fn step(store: &mut Store, state: &Path, cancel: &AtomicBool) -> Result<()> {
@@ -166,6 +182,24 @@ pub(in crate::state) fn wait_small(state: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interactive_preparation_yields_on_time_size_or_completed_headers() {
+        let pending = json!({"queued_paths":200,"discovery":"incomplete","decoder_pending":true});
+        assert!(preparation_priority(&pending, Duration::ZERO));
+        assert!(!preparation_priority(&pending, Duration::from_secs(2)));
+        assert!(!preparation_priority(
+            &json!({"queued_paths":501,"discovery":"incomplete","decoder_pending":true}),
+            Duration::ZERO
+        ));
+        assert!(!preparation_priority(
+            &json!({"queued_paths":200,"discovery":"complete","decoder_pending":false}),
+            Duration::ZERO
+        ));
+        assert!(!preparation_priority(
+            &json!({"discovery":"incomplete"}),
+            Duration::ZERO
+        ));
+    }
     #[test]
     fn one_preparation_slice_has_a_bounded_number_of_durable_commits() {
         use std::sync::{atomic::AtomicUsize, Arc};

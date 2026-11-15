@@ -55,15 +55,6 @@ class NativeCodexInput(unittest.TestCase):
         return self.tmux('capture-pane', '-p', '-t', self.pane)
 
     def prepare_native_hooks(self):
-        if self._testMethodName == 'test_wrapped_native_title_keeps_guarded_input_and_drafts':
-            self.geometry = (80, 24)  # This added case owns the reported narrow frame.
-            isolated_home = self.root / 'native-profile-home'
-            isolated_home.mkdir()
-            self.env['HOME'] = str(isolated_home)  # Keep cwd absolute, not the home alias.
-            config = self.native_home / 'config.toml'
-            config.write_text('model_reasoning_effort="xhigh"\n' + config.read_text()
-                              + '\n[tui]\nstatus_line=["model-with-reasoning","current-dir","thread-name"]\n')
-            return
         if self._testMethodName != 'test_native_five_second_hook_timeout_keeps_acceptance_under_contention':
             return
         import shlex
@@ -240,10 +231,6 @@ class NativeCodexInput(unittest.TestCase):
         self.assertEqual(messages.count(text), 1)
         self.assertNotIn(draft, messages)
         self.assertNotIn(refused, messages)
-
-    def test_wrapped_native_title_keeps_guarded_input_and_drafts(self):
-        import codex_wrapped_title_native
-        codex_wrapped_title_native.exercise(self)
 
     def test_native_refusal_has_an_opted_in_terminal_outcome(self):
         import native_send_outcome

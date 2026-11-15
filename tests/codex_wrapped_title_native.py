@@ -4,15 +4,19 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shlex
+import sys
 import time
 import uuid
 import native_effort_id
 import test_input
+import unittest
+import test_codex_input_native as input_fixture
 
 
 def exercise(case):
     case.assertEqual(case.geometry, (80, 24), 'This contract needs its captured wrap geometry')
-    case.record.update(model='gpt-6.1-sol', effort='xhigh')
+    case.record.update(model='gpt-6.1-sol')
     case.write_record()
     # Native resumed history can retain its effort. Use the displayed label,
     # and fill that field so the final word must wrap at the reported width.
@@ -24,6 +28,17 @@ def exercise(case):
     prefix = 'R'*available
     title = prefix+' instructions'
     attempts = native_effort_id.key_log(case)
+    # Observe every input mutation, forwarding unchanged argv/stdin to this
+    # fixture's original private tmux. Reads keep their original fast path.
+    observer = case.root / 'native-effort-tmux.py'
+    observer.write_text(observer.read_text().replace(
+        "if args[:1]==['send-keys']:",
+        "if args[:1] in (['send-keys'],['load-buffer'],['paste-buffer'],['delete-buffer']):"))
+    original = case.bin / 'tmux-native-effort-original'
+    case.script('tmux', '#!/bin/sh\ncase "$1" in\n'
+                'send-keys|load-buffer|paste-buffer|delete-buffer) exec '
+                + shlex.quote(sys.executable) + ' ' + shlex.quote(str(observer))
+                + ' "$@" ;;\n*) exec ' + shlex.quote(str(original)) + ' "$@" ;;\nesac\n')
     case.tmux('send-keys', '-t', case.pane, '-l', '/rename')
     case.wait_for(lambda: '/rename' in case.screen())
     case.tmux('send-keys', '-t', case.pane, 'Enter')
@@ -99,3 +114,32 @@ def exercise(case):
         geometry=case.geometry, cursor=[x,y], inspected_without_keys=True,
         dialog_preserved=True, draft_preserved=True, wrong_identity_no_keys=True,
         exactly_one_user_row=True, duplicate_no_keys=True)))
+
+
+@unittest.skipUnless(os.environ.get('HGS_CODEX_TEST_BIN'), 'Set HGS_CODEX_TEST_BIN for isolated native Codex input')
+class NativeWrappedTitle(unittest.TestCase):
+    # Reuse the maintained provider/setup without inheriting its native methods
+    # into the busy-input classes (and their distinct geometry contracts).
+    script = input_fixture.NativeCodexInput.script
+    write_record = input_fixture.NativeCodexInput.write_record
+    tmux = input_fixture.NativeCodexInput.tmux
+    tearDown = input_fixture.NativeCodexInput.tearDown
+    payload = input_fixture.NativeCodexInput.payload
+    send = input_fixture.NativeCodexInput.send
+    fail = input_fixture.NativeCodexInput.fail
+    wait_for = input_fixture.NativeCodexInput.wait_for
+    native_features = input_fixture.NativeCodexInput.native_features
+    setUp = input_fixture.NativeCodexInput.setUp
+    screen = input_fixture.NativeCodexInput.screen
+
+    def prepare_native_hooks(self):
+        self.geometry = (80, 24)
+        isolated_home = self.root / 'native-profile-home'
+        isolated_home.mkdir()
+        self.env['HOME'] = str(isolated_home)  # Display the exact cwd, not '~'.
+        config = self.native_home / 'config.toml'
+        config.write_text(config.read_text() + '\n[tui]\n'
+                          'status_line=["model-with-reasoning","current-dir","thread-name"]\n')
+
+    def test_wrapped_native_title_keeps_guarded_input_and_drafts(self):
+        exercise(self)

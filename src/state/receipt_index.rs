@@ -426,6 +426,7 @@ impl Catalog {
             OpenFlags::SQLITE_OPEN_READ_ONLY
         } | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let db = sql(Connection::open_with_flags(&path, flags))?;
+        db.set_prepared_statement_cache_capacity(8);
         sql(db.busy_timeout(if create {
             Duration::from_millis(20)
         } else {
@@ -498,7 +499,7 @@ impl Catalog {
             let has_change = columns.iter().any(|column| column == "change");
             let unseeded = if has_change {
                 sql(db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM receipt_rows WHERE change=0)",
+                    "SELECT EXISTS(SELECT 1 FROM receipt_sources s WHERE EXISTS(SELECT 1 FROM receipt_rows r WHERE r.source=s.source AND r.change=0))",
                     [],
                     |row| row.get::<_, bool>(0),
                 ))?
@@ -512,7 +513,7 @@ impl Catalog {
                     |row| row.get(0),
                 ))?;
                 let maximum: i64 = sql(db.query_row(
-                    "SELECT COALESCE(MAX(change),0) FROM receipt_rows",
+                    "SELECT COALESCE(MAX((SELECT MAX(change) FROM receipt_rows r WHERE r.source=s.source)),0) FROM receipt_sources s",
                     [],
                     |row| row.get(0),
                 ))?;
@@ -642,6 +643,27 @@ impl Catalog {
         // the exact witness once here; if that is busy or fails, readers stay
         // unknown and request the worker, which re-witnesses on every run.
         if create && !catalog.witness_present() {
+            // A changed/missing schema token cannot certify cached projection
+            // fields merely by recounting them. Retain a durable original-walk
+            // requirement, including when another foreground writer opens first.
+            let populated: bool = sql(catalog.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM receipt_rows LIMIT 1)",
+                [],
+                |row| row.get(0),
+            ))?;
+            if populated {
+                let transaction = sql(rusqlite::Transaction::new_unchecked(
+                    &catalog.db,
+                    rusqlite::TransactionBehavior::Immediate,
+                ))?;
+                for source in Source::ALL {
+                    catalog.error(source, "@source", "index_schema_unverified")?;
+                }
+                sql(catalog
+                    .db
+                    .execute("UPDATE receipt_sources SET complete=0", []))?;
+                sql(transaction.commit())?;
+            }
             let _ = catalog.witness();
         }
         Ok(catalog)
@@ -650,7 +672,10 @@ impl Catalog {
         // Sequence allocation and the row write must be visible together: a
         // reader that sees a higher change_seq must also see every lower row.
         if self.db.is_autocommit() {
-            let transaction = sql(self.db.unchecked_transaction())?;
+            let transaction = sql(rusqlite::Transaction::new_unchecked(
+                &self.db,
+                rusqlite::TransactionBehavior::Immediate,
+            ))?;
             self.remember_row(source, path, value)?;
             sql(transaction.commit())?;
             Ok(())
@@ -659,26 +684,24 @@ impl Catalog {
         }
     }
     fn cached_row(&self, source: Source, request: &str) -> Result<Option<CachedRow>> {
-        sql(self
-            .db
-            .query_row(
-                "SELECT binding,stamp,name,run,conversation,agent,first_message,at,files
-               FROM receipt_rows WHERE source=? AND request=?",
-                params![source.key(), request],
-                |row| {
-                    Ok(CachedRow {
-                        fingerprint: row.get(0)?,
-                        stamp: row.get(1)?,
-                        name: row.get(2)?,
-                        run: row.get(3)?,
-                        conversation: row.get(4)?,
-                        agent: row.get(5)?,
-                        first: row.get(6)?,
-                        at: row.get(7)?,
-                        files: row.get(8)?,
-                    })
-                },
-            )
+        let mut query = sql(self.db.prepare_cached(
+            "SELECT binding,stamp,name,run,conversation,agent,first_message,at,files
+             FROM receipt_rows WHERE source=? AND request=?",
+        ))?;
+        sql(query
+            .query_row(params![source.key(), request], |row| {
+                Ok(CachedRow {
+                    fingerprint: row.get(0)?,
+                    stamp: row.get(1)?,
+                    name: row.get(2)?,
+                    run: row.get(3)?,
+                    conversation: row.get(4)?,
+                    agent: row.get(5)?,
+                    first: row.get(6)?,
+                    at: row.get(7)?,
+                    files: row.get(8)?,
+                })
+            })
             .optional())
     }
     fn remember_row(&self, source: Source, path: &Path, value: &Value) -> Result<()> {
@@ -806,7 +829,11 @@ impl Catalog {
             1000,
             Some(move || deadline.is_some_and(|d| Instant::now() >= d)),
         );
-        let verified = self.coverage_verified();
+        let verified = if scope.source == Source::Question {
+            self.coverage_verified_for(Some(Source::Question))
+        } else {
+            self.coverage_verified()
+        };
         let protocol = rowset_protocol(&self.db);
         let work = Arc::new(AtomicUsize::new(0));
         let counter = work.clone();
@@ -1040,10 +1067,16 @@ impl Catalog {
     /// originals from masquerading as complete coverage. It neither walks the
     /// directory nor writes: the caller requests the background worker.
     fn coverage_verified(&self) -> bool {
+        self.coverage_verified_for(None)
+    }
+    fn coverage_verified_for(&self, source: Option<Source>) -> bool {
         if !rowset_protocol(&self.db) {
             return false;
         }
-        if !self.witness_current() {
+        if !source.map_or_else(
+            || self.witness_current(),
+            |s| self.source_witness_current(s.key()),
+        ) {
             return false;
         }
         // A row without a sequence, or a frontier behind MAX(change), means a
@@ -1055,12 +1088,12 @@ impl Catalog {
         let consistent: bool = self
             .db
             .query_row(
-                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources s WHERE EXISTS
+                "SELECT NOT EXISTS(SELECT 1 FROM receipt_sources s WHERE (?1='' OR s.source=?1) AND EXISTS
                      (SELECT 1 FROM receipt_rows r WHERE r.source=s.source AND r.change=0))
                    AND COALESCE((SELECT CAST(value AS INTEGER) FROM receipt_meta WHERE key='change_seq'),0)
                        >= COALESCE((SELECT MAX((SELECT MAX(change) FROM receipt_rows r WHERE r.source=s.source))
-                                      FROM receipt_sources s),0)",
-                [],
+                                      FROM receipt_sources s WHERE (?1='' OR s.source=?1)),0)",
+                [source.map_or("", Source::key)],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -1233,6 +1266,12 @@ impl Catalog {
     /// race: nothing changes and the next run retries. Any mismatch leaves no
     /// token at all, so readers stay unknown until a clean witness.
     pub(super) fn witness(&self) -> Result<Witnessed> {
+        self.witness_with(false)
+    }
+    fn witness_cooperative(&self) -> Result<Witnessed> {
+        self.witness_with(true)
+    }
+    fn witness_with(&self, cooperative: bool) -> Result<Witnessed> {
         let (epoch, schema, watermark, counts) = {
             let read = sql(self.db.unchecked_transaction())?;
             let epoch: String = sql(self.db.query_row(
@@ -1258,6 +1297,17 @@ impl Catalog {
             }
             sql(read.commit())?;
             (epoch, schema, watermark, counts)
+        };
+        // Count without foreground custody; acquire it only for publication.
+        // A newly arrived answer keeps its deadline and this witness stays old.
+        let _publication = if cooperative {
+            match migration::advisory_guard(&self.state) {
+                Ok(guard) => guard,
+                Err(error) if error == migration::FOREGROUND => return Ok(Witnessed::Raced),
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
         };
         let write = sql(rusqlite::Transaction::new_unchecked(
             &self.db,
@@ -1488,7 +1538,11 @@ impl Catalog {
         // The pinned changed page retains the row-set protocol check through
         // coverage_verified(): a cache without its invalidation guards proves
         // no coverage.
-        let verified = self.coverage_verified();
+        let verified = if scope.source == Source::Question {
+            self.coverage_verified_for(Some(Source::Question))
+        } else {
+            self.coverage_verified()
+        };
         let ready = verified
             && complete
             && current_directory
@@ -1598,11 +1652,27 @@ fn read_original(path: &Path) -> std::result::Result<Value, &'static str> {
 
 /// A receipt original's content stamp. A missing file still yields a locator
 /// change, and the consumer validates the original before importing it.
+fn original_stamp(metadata: &fs::Metadata) -> String {
+    let (seconds, nanos) = crate::platform::modified(metadata);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!(
+            "{}:{seconds}:{nanos}:{}:{}:{}:{}",
+            metadata.len(),
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec()
+        )
+    }
+    #[cfg(not(unix))]
+    format!("{}:{seconds}:{nanos}", metadata.len())
+}
 fn file_stamp(path: &Path) -> Result<String> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-            let (seconds, nanos) = crate::platform::modified(&metadata);
-            Ok(format!("{}:{seconds}:{nanos}", metadata.len()))
+            Ok(original_stamp(&metadata))
         }
         Ok(_) => Err("Receipt original is not a regular file".into()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok("missing".into()),
@@ -1617,10 +1687,13 @@ fn file_state(path: &Path) -> Option<(String, f64)> {
         .ok()
         .filter(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())?;
     let (seconds, nanos) = crate::platform::modified(&metadata);
-    Some((
-        format!("{}:{seconds}:{nanos}", metadata.len()),
-        seconds as f64 + nanos as f64 / 1e9,
-    ))
+    let modified = seconds as f64 + nanos as f64 / 1e9;
+    #[cfg(unix)]
+    let modified = {
+        use std::os::unix::fs::MetadataExt;
+        modified.max(metadata.ctime() as f64 + metadata.ctime_nsec() as f64 / 1e9)
+    };
+    Some((original_stamp(&metadata), modified))
 }
 
 /// Projection is advisory. Missing index/original data is never proof of absence
@@ -1805,9 +1878,13 @@ pub(in crate::state) fn remember_committed(
     };
     let remember = (|| -> Result<()> {
         let (state, filename) = receipt_location(path, source)?;
+        let _publication = migration::advisory_guard(&state)?;
         let catalog = Catalog::open(&state, true)?;
         let registered = (|| -> Result<()> {
-            let transaction = sql(catalog.db.unchecked_transaction())?;
+            let transaction = sql(rusqlite::Transaction::new_unchecked(
+                &catalog.db,
+                rusqlite::TransactionBehavior::Immediate,
+            ))?;
             let prior: (String, bool, i64, i64) = sql(catalog.db.query_row(
                 "SELECT stamp,complete,indexed,errors FROM receipt_sources WHERE source=?",
                 [source.key()],
@@ -1931,6 +2008,7 @@ fn persist_using(path: &Path, value: &Value, publish: impl FnOnce() -> Result<()
         let remember = (|| -> Result<()> {
             let parent = path.parent().ok_or("Invalid receipt path")?;
             let (state, _) = receipt_location(path, source)?;
+            let _publication = migration::advisory_guard(&state)?;
             let catalog = Catalog::open(&state, true)?;
             catalog.remember(source, path, value)?;
             // Only advance an already reconciled snapshot. A missed/legacy

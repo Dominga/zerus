@@ -105,26 +105,35 @@ impl Store {
         if rows.is_empty() && last > 0 {
             rows = self.queue_page(0, metadata_only)?;
         }
-        for (id, path, kind) in rows {
-            if !progress.ingestion.available(budget, cancel) {
-                progress.ingestion.stopped = true;
-                break;
+        // Metadata preparation publishes only one bounded cache/identity page.
+        // Group its durable writes; history retains its per-source atomic step.
+        let batch = metadata_only && self.begin_step()?;
+        let rows_result = (|| -> Result<()> {
+            for (id, path, kind) in rows {
+                if !progress.ingestion.available(budget, cancel) {
+                    progress.ingestion.stopped = true;
+                    break;
+                }
+                // One queued source is one step transaction: its identity, index
+                // rows, input cursor, progress and queue completion commit together.
+                let owned = self.begin_step()?;
+                let row = self.consume_row(
+                    state,
+                    (id, path, kind, metadata_only),
+                    budget,
+                    cancel,
+                    &mut progress,
+                    &mut reader,
+                );
+                let ended = self.end_step(owned);
+                row?;
+                ended?;
             }
-            // One queued source is one step transaction: its identity, index
-            // rows, input cursor, progress and queue completion commit together.
-            let owned = self.begin_step()?;
-            let row = self.consume_row(
-                state,
-                (id, path, kind, metadata_only),
-                budget,
-                cancel,
-                &mut progress,
-                &mut reader,
-            );
-            let ended = self.end_step(owned);
-            row?;
-            ended?;
-        }
+            Ok(())
+        })();
+        let batch_end = self.end_step(batch);
+        rows_result?;
+        batch_end?;
         let catalog = self.catalog_status()?;
         let coverage = self.index.status().map_err(|e| e.to_string())?;
         let ready = catalog["discovery"] == "complete"

@@ -14,6 +14,9 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
  for d in ['config','tmp','tmux','home']:(root/d).mkdir(mode=0o700)
  env={k:v for k,v in os.environ.items() if not k.startswith('HGS_') and k not in ['TMUX','TMUX_PANE']}
  env.update(HOME=str(root/'home'),HGS_STATE_DIR=str(state),HGS_CONFIG_DIR=str(root/'config'),TMPDIR=str(root/'tmp'),TMUX_TMPDIR=str(root/'tmux'))
+ if sys.platform.startswith('linux'):
+  timer=root/'search-time'
+  subprocess.run(['cc','-O2','-std=c11','-Wall','-Wextra','-Werror',str(repo/'bench/search-time.c'),'-o',str(timer)],check=True,timeout=15)
  for n in range(count):
   conv=str(uuid.UUID(int=n+1));transcript=root/(conv+'.jsonl')
   transcript.write_text(json.dumps(dict(type='event_msg',timestamp='2026-11-14T10:00:00Z',payload=dict(type='agent_message',id='result',message='public benchmark needle' if n==count-1 else 'ordinary public message',phase='final')))+'\n')
@@ -22,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='search-p1-',dir=scratch) as raw:
  results=[]
  def call(label,args,timeout=30):
   start=time.monotonic();io={};usage=None;usage_path=root/(label+'.usage')
-  command=(['/usr/bin/time','-f','%M','-o',str(usage_path)] if sys.platform.startswith('linux') else ['/usr/bin/time','-l'])+[str(binary),*args]
+  command=([str(timer),str(usage_path)] if sys.platform.startswith('linux') else ['/usr/bin/time','-l'])+[str(binary),*args]
   with tempfile.TemporaryFile() as stdout,tempfile.TemporaryFile() as stderr:
    p=subprocess.Popen(command,env=env,stdout=stdout,stderr=stderr,start_new_session=True)
    if sys.platform.startswith('linux'):

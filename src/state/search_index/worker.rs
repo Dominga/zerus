@@ -167,6 +167,42 @@ pub(in crate::state) fn wait_small(state: &Path) {
 mod tests {
     use super::*;
     #[test]
+    fn one_preparation_slice_has_a_bounded_number_of_durable_commits() {
+        use std::sync::{atomic::AtomicUsize, Arc};
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path();
+        for n in 0..30 {
+            let name = format!("codex/example/commits-{n}");
+            let record = json!({"version":1,"name":name,"agent":"codex","run_id":format!("run-{n}"),
+                "conversation_id":uuid::Uuid::new_v4().to_string()});
+            fs::write(
+                state.join(format!("{:x}.json", Sha256::digest(name.as_bytes()))),
+                record.to_string(),
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(&state.join("content-search-v1")).unwrap();
+        let cancel = AtomicBool::new(false);
+        store
+            .discover(state, &DiscoveryBudget::interactive(), &cancel)
+            .unwrap();
+        let commits = Arc::new(AtomicUsize::new(0));
+        let count = commits.clone();
+        store.index.connection().commit_hook(Some(move || {
+            count.fetch_add(1, Ordering::Relaxed);
+            false
+        }));
+        let result = store.prepare_metadata(state, &Budget::interactive(), &cancel);
+        store.index.connection().commit_hook(None::<fn() -> bool>);
+        assert_eq!(result.unwrap().visited_paths, 16);
+        assert!(
+            commits.load(Ordering::Relaxed) <= 8,
+            "metadata performed {} durable commits for one bounded slice",
+            commits.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
     fn a_partial_metadata_slice_retries_its_unprepared_header() {
         let temp = tempfile::tempdir().unwrap();
         let state = temp.path();

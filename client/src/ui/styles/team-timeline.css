@@ -4,3 +4,7 @@
 .team-timeline-events > li::before { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; left: -5px; top: 5px; background: var(--z-color-muted); }
 .team-timeline-events header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
 .team-timeline-events time { color: var(--z-color-muted); }
+
+.team-recorded-timings { margin: 6px 0; }
+.team-recorded-timings dl { display: grid; grid-template-columns: minmax(120px, auto) 1fr; gap: 4px 14px; }
+.team-recorded-timings dd { margin: 0; overflow-wrap: anywhere; }

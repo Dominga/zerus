@@ -313,3 +313,11 @@ fn a_busy_store_code_is_never_a_refusal() {
     assert!(refusal(&Error::new(RULE, "rule")));
     assert!(refusal(&Error::new(PROJECT_LIMIT_CODE, "limit")));
 }
+
+#[test]
+fn proof_busy_before_reservation_retains_its_retryable_cause() {
+    let error = super::replica(zerus_replica::Error::busy("proof busy; try again"));
+    let error = super::not_started(error);
+    assert_eq!(error.code, super::STORE_BUSY_CODE);
+    assert!(!super::refusal(&error));
+}

@@ -45,7 +45,7 @@ const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
 /// the store's inventory does, repairing a lowered execution schema first
 /// (zerus-cg5h.21). Rows of an index without it are read again once; the
 /// row shape is unchanged, so this needs no other index file.
-const DERIVED: &str = "repaired-1";
+const DERIVED: &str = "repaired-2-proof-budget";
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.
@@ -303,6 +303,8 @@ fn cached_row(raw: &str, listed: &Listed, stage: Stage) -> Outcome<Value> {
 
 /// What the index keeps of one task.
 enum Derived {
+    /// A retryable read, never a cache row or an absent/damaged task.
+    Busy,
     Row {
         stage: &'static str,
         rank: String,
@@ -370,6 +372,7 @@ fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
     let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
     let task = match loaded {
         Ok(task) => task,
+        Err(error) if error.kind() == zerus_replica::ErrorKind::Busy => return Derived::Busy,
         Err(error) => return damaged(error.to_string(), None),
     };
     let held = held(&task);
@@ -1054,6 +1057,7 @@ impl<'a> Index<'a> {
                 // A repair saves the task: its row keeps the stamps taken
                 // with that read, and a task whose files are gone has none.
                 let (derived, (now, trusted)) = derive(self.store, uuid, || stamped(&dir, uuid, read_at));
+                if matches!(derived, Derived::Busy) { return Err(Failure::Other); }
                 let derived = (!gone(&now)).then_some(derived);
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
@@ -1090,6 +1094,7 @@ impl<'a> Index<'a> {
                 tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
+                    Some(Derived::Busy) => return Err(Failure::Other),
                     Some(Derived::Damaged(error, held)) => {
                         let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(

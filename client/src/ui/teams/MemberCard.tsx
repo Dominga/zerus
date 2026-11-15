@@ -31,6 +31,10 @@ export function MemberCard(props: { member: MemberView; teamStatus: string; card
     if (item.card.held) return tr("Task #%1 is held", item.card.node);
     return item.card.state === "in_progress" ? tr("Working on #%1", item.card.node) : item.card.state === "reported" ? tr("Reported #%1", item.card.node) : tr("Assigned to #%1", item.card.node);
   };
+  const assignment = (item: MemberWork) => <>
+    <span class="team-member-assignment" title={activity(item)}>{activity(item)}</span>
+    <span class="team-member-task-title ell" title={item.card.title}>{item.card.title}</span>
+  </>;
   return <div class="team-member-card" classList={{ "team-lead": props.member.lead }} data-member={props.member.id} data-state={status().state} data-state-color={status().tone}>
     <TeamAgent agent={props.member.agent} />
     <div class="team-member-content">
@@ -45,7 +49,7 @@ export function MemberCard(props: { member: MemberView; teamStatus: string; card
           the name that repeated the chip said nothing more. */}
       <Show when={props.member.state === "active" ? current() : undefined} fallback={<Show when={props.member.state === "active"}><p class="team-member-idle">{tr("No current assignment on this page.")}</p></Show>}>
         {(item) => <div class="team-member-activity">
-          <Show when={props.onSelect} fallback={<span>{activity(item()!)}</span>}><button type="button" onClick={() => props.onSelect?.(item()!.card.node)}>{activity(item()!)}<span class="ell">{item()!.card.title}</span></button></Show>
+          <Show when={props.onSelect} fallback={<div class="team-member-work-copy">{assignment(item()!)}</div>}><button type="button" class="team-member-work-copy" onClick={() => props.onSelect?.(item()!.card.node)}>{assignment(item()!)}</button></Show>
           <Show when={item()!.stage} fallback={<Show when={item()!.card.round > 0}><span class="dim">{tr("Round %1", item()!.card.round)}</span></Show>}>{(stage) => <StageChip stage={stage()} rounds={item()!.card.rounds} />}</Show>
         </div>}
       </Show>

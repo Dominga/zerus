@@ -9,7 +9,88 @@ enum Saved {
 /// Every new mutation, its revision and its receipt share one write transaction.
 /// Saved receipt replay is a read and never renews permission to cause effects.
 pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> Result<Reply> {
+    apply_with_config(store, actor, request, now, None)
+}
+
+/// Native configuration supplies the placement reader, never a request path.
+/// Repository and provider reads run under the transaction after receipt replay.
+pub fn apply_with_config(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, config, &|team| {
+        let config = config.ok_or_else(|| {
+            invalid("A trusted local repository resolver is required to advance the base.")
+        })?;
+        crate::desktop::teams::repository(config, team)
+    })
+}
+
+/// Tests supply a private repository through the same transaction and guards.
+#[cfg(test)]
+pub(crate) fn apply_with_repository(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
+    apply_with_context(store, actor, request, now, None, repository)
+}
+
+fn apply_with_context(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
+    apply_inputs(store, actor, request, now, config, repository, None)
+}
+
+pub(crate) fn apply_with_gesture(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+) -> Result<Reply> {
+    // This closed V1 intent is only DecideCard. It never resolves a repository.
+    apply_inputs(
+        store,
+        actor,
+        request,
+        now,
+        None,
+        &|_| {
+            Err(invalid(
+                "A trusted local repository resolver is required to advance the base.",
+            ))
+        },
+        admission,
+    )
+}
+
+fn apply_inputs(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+) -> Result<Reply> {
     validate_request(request, now)?;
+    if matches!(actor, Actor::Person { .. })
+        && matches!(request.operation, Operation::DecideCard { .. })
+        && admission.is_none()
+    {
+        return Err(crate::desktop::teams::person_gesture::required());
+    }
     store.refresh()?;
     prepare_first(store, actor, request)?;
     let state = store.state().to_owned();
@@ -20,6 +101,18 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
     store::execution_fence(&tx)?;
+    let gesture = admission
+        .map(|admission| admission.consume(&tx, &state, actor, request))
+        .transpose()?;
+    if let Some(intent) = &gesture {
+        if let Some(saved) = replay(&tx, actor, request)? {
+            crate::desktop::teams::person_gesture::original(&tx, intent)?;
+            return saved;
+        }
+        // Bound the native point-read bodies before the common kernel reads
+        // its team. The snapshot cannot change under this writer transaction.
+        crate::desktop::teams::person_gesture::fresh(&tx, intent)?;
+    }
     let current = rows::team(&tx, &request.team)?;
     let team = current
         .clone()
@@ -47,13 +140,16 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         event: None,
         superseded: None,
     };
-    let result = run(&mut ctx, request, current.is_some());
+    let result = run(&mut ctx, request, current.is_some(), config, repository);
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
         return result;
     }
     save(&tx, actor, request, &result)?;
+    if let Some(intent) = &gesture {
+        crate::desktop::teams::person_gesture::record(&tx, intent)?;
+    }
     tx.commit().map_err(storage)?;
     result
 }
@@ -97,7 +193,11 @@ fn verify_actor(db: &Connection, actor: &Actor, team: &Team) -> Result<()> {
     }
     Ok(())
 }
-fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Result<Reply>>> {
+pub(crate) fn replay(
+    db: &Connection,
+    actor: &Actor,
+    request: &Request,
+) -> Result<Option<Result<Reply>>> {
     let saved: Option<(String, String, String)> = db
         .query_row(
             "SELECT actor,content,result FROM requests WHERE id=?1",
@@ -120,7 +220,13 @@ fn replay(db: &Connection, actor: &Actor, request: &Request) -> Result<Option<Re
         Saved::Refused(p) => Err(p),
     }))
 }
-fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply> {
+fn run(
+    ctx: &mut Context<'_>,
+    request: &Request,
+    existed: bool,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
     if ctx.team.revision != request.expected_revision {
         return Err(stale());
     }
@@ -132,7 +238,11 @@ fn run(ctx: &mut Context<'_>, request: &Request, existed: bool) -> Result<Reply>
     {
         return Err(invalid("Team already exists."));
     }
-    dispatch(ctx)?;
+    if matches!(ctx.op, Operation::AdvanceBase { .. }) {
+        base::advance(ctx, repository)?;
+    } else {
+        dispatch(ctx, config)?;
+    }
     ctx.reply.revision = ctx
         .team
         .revision
@@ -174,8 +284,9 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
     .map_err(storage)?;
     Ok(())
 }
-fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
+fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
+        Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),
@@ -187,6 +298,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::Resume => team::resume(ctx),
         Operation::Stop => team::stop(ctx),
         Operation::Archive => team::archive(ctx),
+        Operation::SetValidationConfig { .. } => provider_settings::select(ctx, config),
         Operation::ChangeSettings { .. } => team::change_settings(ctx),
         Operation::SetMemberSession { .. } => members::set_session(ctx),
         Operation::SetMemberHandle { .. } => members::set_handle(ctx),

@@ -10,7 +10,6 @@ mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
 pub(crate) mod dependency_edit;
-pub(in crate::teams) mod non_delivery;
 mod disposition;
 pub(crate) mod drafts;
 pub(crate) mod editing;
@@ -18,9 +17,13 @@ mod holder;
 pub(crate) mod planning;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
+mod native_person;
+pub(in crate::teams) mod non_delivery;
 pub use decision_state::DecisionState;
+pub(crate) mod bases;
 pub(crate) mod pages;
 mod progress;
+mod recorded_timings;
 mod records;
 pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
 pub(crate) mod rows;
@@ -38,7 +41,11 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+// Layout 3 was published by planning and used by the original native candidate.
+// The combined writer fences both engines with its own distinct core mark.
+pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = 2;
+pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -290,11 +297,14 @@ fn connect_mode(path: &Path, create: bool, migrate: bool) -> Result<Connection> 
     .map_err(storage)?;
     #[cfg(unix)]
     crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
+    bases::register_writer(&db)?;
     db.busy_timeout(Duration::from_secs(8)).map_err(storage)?;
     if migrate {
         initialize(&mut db)?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(storage)?;
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+        )
+        .map_err(storage)?;
     }
     Ok(db)
 }
@@ -315,7 +325,8 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if matches!(version, 2 | SCHEMA_VERSION) {
+    if version == SCHEMA_VERSION {
+        native_person::validate(db)?;
         return schema_extensions(db);
     }
     let tx = db
@@ -332,7 +343,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        2 | SCHEMA_VERSION => None,
+        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT | SCHEMA_VERSION => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
@@ -344,6 +355,15 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .map_err(storage)?;
     }
     schema_extensions(&tx)?;
+    if current == SCHEMA_VERSION {
+        // Another current opener won the writer. A current but damaged leaf
+        // cannot be mistaken for an unmigrated legacy store.
+        native_person::validate(&tx)?;
+    } else {
+        native_person::migrate(&tx)?;
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(storage)?;
+    }
     tx.commit().map_err(storage)
 }
 
@@ -388,8 +408,8 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     timers::extend(db)
 }
 
-/// Executable planned work fences pre-M2 engines. Queue-only stores stay at
-/// layout 2; starting planning raises it atomically with that team's creation.
+/// Recheck under every writer lock before execution or native receipt replay.
+/// The combined layout fences both pre-planning and pre-native engines.
 pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -515,10 +535,12 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 4] = [
+const COMMON_SCHEMA: [&str; 6] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
+    include_str!("validation-settings.sql"),
     include_str!("read-indexes.sql"),
+    include_str!("base-schema.sql"),
     include_str!("non-delivery-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied

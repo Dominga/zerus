@@ -5,7 +5,7 @@ use crate::teams::{
     ops::{HandoutOutcome, Operation, TaskStage},
 };
 #[derive(Default)]
-struct Work {
+pub(super) struct Work {
     text: Option<String>,
     fail_observe: bool,
     allow_delivery: bool,
@@ -25,10 +25,10 @@ struct Work {
     lock_after_merge: Option<std::path::PathBuf>,
     held: Option<rusqlite::Connection>,
     advance: Option<std::path::PathBuf>,
-    repo: Option<integrate::Repo>,
+    pub(super) repo: Option<integrate::Repo>,
     stop_team: Option<std::path::PathBuf>,
     stop: bool,
-    last_plan: Option<MergePlan>,
+    pub(super) last_plan: Option<MergePlan>,
     conflicts_for: Option<(u32, Vec<String>)>,
     demote_after_merge: Option<std::path::PathBuf>,
 }
@@ -498,7 +498,7 @@ fn finishing_cutover_retries_with_backoff_and_unchanged_wakes_do_not_repeat_done
 }
 fn apply(store: &mut Store, who: &crate::teams::ops::Actor, op: Operation) {
     let revision = store.team(TEAM).unwrap().unwrap().revision;
-    crate::teams::ops::apply(store, who, &request(revision, op), 1234).unwrap();
+    crate::teams::ops::tests::apply_fixture(store, who, &request(revision, op), 1234).unwrap();
 }
 fn observation(store: &mut Store, stage: TaskStage) {
     let old = store.task_observation(TEAM, 1).unwrap().unwrap();

@@ -1392,10 +1392,12 @@ fn the_action_kinds_are_the_shared_list() {
             | TeamAction::Resume {}
             | TeamAction::Stop {}
             | TeamAction::Archive {}
+            | TeamAction::AdvanceBase { .. }
             | TeamAction::PauseMember { .. }
             | TeamAction::ResumeMember { .. }
             | TeamAction::StopMember { .. }
             | TeamAction::ArchiveMember { .. }
+            | TeamAction::ValidationConfig { .. }
             | TeamAction::Settings { .. }
             | TeamAction::Decide { .. }
             | TeamAction::Admit { .. }
@@ -1461,10 +1463,20 @@ fn the_action_kinds_are_the_shared_list() {
         TeamAction::Resume {},
         TeamAction::Stop {},
         TeamAction::Archive {},
+        TeamAction::AdvanceBase {
+            commit: "0123456789abcdef0123456789abcdef01234567".into(),
+        },
         TeamAction::PauseMember { member: member() },
         TeamAction::ResumeMember { member: member() },
         TeamAction::StopMember { member: member() },
         TeamAction::ArchiveMember { member: member() },
+        TeamAction::ValidationConfig {
+            selection: zerus_team_plan::validation::Selection {
+                source_digest: "a".repeat(64),
+                digest: "b".repeat(64),
+                override_config: None,
+            },
+        },
         TeamAction::Settings {
             settings: Default::default(),
         },
@@ -1525,4 +1537,35 @@ fn the_action_kinds_are_the_shared_list() {
     let shared: Vec<String> =
         serde_json::from_str(include_str!("../fixtures/action-kinds.json")).unwrap();
     assert_eq!(kinds, shared);
+}
+
+#[test]
+fn advance_base_requires_confirmation_and_keeps_revision_and_identity() {
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let mut call = a_call(
+        TEAM,
+        7,
+        TeamAction::AdvanceBase {
+            commit: commit.into(),
+        },
+    );
+    let TeamOutcome::Confirm { confirmation } = prepare(&call).unwrap_err() else {
+        panic!("confirmation required")
+    };
+    assert_eq!(confirmation.name, "teamAdvanceBaseConfirm");
+    assert!(confirmation.text.contains(commit));
+    call.confirmed = true;
+    let (invocation, _) = prepare(&call).unwrap();
+    assert_eq!(invocation.args, ["team", "advance-base", "--json"]);
+    let input = stdin_of(&invocation);
+    assert_eq!(input["commit"], commit);
+    assert_eq!(input["request_id"], call.request_id);
+    assert_eq!(input["expected_revision"], 7);
+    assert!(input.get("base_revision").is_none());
+    for invalid in ["HEAD", "main", "0123456", "--all"] {
+        call.action = TeamAction::AdvanceBase {
+            commit: invalid.into(),
+        };
+        assert!(prepare(&call).is_err());
+    }
 }

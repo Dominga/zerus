@@ -286,6 +286,10 @@ pub enum Operation {
     Resume,
     Stop,
     Archive,
+    /// Person-only: advance the default for future hand-outs, without a Git write.
+    AdvanceBase {
+        commit: String,
+    },
     PauseMember {
         member: String,
     },
@@ -441,6 +445,9 @@ pub enum Operation {
     DecideCard {
         card: u64,
         decision: String,
+    },
+    SetValidationConfig {
+        selection: zerus_team_plan::validation::Selection,
     },
     ChangeSettings {
         settings: Settings,

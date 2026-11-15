@@ -22,11 +22,13 @@ import { TaskDependencies } from "./TaskDependencies";
 import { PlanView } from "./PlanView";
 import { LanesView } from "./LanesView";
 import { TeamTaskCard } from "./TeamTaskCard";
+import { TeamAdvanceBase } from "./TeamAdvanceBase";
 import { PhasePane } from "./PhasePane";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
+import "../styles/team-scroll.css";
 
 // The Team workspace adapts the fork's team bar, members, paged Board, task
 // detail and decisions. Graph and Layers share the core's projection. Feed,
@@ -53,6 +55,7 @@ export const OPEN_NODE_PAGES = 4;
 /** The workspace, from a view the store has already projected. */
 export function TeamWorkspace(props: {
   view: TeamView;
+  providerHome?: string;
   busy: boolean;
   failure: { code: string; message: string } | null;
   actionFailure?: string | null;
@@ -67,6 +70,7 @@ export function TeamWorkspace(props: {
   const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
+  const [advance, setAdvance] = createSignal(false);
   /** The stage Open task named, shown in its parent card's detail. */
   const [focusStage, setFocusStage] = createSignal<number | null>(null);
   const [openNotice, setOpenNotice] = createSignal("");
@@ -79,6 +83,7 @@ export function TeamWorkspace(props: {
   // keeps the open card and a reason being typed.
   const teamId = createMemo(() => props.view.bar.id);
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
+  createEffect(on(teamId, () => setAdvance(false), { defer: true }));
   createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers" || planMode() === "lanes") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
@@ -115,11 +120,13 @@ export function TeamWorkspace(props: {
   const send = (kind: string, fields: Record<string, unknown> = {}) => { if (kind === "swap_member") { editors.open(kind, String(fields.member)); return; } props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
-      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
+      <TeamBar view={props.view} busy={props.busy} onAction={(kind) => kind === "advance_base" ? setAdvance(true) : send(kind)}
         onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked}
         drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
-      <Show when={settingsView()}><TeamSettingsDialog view={props.view} busy={props.busy || !!props.settingsBlocked}
+      <Show when={settingsView()}><TeamSettingsDialog view={props.view} providerHome={props.providerHome} busy={props.busy || !!props.settingsBlocked}
         onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} /></Show>
+      <Show when={advance()}><TeamAdvanceBase team={props.view.bar.id} busy={props.busy}
+        onCancel={() => setAdvance(false)} onAdvance={(commit, revision) => { props.onAction("advance_base", { commit }, revision); setAdvance(false); }} /></Show>
       <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
       <TeamEditButtons view={props.view} busy={props.busy} open={editors.open} />
       {editors.dialogs()}
@@ -177,6 +184,7 @@ export function TeamWorkspace(props: {
                       <dt>{tr("Checks the work of")}</dt><dd>{shown().implementer || tr("nobody yet")}</dd>
                     </Show>
                     <dt>{tr("Round")}</dt><dd>{shown().round}</dd>
+                    <Show when={shown().assigned_base}>{(base) => <><dt>{tr("Assigned base")}</dt><dd class="mono">{base()}</dd></>}</Show>
                     <Show when={shown().decided_by}><dt>{tr("Decided by")}</dt><dd>{tr(shown().decided_by)}</dd></Show>
                   </dl>
                   <Show when={shown().stages.length}>
@@ -307,8 +315,9 @@ export function TeamTab() {
         <span class="dim">{leadChanged() ? tr("The team's lead session has changed. Open it from Teams again.") : binding().state === "none" ? tr("This session is not a team lead.") : binding().exhausted ? tr("Could not find this session's team here. Open it from Teams.") : tr("Finding the team of this session…")}</span>
       </div>
     }>{(current) => <TeamWorkspace view={current()} busy={teams.busy(current().bar.id)} failure={readFailure()} actionFailure={actionReason(source())}
+      providerHome={teams.listed().find((row) => row.id === current().bar.id && row.project === current().bar.project)?.home}
       onSettingsSave={(call) => teams.run(call, source())}
-      settingsBlocked={teams.unresolved().some((entry) => entry.call.team === current().bar.id && entry.call.action.kind === "settings")}
+      settingsBlocked={teams.unresolved().some((entry) => entry.call.team === current().bar.id && ["settings", "validation_config"].includes(entry.call.action.kind))}
       onAction={act} onPage={(cursor) => void teams.page(`team:${current().bar.id}`, cursor)} onAddTask={() => setPage("projects")} />}</Show>
     <Show when={!view() && actionReason(source())}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
     <TeamUnresolvedList entries={teams.unresolved()} busy={teams.busy()} onCheck={(entry) => void teams.check(entry, source())} onDismiss={(entry) => void teams.dismiss(entry, source())} />

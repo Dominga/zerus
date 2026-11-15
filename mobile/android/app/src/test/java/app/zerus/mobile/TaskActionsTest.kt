@@ -37,6 +37,7 @@ class TaskActionsTest {
         /** Whole responses for an operation instead of its receipt: a lost answer, a relay refusal. */
         val raw = mutableMapOf<String, () -> MockResponse>()
         @Volatile var exchangeFails = false
+        @Volatile var exchangeError = "the project's tasks are busy; try again"
         @Volatile var modifyExchange: ((JSONObject) -> Unit)? = null
         override fun dispatch(request: RecordedRequest): MockResponse {
             val envelope = JSONObject(request.body.readUtf8())
@@ -46,7 +47,7 @@ class TaskActionsTest {
             raw[operation]?.let { return it() }
             val payload = envelope.getJSONObject("payload")
             val (state, result, error) = when {
-                operation == "task_exchange" && exchangeFails -> Triple("failed", JSONObject.NULL, "the project's tasks are busy; try again")
+                operation == "task_exchange" && exchangeFails -> Triple("failed", JSONObject.NULL, exchangeError)
                 operation == "task_exchange" -> Triple("completed", JSONObject(store.answerExchange(payload.toString())).also { modifyExchange?.invoke(it) }, JSONObject.NULL)
                 else -> receipts.getValue(operation)(payload)
             }
@@ -348,6 +349,45 @@ class TaskActionsTest {
         val foreign = key.copy(connectionId = "workspace-b")
         assertTrue(sync.send(connection, foreign, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
         assertTrue(computer.operations().isEmpty())
+    }
+
+
+    @Test fun aBusyProofBeforeTheActionNeverPostsInput() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original task")
+        val busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.exchangeError = busy; computer.exchangeFails = true
+        val outcome = sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api")
+        assertTrue(outcome.toString(), outcome is TaskOutcome.Refused)
+        assertTrue((outcome as TaskOutcome.Refused).reason.contains(busy))
+        assertFalse(sync.held(task.uuid))
+        assertEquals(0, computer.operations().count { it == "task_send" })
+        computer.exchangeFails = false
+        sync.exchangeNow(connection, key, "orchard", "computer-1", listOf(task.uuid))
+        assertEquals(0, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun busyReadsCannotReleaseOrRepostTheOriginalUnknownSend() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original task")
+        val busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.receipts["task_send"] = {
+            computer.exchangeError = busy; computer.exchangeFails = true
+            Triple("uncertain", JSONObject.NULL, "Original delivery unknown")
+        }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        val original = computer.envelopes.single { it.getString("operation") == "task_send" }.getString("request_id")
+        repeat(2) { sync.settleSends(connection) { "orchard" } }
+        assertTrue(sync.held(task.uuid))
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        computer.receipts["task_done"] = { Triple("failed", JSONObject.NULL, busy) }
+        val done = runCatching { sync.donePage(connection, key, "computer-1", null) }
+        assertTrue(done.exceptionOrNull()?.message.orEmpty().contains(busy))
+        val fetch = runCatching { sync.exchangeNow(connection, key, "orchard", "computer-1", listOf(task.uuid)) }
+        assertTrue(fetch.exceptionOrNull()?.message.orEmpty().contains(busy))
+        assertTrue(sync.held(task.uuid))
+        computer.exchangeFails = false
+        sync.settleSends(connection) { "orchard" }
+        assertFalse(sync.held(task.uuid))
+        assertEquals(listOf(original), computer.envelopes.filter { it.getString("operation") == "task_send" }.map { it.getString("request_id") })
     }
 
 }

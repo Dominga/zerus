@@ -23,6 +23,7 @@ mod cli;
 pub(crate) mod hosted;
 pub(crate) mod integrate;
 pub(crate) mod ops;
+pub(crate) mod providers;
 pub(crate) mod store;
 pub(crate) mod tasks;
 

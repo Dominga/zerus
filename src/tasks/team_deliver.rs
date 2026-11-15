@@ -90,7 +90,7 @@ fn rule(message: impl std::fmt::Display) -> Error {
 fn not_started(error: Error) -> Error {
     if matches!(
         error.code,
-        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE
+        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE | STORE_BUSY_CODE
     ) {
         error
     } else {
@@ -101,10 +101,10 @@ fn cutting_over() -> Error {
     Error::new(CUTTING_OVER, BUSY)
 }
 fn replica(error: zerus_replica::Error) -> Error {
-    if error.kind() == zerus_replica::ErrorKind::Refused {
-        rule(error)
-    } else {
-        fail(error)
+    match error.kind() {
+        zerus_replica::ErrorKind::Refused => rule(error),
+        zerus_replica::ErrorKind::Busy => Error::new(STORE_BUSY_CODE, error.to_string()),
+        zerus_replica::ErrorKind::Failed => fail(error),
     }
 }
 
@@ -370,12 +370,28 @@ fn request(
     };
     let base = if handover {
         attempts::render(
-            settings, starts, task, name, &to, true, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            true,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else if permit.kind == "handout" {
         attempts::render(
-            settings, starts, task, name, &to, false, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            false,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else {
@@ -452,6 +468,9 @@ fn request(
             &permit.team,
             &permit.node,
             &permit.member,
+            &store
+                .effect_base(&permit.team.id, &body.id)
+                .map_err(problem)?,
             handover.then_some((permit.reason.as_str(), earlier))
         )
         .map_err(problem)?

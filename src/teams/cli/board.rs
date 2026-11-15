@@ -19,6 +19,7 @@ pub(super) fn queue(team: &Team, page: Page<QueueRow>) -> Result<Page<Value>, Pr
             // whether a new Return, Reassign or Cancel would replace that
             // decision (always written; false when nothing is pending).
             value["holder"] = json!(row.holder);
+            value["assigned_base"] = json!(row.assigned_base);
             value["pending_decision"] = json!(row.pending);
             value["pending_replaceable"] = json!(row.pending_replaceable);
             value["deps_editable"] = json!(row.deps_editable);

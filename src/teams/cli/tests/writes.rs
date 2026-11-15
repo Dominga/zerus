@@ -372,7 +372,7 @@ fn a_member_reads_its_own_work_and_asks_and_the_lead_replies() {
 }
 
 #[test]
-fn the_person_decides_a_card() {
+fn a_cli_person_cannot_decide_an_owner_card() {
     let harness = Harness::new();
     bind_lead_and_m1(&harness);
     let card = harness
@@ -407,10 +407,14 @@ fn the_person_decides_a_card() {
             json!({"card": card, "decision": "acknowledged"}),
         ),
     );
-    assert_eq!(exit, 0, "{reply}");
+    assert_eq!(
+        (code(&reply), exit),
+        ("person_gesture_required", 1),
+        "{reply}"
+    );
     assert_eq!(
         harness.store().cards(TEAM, 10, None).unwrap().rows[0].state,
-        "closed"
+        "open"
     );
 }
 
@@ -593,4 +597,19 @@ fn the_person_pauses_resumes_stops_and_archives_a_member() {
     let (reply, exit) = run("archive-member", &person_caller(), 8);
     assert_eq!(exit, 0, "{reply}");
     assert_eq!(state(&harness), MemberState::Removed);
+}
+
+#[test]
+fn advance_base_and_its_form_read_refuse_sessions_before_their_input_or_git() {
+    let h = seeded();
+    for session in [LEAD_SESSION, M1_SESSION, OTHER_SESSION] {
+        for words in [
+            "advance-base",
+            "base --team 00000000-0000-4000-8000-00000000beef",
+        ] {
+            let (reply, exit) = h.cli(&Caller::Session(key(session)), words, "not JSON");
+            assert_eq!(exit, 1);
+            assert_eq!(reply["error"]["code"], "not_allowed", "{reply}");
+        }
+    }
 }

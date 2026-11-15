@@ -209,7 +209,7 @@ fn approval_freezes_original_requests_and_does_not_publish_partial_tasks() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        4
+        store::layout::PUBLICATION
     );
 }
 

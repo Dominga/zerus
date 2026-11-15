@@ -82,6 +82,14 @@ pub(crate) fn write(
     if clear && clear_outcome.is_some() {
         return Err(rule("The publication cleanup already has a final refusal or unknown outcome; it is not repeated."));
     }
+    if admitted
+        .project()
+        .map_err(fail)?
+        .cutover_hold()
+        .is_some_and(|h| h.on)
+    {
+        return Err(cutting_over());
+    }
     let present = task_present(config, &expected.task)?;
     if clear {
         // The same project handle excludes every possible writer, and the
@@ -117,14 +125,6 @@ pub(crate) fn write(
         return Err(rule(
             "The original task is missing after creation may have begun; it will not be recreated.",
         ));
-    }
-    if admitted
-        .project()
-        .map_err(fail)?
-        .cutover_hold()
-        .is_some_and(|h| h.on)
-    {
-        return Err(cutting_over());
     }
     if state == "pending" {
         db.execute("UPDATE phase_publication_nodes SET state='writing',reason='' WHERE team=?1 AND node=?2",params![team_id,node]).map_err(fail)?;

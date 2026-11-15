@@ -161,6 +161,9 @@ request; an active command refusal ends creation. Auto-approval failures use
 the existing bounded retry gate, and changed settings or draft generations
 trigger a fresh policy check.
 
+Project cutover holds defer creation and Stop cleanup through the same task-store
+admission, preserving the original request for a later pass.
+
 Completion keeps the pipeline's own lifecycle facts: an archived uncreated
 stage is ended only with its positive superseded record and no task binding.
 Archive alone proves nothing. Holds prevent new work; a hold left on an

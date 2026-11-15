@@ -447,3 +447,129 @@ fn cleanup_has_its_own_unknown_budget_and_clears_only_the_key_without_history() 
         assert_eq!(tasks.load(&r.task.uuid).unwrap().revision(), revision);
     }
 }
+
+fn publication_hold(
+    f: &Fixture,
+    r: &crate::teams::store::publication::PlannedTaskRequest,
+    on: bool,
+) {
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    let mut project = tasks.project().unwrap();
+    project.set_cutover_hold(on, &Actor::Person, now()).unwrap();
+    tasks.save_project(&project).unwrap();
+}
+
+#[test]
+fn publication_cutover_defers_creation_and_resumes_the_exact_saved_request() {
+    let (mut f, _, requests) = fixture();
+    let r = &requests[0];
+    publication_hold(&f, r, true);
+    let args = ["task".into(), "team-planned".into(), "--json".into()];
+    let input = json!({"schema":1,"id":r.task.uuid,"team":TEAM,"node":r.node.id,"clear":false});
+    for _ in 0..2 {
+        let (exit, stdout, error) = f.cli(&args, &input.to_string());
+        assert_eq!(exit, 0, "{error:?}");
+        let reply: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(reply["state"], "cutting_over");
+        assert!(!super::super::super::super::task_present(&f.config, &r.task).unwrap());
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::PublicationTaskProblem {
+            publication: r.publication.clone(),
+            node: r.node.id,
+            reason: "The project is cutting over.".into(),
+            kind: ops::PublicationProblemKind::Deferred,
+            clear: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        f.h.store
+            .planned_task(TEAM, r.node.id, &r.task.uuid)
+            .unwrap()
+            .as_ref(),
+        Some(r)
+    );
+    publication_hold(&f, r, false);
+    assert_eq!(write(&f, r).unwrap(), "created");
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    let doc = tasks.load(&r.task.uuid).unwrap();
+    assert_eq!(doc.view().unwrap().text, r.text);
+    let revision = doc.revision();
+    drop(tasks);
+    assert_eq!(write(&f, r).unwrap(), "created");
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    assert_eq!(tasks.load(&r.task.uuid).unwrap().revision(), revision);
+    assert_eq!(
+        f.h.store
+            .phase_draft(TEAM, 1)
+            .unwrap()
+            .publication
+            .unwrap()
+            .blocked,
+        0
+    );
+}
+
+#[test]
+fn publication_cutover_defers_stop_cleanup_without_changing_the_key_or_history() {
+    let (mut f, _, requests) = fixture();
+    let r = &requests[0];
+    write(&f, r).unwrap();
+    f.h.run(&person(), Operation::Stop).unwrap();
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    let doc = tasks.load(&r.task.uuid).unwrap();
+    let revision = doc.revision();
+    let history = doc.view_with_history_ids().unwrap();
+    drop(tasks);
+    publication_hold(&f, r, true);
+    for _ in 0..2 {
+        let error = super::super::super::super::planned::write(
+            &f.config,
+            TEAM,
+            r.node.id,
+            &r.task.uuid,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, super::super::super::super::CUTTING_OVER);
+        let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+        let doc = tasks.load(&r.task.uuid).unwrap();
+        assert_eq!(doc.revision(), revision);
+        assert_eq!(doc.team().unwrap().unwrap().team, TEAM);
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::PublicationTaskProblem {
+            publication: r.publication.clone(),
+            node: r.node.id,
+            reason: "The project is cutting over.".into(),
+            kind: ops::PublicationProblemKind::Deferred,
+            clear: true,
+        },
+    )
+    .unwrap();
+    assert!(f
+        .h
+        .store
+        .publication_cleanup(TEAM)
+        .unwrap()
+        .iter()
+        .any(|n| n.task == r.task));
+    publication_hold(&f, r, false);
+    assert_eq!(
+        super::super::super::super::planned::write(&f.config, TEAM, r.node.id, &r.task.uuid, true)
+            .unwrap(),
+        "cleared"
+    );
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    let doc = tasks.load(&r.task.uuid).unwrap();
+    assert!(doc.team().unwrap().is_none());
+    let after = doc.view_with_history_ids().unwrap();
+    assert_eq!(after.1, history.1);
+    assert_eq!(
+        serde_json::to_value(after.0.log).unwrap(),
+        serde_json::to_value(history.0.log).unwrap()
+    );
+}

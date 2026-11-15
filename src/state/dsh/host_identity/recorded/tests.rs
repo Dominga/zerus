@@ -964,3 +964,29 @@ fn each_refusal_names_its_cause_and_how_to_clear_it() {
     assert_eq!(distinct.len(), all.len());
     assert!(!all.iter().any(|sentence| sentence == UNDER_HOST));
 }
+
+#[test]
+fn negative_scan_retains_healthy_pins_without_weakening_strict_record_proof() {
+    let root = tempfile::tempdir().unwrap();
+    let hosts = root.path().join("dsh/hosts");
+    let good = hosts.join("a");
+    let bad = hosts.join("b");
+    std::fs::create_dir_all(&good).unwrap();
+    std::fs::create_dir_all(&bad).unwrap();
+    std::fs::write(
+        good.join("host.identity.json"),
+        br#"{"state":"running","pid":20,"birth":"current"}"#,
+    )
+    .unwrap();
+    std::fs::write(bad.join("host.identity.json"), b"{}").unwrap();
+    assert!(recorded_hosts_at(root.path(), None).is_err());
+    let healthy = host_records_at(root.path(), None, true).unwrap();
+    assert_eq!(healthy.len(), 1);
+    assert_eq!(
+        healthy[0].named,
+        Named {
+            pid: 20,
+            birth: Some("current".into())
+        }
+    );
+}

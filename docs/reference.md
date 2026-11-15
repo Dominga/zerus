@@ -6992,7 +6992,22 @@ IDs among its own options: the value of another option, or a word after `--`,
 is no parent. A launch Zerus does not track
 (`HGS_TRACKING=0`, or a plain shell session) records no parent at all and is
 outside this rule. Hosts an older Zerus started never set `HGS_AGENT=dsh`, so
-their calls are unaffected.
+their calls do not enter this marker-specific rule.
+
+A legacy host with no matching native host record is also refused for task
+commands and sends, locally and before forwarding. A bounded same-user ancestor
+walk correlates its native PID and birth with the DeepSeek CLI module and server
+arguments; an executable name alone is insufficient. A matching PID and birth
+in an existing host record keeps the ordinary hosted proof path. This check
+neither adopts nor contacts the host. Its refusal asks the person to start a new
+host with Zerus when convenient and leaves the resident host running. A launcher
+record above that unregistered host never supplies the hosted call's identity.
+The nearest healthy PID/birth-matched host record ends this negative scan; a
+legacy host above it cannot override its own hosted proof. Node startup options
+are separated from the CLI entry, and eval/print modes never name that entry.
+An unrelated damaged record cannot conceal an observable unregistered host.
+This refusal-only scan retains bounded healthy records; ordinary positive caller
+proof still uses the existing strict record checks.
 
 The limit: one process serves all hosted sessions, so process ancestry proves
 only that a command runs under the host serving a session, not which hosted
@@ -7008,8 +7023,10 @@ host records and the process tree, never from a marker, and a check that cannot
 tell refuses. The shared `state::dsh::hosted_ancestor` also recognizes a live host by its
 own exact arguments, including the patch path under this state's `dsh/hosts`.
 Removing or editing the records does not conceal an ancestor with that shape;
-reparenting or a host with neither a record nor matching arguments remains
-outside this interim proof. Agent Teams keeps OpenCode's separate, untrusted
+reparenting or an unreadable native host identity remains outside this interim
+proof. The additional unregistered-host refusal above also recognizes an
+observable DeepSeek CLI entry with server arguments outside this state's patch
+layout. Agent Teams keeps OpenCode's separate, untrusted
 service-file refusal check.
 
 A host an older Zerus started keeps the markers it inherited and its adapter
@@ -7018,8 +7035,7 @@ until it exits on its own; it is never restarted or reloaded for this. Its
 markers stay. The adapter version is unchanged, so this Zerus keeps using such a
 host. Such a host started from a process without session markers, such as the
 desktop or a plain terminal, gives its tool calls neither markers nor
-`HGS_AGENT`: the markers cannot tell those calls from the person, and only the
-check of recorded host ancestry below refuses them.
+`HGS_AGENT`: the markers cannot tell those calls from the person, and the native host ancestry checks below refuse observable hosts.
 
 Under a recorded host, no other identity (zerus-ppd26.15). The process tree and
 the host records decide this, never a marker the caller sets. hgs reads the host

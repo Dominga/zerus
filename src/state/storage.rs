@@ -91,6 +91,14 @@ fn refuse_picker_io() -> Result<()> {
 }
 
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
+    atomic_observed(path, contents, None)
+}
+
+pub(super) fn atomic_observed(
+    path: &Path,
+    contents: &str,
+    mut publication: Option<&mut super::listing_metadata::Publication>,
+) -> Result<()> {
     refuse_picker_io()?;
     let parent = path.parent().ok_or("cannot write file without parent")?;
     cut_write()?;
@@ -102,8 +110,19 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
     temp.write_all(contents.as_bytes())
         .map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;
-    crate::platform::persist(temp, path).map_err(|e| e.to_string())?;
-    crate::platform::sync_dir(parent).map_err(|e| e.to_string())
+    if let Some(p) = publication.as_deref_mut() {
+        p.staged(temp.as_file());
+    }
+    let file = crate::platform::persist(temp, path).map_err(|e| e.to_string())?;
+    if let Some(p) = publication {
+        crate::platform::sync_dir(parent).map_err(|e| e.to_string())?;
+        p.published(file);
+        Ok(())
+    } else {
+        // Keep the original non-observed descriptor lifetime and I/O sequence.
+        drop(file);
+        crate::platform::sync_dir(parent).map_err(|e| e.to_string())
+    }
 }
 
 pub(super) type Guard = crate::platform::FileLock;
@@ -674,7 +693,7 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
         &state.path,
         &directory.path.join(format!("{id}.json")),
         &published,
-        || {
+        |publication| {
             state.verify()?;
             directory.verify()?;
             label_directory.verify()?;
@@ -689,7 +708,12 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
                 input.verify()?;
             }
             cut_write()?;
-            directory.write_new(&format!("{id}.json"), bytes.as_bytes())?;
+            super::listing_metadata::Publication::write_new(
+                publication,
+                &directory,
+                &format!("{id}.json"),
+                bytes.as_bytes(),
+            )?;
             crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())
         },
     )?;
@@ -711,13 +735,13 @@ pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     processes::compact(record);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     super::process_index_writer::write_at(&root(), path, record, |record| {
-        super::listing_metadata::write_at(&root(), path, record, || {
-            atomic(path, &format!("{record}\n"))
+        super::listing_metadata::write_at(&root(), path, record, |publication| {
+            atomic_observed(path, &format!("{record}\n"), publication)
         })
     })?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    super::listing_metadata::write_at(&root(), path, record, || {
-        atomic(path, &format!("{record}\n"))
+    super::listing_metadata::write_at(&root(), path, record, |publication| {
+        atomic_observed(path, &format!("{record}\n"), publication)
     })?;
     super::archive_references::note(path, record);
     Ok(())

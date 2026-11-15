@@ -1495,16 +1495,29 @@ pub(crate) fn task_bindings_in(root: &Path) -> Result<Vec<Value>> {
 
 /// Compatibility entry point used by `hgs __state` and the legacy hook shim.
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    // Every private send, including guarded mobile entries, passes here
+    // before provider routing or a native writer. A host never sends for its launcher.
+    if args
+        .first()
+        .is_some_and(|verb| matches!(verb.as_str(), "send" | "send-now"))
+        && dsh::host_check() == dsh::HostCheck::Unregistered
+    {
+        return Err(dsh::UNREGISTERED_HOST.into());
+    }
     // Fixed self-image owner, before any provider lookup or local writer. Its
     // inherited endpoint/frame are synchronization and cancellation only; the
     // fixed Effort/Settings operation preserves its original native authority.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
-        if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}
+    if args.first().map(String::as_str) == Some("native-picker-custodian-v1") {
+        if args.len() != 1 {
+            return Err("Unexpected picker custodian arguments".into());
+        }
         return effort::picker_custodian_entry();
     }
-    if args.first().map(String::as_str)==Some("receipt-index-worker") {
-        if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
+    if args.first().map(String::as_str) == Some("receipt-index-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected receipt worker arguments".into());
+        }
         return receipt_index::worker();
     }
     if args.first().map(String::as_str) == Some("archive-catalog-worker") {
@@ -1519,19 +1532,31 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         return task_binding_index::worker();
     }
-    if args.first().map(String::as_str)==Some("receipt-index-page") {
+    if args.first().map(String::as_str) == Some("receipt-index-page") {
         return attachments::page_dispatch(&args[1..]);
     }
     // Receipt observation needs neither a native host nor a state writer.
-    if args.first().map(String::as_str)==Some("session-action-status") { return session_action::status_dispatch(&args[1..]); }
-    if args.first().map(String::as_str)==Some("delivery") { return delivery::dispatch(&args[1..]); }
+    if args.first().map(String::as_str) == Some("session-action-status") {
+        return session_action::status_dispatch(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("delivery") {
+        return delivery::dispatch(&args[1..]);
+    }
     // Coordination metadata never starts or controls a native session host.
-    if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
-    if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
+    if args.first().map(String::as_str) == Some("wait") {
+        return waits::dispatch(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("repository") {
+        return repositories::dispatch(&args[1..]);
+    }
     #[cfg(unix)]
-    if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
+    if args.first().map(String::as_str) == Some("repository-git-worker") {
+        return repositories::git_worker(&args[1..]);
+    }
     #[cfg(unix)]
-    if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
+    if args.first().map(String::as_str) == Some("worktree-request-worker") {
+        return worktree_requests::worker(&args[1..]);
+    }
     session_operations()?;
     let Some((command, args)) = args.split_first() else {
         return Err("missing state operation".into());
@@ -1539,11 +1564,17 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     // Only this explicit flag ends a parent's live child sessions after it
     // (zerus-sa9qn.17). Before provider routing, so a DeepSeek or OpenCode
     // parent refuses with its own message and no child is touched.
-    if matches!(command.as_str(), "terminate" | "archive") && args.iter().any(|arg| arg == end_children::FLAG) {
+    if matches!(command.as_str(), "terminate" | "archive")
+        && args.iter().any(|arg| arg == end_children::FLAG)
+    {
         return end_children::dispatch(command, args);
     }
-    if command == "worktrees" { return worktrees::dispatch(args); }
-    if command == "git-status" { return git_status::dispatch(args); }
+    if command == "worktrees" {
+        return worktrees::dispatch(args);
+    }
+    if command == "git-status" {
+        return git_status::dispatch(args);
+    }
     if command == "dirs" {
         if args.first().map(String::as_str) == Some("--create") {
             let request_id;
@@ -1558,8 +1589,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             println!("{}", create_directory(path, id)?);
             return Ok(0);
         }
-        let creation=args.first().map(String::as_str)==Some("--creation");
-        let args=if creation { &args[1..] }else{args};
+        let creation = args.first().map(String::as_str) == Some("--creation");
+        let args = if creation { &args[1..] } else { args };
         let hidden = args.first().map(String::as_str) == Some("--hidden");
         let paths = if hidden { &args[1..] } else { args };
         if paths.len() > 1 {
@@ -1567,7 +1598,11 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         println!(
             "{}",
-            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden, creation)?
+            directories(
+                paths.first().map(String::as_str).unwrap_or("~"),
+                hidden,
+                creation
+            )?
         );
         return Ok(0);
     }
@@ -1585,31 +1620,63 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "answer-channel" {
         return answer_channel::run();
     }
-    if command == "graph" { return session_graph::dispatch(args); }
+    if command == "graph" {
+        return session_graph::dispatch(args);
+    }
     if command == "statusline" {
         return claude_statusline::run();
     }
-    if command == "voice" { return voice::dispatch(args); }
-    if command == "file-read" { return computer_files::dispatch(args); }
+    if command == "voice" {
+        return voice::dispatch(args);
+    }
+    if command == "file-read" {
+        return computer_files::dispatch(args);
+    }
     if command == "attachment" {
         return attachments::dispatch(args);
     }
     if command == "recovery" {
         return recovery::dispatch(args);
     }
-    if command == "read" { return read_marks::dispatch(args); }
-    if command == "notifications" { return notifications::dispatch(args); }
-    if command == "keep-warm" { return keep_warm::dispatch(args); }
-    if command == "question-routing" { return question_routing::dispatch(args); }
-    if command == "history" { return conversation_history::dispatch(args); }
-    if command == "history-projection" { return conversation_history::projection_dispatch(args); }
-    if command == "terminal" { return terminal::dispatch(args); }
-    if command == "session-action" { return session_action::dispatch(args); }
-    if command == "compact-context" { return compact_context::dispatch(args); }
-    if command == "clear-context" { return clear_context::dispatch(args); }
-    if command == "interrupt" { return interrupt::dispatch(args); }
-    if command == "processes" { return processes::dispatch(args); }
-    if command == "parent" { return parent_link::dispatch(args); }
+    if command == "read" {
+        return read_marks::dispatch(args);
+    }
+    if command == "notifications" {
+        return notifications::dispatch(args);
+    }
+    if command == "keep-warm" {
+        return keep_warm::dispatch(args);
+    }
+    if command == "question-routing" {
+        return question_routing::dispatch(args);
+    }
+    if command == "history" {
+        return conversation_history::dispatch(args);
+    }
+    if command == "history-projection" {
+        return conversation_history::projection_dispatch(args);
+    }
+    if command == "terminal" {
+        return terminal::dispatch(args);
+    }
+    if command == "session-action" {
+        return session_action::dispatch(args);
+    }
+    if command == "compact-context" {
+        return compact_context::dispatch(args);
+    }
+    if command == "clear-context" {
+        return clear_context::dispatch(args);
+    }
+    if command == "interrupt" {
+        return interrupt::dispatch(args);
+    }
+    if command == "processes" {
+        return processes::dispatch(args);
+    }
+    if command == "parent" {
+        return parent_link::dispatch(args);
+    }
     // The send's effect-free observation is taken only by the CLI's own
     // first disposition (`cli::observe_gate`), never here: a send carrying
     // --observe by another route (the private `__state` ABI, a caller of
@@ -1621,7 +1688,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 .into(),
         );
     }
-    if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
+    if args.first().is_some_and(|name| opencode::exists(name)) {
+        return opencode::dispatch(command, args);
+    }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(command, args);
     }
@@ -1637,7 +1706,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "schedules" {
         return Err("Native schedule management is available for DeepSeek sessions; other agents report schedules read-only".into());
     }
-    if command == "send-now" { return input_queue::dispatch(args); }
+    if command == "send-now" {
+        return input_queue::dispatch(args);
+    }
     if command == "send" {
         return input::dispatch(args);
     }
@@ -1664,9 +1735,21 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             let mut current_read = false;
             let mut index = 1;
             while index < args.len() {
-                if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
-                if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
-                if args[index] == "--current-read" { current_read = true; index += 1; continue; }
+                if args[index] == "--skip-processes" {
+                    include_processes = false;
+                    index += 1;
+                    continue;
+                }
+                if args[index] == "--read-observation" {
+                    read_observation = true;
+                    index += 1;
+                    continue;
+                }
+                if args[index] == "--current-read" {
+                    current_read = true;
+                    index += 1;
+                    continue;
+                }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -1741,7 +1824,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
+            let forgotten = record_path(&args[0])
+                .exists()
+                .then(|| read(&args[0]))
+                .transpose()?;
             if let Some(record) = &forgotten {
                 // Its own record, never its label's holder (P3a).
                 storage::remove_record(record)?;

@@ -36,8 +36,10 @@ function expectedTask(team: string, state: string, admitted: boolean, held: bool
 
 describe("the actions the Team tab offers", () => {
   it("the team bar: by the team's status", () => {
+    // This status-only projection has no planning details. Stop stays available;
+    // the writer-derived planning tests cover known pause and unknown state.
     const expected: Record<string, string[]> = {
-      draft: [], planning: [], running: ["pause", "stop"], paused: ["resume", "stop"],
+      draft: [], planning: ["stop"], running: ["pause", "stop"], paused: ["resume", "stop"],
       finished: ["archive"], stopped: ["archive"], archived: [],
     };
     for (const status of TEAM_STATES) expect(barActions(view(status)).map((action) => action.id), status).toEqual(expected[status]);

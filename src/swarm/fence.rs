@@ -2364,6 +2364,7 @@ printf '{{"node_id":"{PEER}"}}'
         assert_eq!(changed.stage().unwrap(),zerus_replica::Stage::Backlog);
         assert!(changed.view().unwrap().log.iter().any(|entry|entry.text=="Ordinary comment after sync, no Start"));
         assert!(changed.view().unwrap().log.iter().all(|entry|!matches!(entry.kind.as_str(),"started"|"reported"|"attempt")));
+        drop(store);
         assert!(!record_path(&members,&uuid).exists());
     }
 

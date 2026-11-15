@@ -98,18 +98,27 @@ pub fn hello(config: &Config) -> Result<Value> {
 
 /// Bounded background protocol work, independent of native task Start.
 #[derive(Default)]
-pub(crate) struct CutoverScan { after_project:String }
+pub(crate) struct CutoverScan { after_project:String, loaded:bool }
 impl CutoverScan {
     pub(crate) fn advance(&mut self,config:&Config)->Result<bool> {
         self.advance_with(config,&super::fence::Ssh(config))
     }
     pub(crate) fn advance_with(&mut self,config:&Config,net:&dyn super::fence::Net)->Result<bool> {
+        // Disposable progress, shared with one-shot manual sync. It carries
+        // no version, root or authority and is never held over networking.
+        let cursor=config.dir.join("swarm/task-cutover-cursor");
+        if !self.loaded {
+            self.after_project=super::read_regular(&cursor,4096).ok()
+                .and_then(|bytes|String::from_utf8(bytes).ok()).unwrap_or_default();
+            self.loaded=true;
+        }
         let mut projects=ProjectStore::stored(&root(config))?;
         projects.sort();
         let Some(project)=projects.iter().find(|project|*project>&self.after_project).or_else(||projects.first()).cloned() else {return Ok(false);};
         // Advance before inspection or migration: a busy, held, missing or
         // unprovable task/project cannot starve the following one.
         self.after_project=project.clone();
+        let _=super::store::replace(&cursor,project.as_bytes());
         let candidate={
             let Some(store)=ProjectStore::open_within(&root(config),&project,PROJECT_WAIT)? else {return Ok(false);};
             crate::tasks::cutover_candidate(&store)
@@ -798,6 +807,9 @@ mod tests {
             assert!(!worker.advance_with(&config,&NoCalls).unwrap());
             assert_eq!(worker.after_project,expected);
         }
+        let mut manual=CutoverScan::default();
+        assert!(!manual.advance_with(&config,&NoCalls).unwrap());
+        assert_eq!(manual.after_project,"b","one-shot sync continues the persisted project rotation");
     }
 
     #[test]

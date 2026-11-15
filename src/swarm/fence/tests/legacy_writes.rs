@@ -307,6 +307,14 @@ fn g1_legacy_existing_admitted_source(
     assert!(original.floor_record().is_some() && original.cutover_seal().unwrap().is_some());
     assert!(held(&m, "a", task.uuid()).unwrap().floor_record().is_none());
     synced(&m, "a");
+    let pending = wait_action == "export_pending";
+    if pending {
+        let store = ProjectStore::open(&m.configs["a"].state.join("replica"), "p").unwrap();
+        let (capture, _) = store.prepare_cutover(task.uuid(), &m.ids["a"]).unwrap();
+        store
+            .retain_cutover_proposal(&original.snapshot().unwrap(), &capture)
+            .unwrap();
+    }
     let net = G1DeadlineSource(G1LegacyTimeouts {
         inner: InProcess::new(&m, Faults::default()),
         optional: m
@@ -316,7 +324,7 @@ fn g1_legacy_existing_admitted_source(
             .map(|(_, id)| id.clone())
             .collect(),
         wait,
-        wait_action,
+        wait_action: if pending { "export" } else { wait_action },
     });
     let started = Instant::now();
     let deadline = started + Duration::from_secs(15);
@@ -448,4 +456,108 @@ fn legacy_write_shares_start_with_slow_mac_and_unreachable_peer() {
         record_path(&m, task.uuid()).exists(),
         "the write must use Start's final admission, not background-only migration"
     );
+}
+
+mod g1_remaining_preparation_review {
+    use super::*;
+    #[test]
+    fn g1_source_late_prepares_immediate_control() {
+        g1_legacy_existing_admitted_source(false, true, "prepare", true);
+    }
+    #[test]
+    fn g1_source_late_prepares_keep_background_adoption_available() {
+        g1_legacy_existing_admitted_source(true, true, "prepare", false);
+    }
+    #[test]
+    fn g1_source_late_prepares_keep_write_admission_available() {
+        g1_legacy_existing_admitted_source(true, true, "prepare", true);
+    }
+}
+
+// A retained original cannot be replaced. Verify its already-admitted source
+// through the same product writers, with that source last in native-ID order.
+#[test]
+fn legacy_pending_original_source_immediate_control() {
+    g1_legacy_existing_admitted_source(false, true, "export_pending", true);
+}
+#[test]
+fn legacy_pending_original_source_keeps_background_verification_available() {
+    g1_legacy_existing_admitted_source(true, true, "export_pending", false);
+}
+#[test]
+fn legacy_pending_original_source_keeps_write_verification_available() {
+    g1_legacy_existing_admitted_source(true, true, "export_pending", true);
+}
+
+/// Observe the actual deadlines handed to the native protocol transport.
+/// Fair discovery alone must not replace the original local reserve.
+struct LegacyBudgetTrace<'a> {
+    inner: InProcess<'a>,
+    source: String,
+    latest_remote: Instant,
+}
+impl Net for LegacyBudgetTrace<'_> {
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        if command == "replica-task" && route.nodes.last() == Some(&self.source) {
+            let action = input.and_then(|v| v["cutover"]["action"].as_str());
+            if matches!(action, Some("export" | "prepare")) {
+                std::thread::sleep(left(deadline).saturating_sub(Duration::from_millis(100)));
+            }
+            if action == Some("adopt") {
+                assert!(
+                    deadline <= self.latest_remote,
+                    "remote adoption consumed the original local settlement reserve"
+                );
+            }
+        }
+        self.inner.call(swarm, route, command, input, deadline)
+    }
+}
+#[test]
+fn legacy_short_writer_budget_keeps_its_original_local_reserve() {
+    let m = members(&["a", "b"], &[("a", "b")]);
+    let task = legacy(&m, 4);
+    {
+        let store = ProjectStore::open(&m.configs["b"].state.join("replica"), "p").unwrap();
+        assert!(store
+            .import_updates(vec![Update {
+                document: Document::Task(task.uuid().into()),
+                bytes: task.snapshot().unwrap(),
+            }])
+            .unwrap()
+            .refused
+            .is_empty());
+    }
+    synced(&m, "b");
+    let original_net = InProcess::new(
+        &m,
+        Faults {
+            offline: BTreeSet::from([m.ids["a"].clone()]),
+            ..Faults::default()
+        },
+    );
+    catch_up_writer(&m.configs["b"], &original_net, "p", task.uuid(), soon()).unwrap();
+    let original = held(&m, "b", task.uuid()).unwrap();
+    synced(&m, "a");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let net = LegacyBudgetTrace {
+        inner: InProcess::new(&m, Faults::default()),
+        source: m.ids["b"].clone(),
+        latest_remote: deadline - Duration::from_millis(500),
+    };
+    catch_up_writer(&m.configs["a"], &net, "p", task.uuid(), deadline).unwrap();
+    let current = held(&m, "a", task.uuid()).unwrap();
+    assert_eq!(current.floor_record(), original.floor_record());
+    assert_eq!(
+        current.cutover_seal().unwrap(),
+        original.cutover_seal().unwrap()
+    );
+    assert!(current.view().unwrap().execution.is_none());
 }

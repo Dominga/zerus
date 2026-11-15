@@ -117,7 +117,8 @@ impl Ports for Native<'_> {
             return Ok(None);
         }
         let snapshot = self.snapshot(b)?;
-        self.ledger.pending_lead_brief(b, &snapshot, &team)
+        let planning = self.store.planning(&team.id).map_err(|e| e.to_string())?;
+        self.ledger.pending_lead_brief(b, &snapshot, &team, planning.as_ref())
     }
     fn claim(&mut self, p: &Plan, epoch: &str, now: i64) -> Result<Claim> {
         self.ledger.claim(p, epoch, now)

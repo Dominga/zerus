@@ -117,7 +117,7 @@ impl Ports for World {
             return Ok(None);
         }
         self.ledger
-            .pending_lead_brief(b, &self.s, &self.h.store.team(TEAM).unwrap().unwrap())
+            .pending_lead_brief(b, &self.s, &self.h.store.team(TEAM).unwrap().unwrap(), self.h.store.planning(TEAM).unwrap().as_ref())
     }
     fn claim(&mut self, p: &Plan, epoch: &str, now: i64) -> Result<Claim> {
         self.ledger.claim(p, epoch, now)

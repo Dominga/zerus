@@ -12,6 +12,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
     validate_request(request, now)?;
     store.refresh()?;
     prepare_first(store, actor, request)?;
+    let state = store.state().to_owned();
     let tx = store
         .db
         .as_mut()
@@ -30,6 +31,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
     tx.execute_batch("SAVEPOINT operation;").map_err(storage)?;
     let mut ctx = Context {
         db: &tx,
+        state: &state,
         actor,
         team: &team,
         op: &request.operation,
@@ -37,6 +39,7 @@ pub fn apply(store: &mut Store, actor: &Actor, request: &Request, now: i64) -> R
         reply: Reply {
             ok: true,
             revision: 0,
+            member: None,
             node: None,
             item: None,
         },
@@ -168,6 +171,10 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
     match ctx.op {
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
+        Operation::AddMember { .. } => editing::add_member(ctx),
+        Operation::SwapMember { .. } => editing::swap_member(ctx),
+        Operation::RenameTeam { .. } => editing::rename(ctx),
+        Operation::SetGoal { .. } => editing::goal(ctx),
         Operation::Create { .. } => team::create(ctx),
         Operation::Pause => team::pause(ctx),
         Operation::Resume => team::resume(ctx),

@@ -73,7 +73,11 @@
         "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
       },
       "model": null,
-      "person_stopped": false
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
     },
     {
       "id": "m1",
@@ -87,7 +91,11 @@
         "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
       },
       "model": null,
-      "person_stopped": false
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
     },
     {
       "id": "m2",
@@ -98,7 +106,11 @@
       "lead": false,
       "session": null,
       "model": null,
-      "person_stopped": false
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
     },
     {
       "id": "m3",
@@ -109,7 +121,11 @@
       "lead": false,
       "session": null,
       "model": null,
-      "person_stopped": false
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
     }
   ],
   "groups": [

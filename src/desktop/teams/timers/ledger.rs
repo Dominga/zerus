@@ -16,6 +16,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS timer_doorbells (
  CREATE INDEX IF NOT EXISTS timer_doorbell_last ON timer_doorbells(team,at_ms);
  CREATE INDEX IF NOT EXISTS timer_doorbell_mark ON timer_doorbells(team,run,conversation,mark)
   WHERE state IN ('reserved','submitted','uncertain');
+ CREATE INDEX IF NOT EXISTS timer_doorbell_unresolved ON timer_doorbells(team,member,machine,session) WHERE state IN ('reserved','uncertain');
  CREATE INDEX IF NOT EXISTS timer_doorbell_open ON timer_doorbells(team) WHERE state='reserved';
  CREATE INDEX IF NOT EXISTS timer_late_launch ON originals(team,member)
   WHERE json_extract(data,'$.late_after_stop')=1
@@ -151,3 +152,7 @@ impl Ledger {
         &mut self.launches
     }
 }
+
+#[cfg(test)]
+#[path = "ledger/swap_tests.rs"]
+mod swap_tests;

@@ -220,3 +220,6 @@ mod unreadable_stop;
 mod cancel_progress;
 mod closed_keys;
 mod seats102;
+
+#[cfg(unix)]
+mod legacy_cancel;

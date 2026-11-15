@@ -127,6 +127,38 @@ fn receipt() -> Value {
 fn every_action_names_its_operation() {
     let cases: Vec<(TeamAction, &str)> = vec![
         (
+            TeamAction::AddMember {
+                role: "developer".into(),
+                agent: "codex".into(),
+                model: "".into(),
+                effort: "".into(),
+                account: Default::default(),
+            },
+            "add-member",
+        ),
+        (
+            TeamAction::SwapMember {
+                member: "m1".into(),
+                agent: "codex".into(),
+                model: "".into(),
+                effort: "".into(),
+                account: Default::default(),
+            },
+            "swap-member",
+        ),
+        (
+            TeamAction::RenameTeam {
+                name: "New name".into(),
+            },
+            "rename-team",
+        ),
+        (
+            TeamAction::SetGoal {
+                goal: "New goal".into(),
+            },
+            "set-goal",
+        ),
+        (
             TeamAction::Create {
                 template: "bugfix".into(),
                 project: "p".into(),
@@ -237,7 +269,11 @@ fn every_action_names_its_operation() {
     ];
     // `src/teams/cli/commands.rs` at package 5's fa46dcc08, plus the four
     // member commands its fix round adds.
-    const COMMANDS: [&str; 21] = [
+    const COMMANDS: [&str; 25] = [
+        "add-member",
+        "swap-member",
+        "rename-team",
+        "set-goal",
         "settings",
         "pause",
         "resume",
@@ -1343,6 +1379,10 @@ fn the_action_kinds_are_the_shared_list() {
             TeamAction::Create { .. }
             | TeamAction::SubmitDraftPhase { .. }
             | TeamAction::EditDraftPhase { .. }
+            | TeamAction::AddMember { .. }
+            | TeamAction::SwapMember { .. }
+            | TeamAction::RenameTeam { .. }
+            | TeamAction::SetGoal { .. }
             | TeamAction::Pause {}
             | TeamAction::Resume {}
             | TeamAction::Stop {}
@@ -1384,6 +1424,26 @@ fn the_action_kinds_are_the_shared_list() {
                 barrier: false,
                 nodes: Vec::new(),
             },
+        },
+        TeamAction::AddMember {
+            role: "developer".into(),
+            agent: "claude".into(),
+            model: String::new(),
+            effort: String::new(),
+            account: Default::default(),
+        },
+        TeamAction::SwapMember {
+            member: member(),
+            agent: "codex".into(),
+            model: String::new(),
+            effort: String::new(),
+            account: Default::default(),
+        },
+        TeamAction::RenameTeam {
+            name: "Team".into(),
+        },
+        TeamAction::SetGoal {
+            goal: String::new(),
         },
         create(None, Integration::Branch).action,
         TeamAction::Pause {},

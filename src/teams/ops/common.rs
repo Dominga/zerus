@@ -3,6 +3,7 @@ use super::*;
 pub(super) use store::OPEN_EFFECT_STATES;
 pub(super) struct Context<'a> {
     pub db: &'a Connection,
+    pub state: &'a std::path::Path,
     pub actor: &'a Actor,
     pub team: &'a Team,
     pub op: &'a Operation,

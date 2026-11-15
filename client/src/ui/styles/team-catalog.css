@@ -1,0 +1,77 @@
+/* Team catalog and designer draft: the template list and proposal plates. */
+.cat {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  background: var(--z-color-page);
+  color: var(--z-color-text);
+}
+.cat-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--z-color-divider); }
+.cat-head h2 { margin: 0; font-size: var(--fs-lg); font-weight: 600; }
+.cat-version { color: var(--z-color-muted); font-size: var(--fs-xs); }
+.cat-counts { display: inline-flex; gap: 8px; color: var(--z-color-muted); font-size: var(--fs-xs); }
+.cat-body { flex: 1; min-height: 0; display: flex; }
+.cat-list { width: 300px; flex: none; min-height: 0; overflow: auto; padding: 8px; border-right: 1px solid var(--z-color-divider); }
+.cat-search { display: flex; gap: 4px; margin-bottom: 8px; }
+.cat-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--z-color-card-border);
+  border-radius: var(--z-radius-md);
+  background: var(--z-color-field);
+  color: var(--z-color-text);
+}
+.cat-star { color: var(--z-color-dim); }
+.cat-star.on { color: var(--z-color-warn); }
+.cat-row { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: var(--z-radius-md); }
+.cat-row:hover { background: var(--z-color-hover); }
+.cat-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-sm); }
+.cat-row-meta { color: var(--z-color-muted); font-size: var(--fs-xs); }
+/* Task #44: the catalog editor (Qt's TeamCatalogEditor) and the Team designer page. */
+.cat-unsaved { color: var(--z-color-warn); font-size: var(--fs-xs); }
+.cat-notice { color: var(--z-color-muted); font-size: var(--fs-xs); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-notice.error { color: var(--z-color-danger); white-space: normal; }
+.cat-tabs { display: flex; gap: 2px; padding: 6px 14px 0; border-bottom: 1px solid var(--z-color-divider); }
+.cat-tab { padding: 6px 12px; border: none; border-bottom: 2px solid transparent; background: transparent; color: var(--z-color-muted); cursor: pointer; }
+.cat-tab.on { color: var(--z-color-text); border-bottom-color: var(--z-color-accent); }
+.cat-editor .cat-row { width: 100%; border: 1px solid transparent; background: transparent; color: inherit; text-align: left; cursor: pointer; flex-direction: column; align-items: flex-start; gap: 2px; }
+.cat-editor .cat-row.on { border-color: var(--z-color-accent); background: var(--z-color-hover); }
+.cat-editor .cat-row.edited .cat-row-name::after { content: " *"; color: var(--z-color-warn); }
+.cat-row-meta { color: var(--z-color-muted); font-size: var(--fs-xs); }
+.cat-add { margin-top: 6px; }
+.cat-form { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px 16px; }
+.cat-item { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px 14px; align-items: start; }
+.cat-item-head { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+.cat-id { color: var(--z-color-dim); font-size: var(--fs-xs); font-family: var(--z-font-mono, monospace); }
+.cat-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.cat-field.wide { grid-column: 1 / -1; }
+.cat-field.compact { flex: 1; min-width: 90px; }
+.cat-field label { color: var(--z-color-muted); font-size: var(--fs-xs); }
+.cat-field input:not([type="checkbox"]), .cat-field select, .cat-field textarea, .cat-field .dropdown-trigger {
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--z-color-card-border);
+  border-radius: var(--z-radius-md);
+  background: var(--z-color-field);
+  color: var(--z-color-text);
+  font: inherit;
+}
+.cat-field input[type="checkbox"] { align-self: flex-start; }
+.cat-hint { color: var(--z-color-dim); font-size: var(--fs-xs); }
+.cat-rows { display: flex; flex-direction: column; gap: 6px; }
+.cat-rowedit, .cat-rule { display: flex; align-items: flex-end; gap: 6px; flex-wrap: wrap; padding: 6px; border: 1px solid var(--z-color-divider); border-radius: var(--z-radius-md); }
+.cat-rownum { color: var(--z-color-dim); font-size: var(--fs-xs); align-self: center; min-width: 1.5em; }
+.btn.danger { color: var(--z-color-danger); }
+
+.catalog-page { height:100%; display:flex; flex-direction:column; min-height:0; padding:16px; }
+.catalog-page > .cat { flex:1; }
+.cat-head { flex-wrap:wrap; }
+.cat-form { border:0; margin:0; }
+.cat-group { border:1px solid var(--z-color-divider); border-radius:8px; display:grid; gap:10px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+.cat-group > legend { color:var(--z-color-muted); }
+.cat-tab[aria-selected="true"] { color:var(--z-color-text); border-bottom-color:var(--z-color-accent); }
+.cat-notice { margin:8px 14px; white-space:normal; max-width:none; }
+.cat-confirm { margin:8px 14px; padding:12px; border:1px solid var(--z-color-warn); }

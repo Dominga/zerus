@@ -6,6 +6,7 @@ import { newRequestId, teams, type TeamCall, type TeamOutcome, type UnresolvedCa
 import { rowIdentity, rowIsSession } from "./session-binding";
 import { navigationTeamFor } from "./lead-navigation";
 import { teamCall, type TaskButton } from "./actions";
+import { createTeamEditors, TeamEditButtons, type EditAction } from "./TeamEditors";
 import { MemberCard } from "./MemberCard";
 import { TeamBar } from "./team-bar";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -54,7 +55,7 @@ export function TeamWorkspace(props: {
   busy: boolean;
   failure: { code: string; message: string } | null;
   actionFailure?: string | null;
-  onAction: (kind: string, fields?: Record<string, unknown>) => void;
+  onAction: EditAction;
   /** A queue page by its cursor; null is the first page. */
   onPage: (cursor: string | null) => void;
   onAddTask: () => void;
@@ -109,7 +110,8 @@ export function TeamWorkspace(props: {
   });
   const select = (node: number) => { setSelectedNode(node); setFocusStage(null); setOpenNotice(""); };
   const card = createMemo(() => all().find((candidate) => candidate.node === selectedNode()) ?? null);
-  const send = (kind: string, fields: Record<string, unknown> = {}) => { props.onAction(kind, fields); setAsking(null); setReason(""); };
+  const editors = createTeamEditors(() => props.view, props.onAction);
+  const send = (kind: string, fields: Record<string, unknown> = {}) => { if (kind === "swap_member") { editors.open(kind, String(fields.member)); return; } props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
       <TeamBar view={props.view} busy={props.busy} onAction={(kind) => send(kind)}
@@ -118,6 +120,8 @@ export function TeamWorkspace(props: {
       <Show when={settingsView()}><TeamSettingsDialog view={props.view} busy={props.busy || !!props.settingsBlocked}
         onSave={(call) => props.onSettingsSave!(call)} onClose={() => setSettingsView(undefined)} /></Show>
       <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
+      <TeamEditButtons view={props.view} busy={props.busy} open={editors.open} />
+      {editors.dialogs()}
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>
@@ -284,11 +288,14 @@ export function TeamTab() {
     return !leadChanged() && ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team ? shown : undefined;
   });
   const readFailure = () => target().team ? teams.readFailureFor(`team:${target().team}`) : null;
-  const act = (kind: string, fields: Record<string, unknown> = {}) => {
+  const act: EditAction = (kind: string, fields: Record<string, unknown> = {}, revision?: number, team?: string) => {
     const current = view();
-    if (!current) return;
+    if (!current || (team !== undefined && team !== current.bar.id)) return {
+      outcome: "failed", request_id: "", detail: tr("The selected team changed. Reopen the form."),
+    };
     const call: TeamCall = teamCall(current, newRequestId(), kind, fields);
-    void teams.run(call, source());
+    if (revision !== undefined) call.expected_revision = revision;
+    return teams.run(call, source());
   };
   return <>
     <Show when={scope.failure()}>{(reason) => <div class="notice danger team-notice" role="alert"><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>

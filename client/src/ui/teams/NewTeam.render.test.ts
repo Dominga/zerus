@@ -122,3 +122,19 @@ it("drops a late folder check for a folder that is no longer shown", async () =>
   await vi.waitFor(() => expect(host.querySelector("[data-folder-ok]")).not.toBeNull());
   expect(find(host, "Create team").disabled).toBe(false);
 });
+
+it("offers Catalog beside the template choice without creating a team", () => {
+  const opened = vi.fn();
+  const { host, created } = setup({ onOpenCatalog: opened });
+  const entry = host.querySelector<HTMLButtonElement>(".nt-templates button")!;
+  expect(entry.textContent).toBe("Catalog"); entry.click();
+  expect(opened).toHaveBeenCalledTimes(1); expect(created).toEqual([]);
+});
+
+it("keeps the Catalog entry disabled while creation is locked", () => {
+  const opened = vi.fn();
+  const { host } = setup({ onOpenCatalog: opened, busy: true });
+  const entry = host.querySelector<HTMLButtonElement>(".nt-templates button")!;
+  expect(entry.disabled).toBe(true); entry.click();
+  expect(opened).not.toHaveBeenCalled();
+});

@@ -38,6 +38,9 @@ export interface TeamMember {
   id: string; role: string; agent: string; account: string; state: string; lead: boolean; session: TeamSession | null; model?: string | null;
   /** The person stopped this member (the store refuses a second Stop). */
   person_stopped?: boolean;
+  effort?: string | null;
+  account_choice?: { mode: string; account?: string } | null;
+  open_work?: number | null;
 }
 export interface TeamMemberCounts { total: number; not_created: number; active: number; paused: number; removed: number }
 export interface TeamNodeCounts { waiting: number; pending: number; in_progress: number; reported: number; accepted: number; cancelled: number }
@@ -73,6 +76,9 @@ export interface TeamBar {
 }
 export interface TeamView {
   plan?: PhasePane | null;
+  /** Complete bounded goal for the editor, distinct from the bar preview. */
+  edit_goal?: string | null;
+  member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
   /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
   settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;

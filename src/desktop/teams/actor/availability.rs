@@ -467,6 +467,7 @@ mod record_tests {
         )
         .unwrap();
         let m = Member {
+            launch: None,
             id: "m1".into(),
             role: "developer".into(),
             agent: "codex".into(),
@@ -567,6 +568,7 @@ mod record_tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
         let m = Member {
+            launch: None,
             id: "m1".into(),
             role: "developer".into(),
             agent: "kimi".into(),

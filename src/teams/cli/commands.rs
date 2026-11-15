@@ -17,6 +17,10 @@ pub(super) fn variant(command: &str) -> Option<&'static str> {
     Some(match command {
         "submit-draft-phase" => "submit_draft_phase",
         "edit-draft-phase" => "edit_draft_phase",
+        "add-member" => "add_member",
+        "swap-member" => "swap_member",
+        "rename-team" => "rename_team",
+        "set-goal" => "set_goal",
         "settings" => "change_settings",
         "pause" => "pause",
         "resume" => "resume",

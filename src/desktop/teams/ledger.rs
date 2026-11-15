@@ -17,6 +17,16 @@ pub(super) const BUDGET: &str = "@budget";
 pub(super) const FILE: &str = "member-launch-v1.sqlite3";
 
 pub(super) mod names;
+#[path = "ledger_swaps.rs"]
+mod swaps;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Reuse {
+    pub placement: Placement,
+    pub worktree: Worktree,
+    pub launch: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -85,6 +95,10 @@ pub(super) struct Row {
     pub epoch: String,
     pub person: String,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reuse: Option<Reuse>,
     pub original: String,
     pub observed: Option<ObservedSession>,
     pub parent_result: Option<String>,
@@ -128,6 +142,8 @@ impl Row {
             epoch: epoch.into(),
             person: team.owner.clone(),
             version: 0,
+            member_generation: None,
+            reuse: None,
             original: uuid::Uuid::new_v4().to_string(),
             observed: None,
             parent_result: None,
@@ -244,6 +260,7 @@ impl Ledger {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS launch_checkout_objects (
             team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL,
             data TEXT NOT NULL CHECK(length(CAST(data AS BLOB))<=16384), PRIMARY KEY(team,member,launch));").map_err(storage)?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS retired_member_launches (team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(team,member,launch));").map_err(storage)?;
         tx.execute_batch(include_str!("launch-names.sql")).map_err(storage)?;
         tx.commit().map_err(storage)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")

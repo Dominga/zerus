@@ -24,6 +24,8 @@ pub(super) struct Plan {
     pub placement: Placement,
     pub parent: Option<SessionKey>,
     pub launch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member_generation: Option<u64>,
     /// Chosen once for a new launch. Older plans retain their original label.
     /// This display value never selects or binds a session.
     #[serde(default, skip_serializing_if = "String::is_empty")]

@@ -3124,6 +3124,14 @@ pub(super) fn bound151_fixture() -> Harness {
     h
 }
 
+#[path = "edit_tests.rs"]
+mod edits159;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound159_fixture() -> Harness {
+    edits159::started().0
+}
+
 #[test]
 fn launch_card_writers_establish_list_stuck_for_blocked_and_uncertain_launches() {
     let stuck = |h: &Harness| {

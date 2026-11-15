@@ -546,9 +546,16 @@ pub(in crate::state) fn begin(writer: &Guard, original: &Value, until: Instant) 
     // A retained marker on the original record fences this target even if a
     // later journal read is unavailable. It is negative data, not permission.
     let mut current = marked(&before, &hash);
-    held.verify()?;
-    cut_write()?;
-    held.state.replace_file(&legacy, &encoded(&current)?)?;
+    crate::state::listing_metadata::write_at(
+        &held.state.path,
+        &held.state.path.join(&legacy),
+        &current,
+        || {
+            held.verify()?;
+            cut_write()?;
+            held.state.replace_file(&legacy, &encoded(&current)?)
+        },
+    )?;
     let protection = worktree_lock::Protection::for_legacy_move(&mut current)?;
     if current != protected(&before, &hash) {
         return Err("The protected original record changed".into());
@@ -628,7 +635,18 @@ fn commit(
     let after = published(before, hash);
     let id_file = format!("{sid}.json");
     match record(&held.sessions, &id_file)? {
-        None => held.write_new(&held.sessions, &id_file, &encoded(&after)?)?,
+        None => crate::state::listing_metadata::write_at(
+            &held.state.path,
+            &held.sessions.path.join(&id_file),
+            &after,
+            || {
+                domain.verify()?;
+                if let Some(protection) = protection {
+                    protection.verify()?;
+                }
+                held.write_new(&held.sessions, &id_file, &encoded(&after)?)
+            },
+        )?,
         Some(current) if current == after => (),
         _ => return Err("The ID record belongs to different original data".into()),
     }
@@ -644,7 +662,17 @@ fn commit(
             // Preserve the real original file in the bounded per-SID journal.
             let bytes = read(&held.state, &legacy, ID_RECORD_BYTES as usize)?
                 .ok_or("Missing original legacy record")?;
-            held.retain(&held.state, &legacy, "legacy-record.json", &bytes)?;
+            crate::state::listing_metadata::remove_at(
+                &held.state.path,
+                &held.state.path.join(&legacy),
+                || {
+                    domain.verify()?;
+                    if let Some(protection) = protection {
+                        protection.verify()?;
+                    }
+                    held.retain(&held.state, &legacy, "legacy-record.json", &bytes)
+                },
+            )?;
         }
         None if record(&held.transaction, "legacy-record.json")?.as_ref() == Some(&original) => (),
         _ => return Err("The original legacy record is unconfirmed".into()),

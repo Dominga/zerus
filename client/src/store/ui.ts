@@ -19,14 +19,14 @@ export type MenuEntry =
   | { separator: true }
   | { heading: string };
 
-export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "teams" | "waiting" | "settings";
+export type Page = "dashboard" | "sessions" | "projects" | "machines" | "accounts" | "teams" | "team-catalog" | "waiting" | "settings";
 export type StateFilter = "all" | "attention" | "active" | "paused" | "archived";
 /** The Zerus mark's motion; the owner chose the two-turn spin-up (2026-10-27). */
 export type LogoMotion = "spin";
 
 const params = new URLSearchParams(location.search);
 
-const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "teams", "waiting", "settings"];
+const PAGES: Page[] = ["dashboard", "sessions", "projects", "machines", "accounts", "teams", "team-catalog", "waiting", "settings"];
 // `?page=settings` opens a screen (headless screenshots), as in the mockup.
 export const [page, setPage] = createSignal<Page>(PAGES.find((p) => p === params.get("page")) ?? "sessions");
 const [selectedKey, setSelectedKeyRaw] = createSignal<string | undefined>();

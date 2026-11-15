@@ -1006,6 +1006,9 @@ pub(super) fn inspection_with(
     } else {
         read(name)?
     };
+    if archive_id.is_none() {
+        input::acceptance::reconcile_locked(&mut record)?;
+    }
     let (snapshot, mut names) = live_sessions()?;
     // The session's own terminal (P3b), never another under its label.
     let panes = if archive_id.is_some() {

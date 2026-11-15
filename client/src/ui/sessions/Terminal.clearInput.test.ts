@@ -104,6 +104,7 @@ it("offers an explicit person acknowledgment for an empty unconfirmed input and 
   button!.click();
   await settle();
   expect(document.querySelector("dialog")?.textContent).toContain("may or may not have reached");
+  expect(document.querySelector("dialog")?.textContent).toContain("A later identical message can also remain unconfirmed");
   const confirm = [...document.querySelectorAll<HTMLButtonElement>("dialog button")]
     .find((item) => item.textContent === "I checked Terminal: mark the previous input as handled");
   expect(confirm).toBeDefined();

@@ -297,6 +297,12 @@ pub enum Operation {
         #[serde(default)]
         assignee: Option<MemberId>,
     },
+    /// The person edits dependencies before the first attempt or delivery
+    /// reservation, without changing routing or assignment.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
+    },
     Hold {
         node: NodeId,
     },

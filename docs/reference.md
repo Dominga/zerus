@@ -5976,6 +5976,7 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `stop`, `archive` | yes | | | none |
 | `decide` | yes | | | `card`, `decision` |
 | `admit`, `hold`, `release` | yes | yes | | `node` |
+| `set-deps` | yes | | | `node`, `deps` (up to 200 `{node, kind?}` entries; `hard` by default, or `soft`) |
 | `route` | yes | yes | | `node`, `role`, `pipeline`, optional `deps`, `writes`, `assignee` |
 | `accept` | yes | with the delegation | | `node` |
 | `return`, `cancel` | yes | yes | | `node`, `reason` |
@@ -6022,6 +6023,21 @@ queue entry, `item` for an inbox item or a card the write opened. A write waits
 `store_busy`, nothing was written, and it may be sent again. `storage_failed`
 means the result is not known: repeat the same request with the same
 `request_id`, never a new one.
+
+`set-deps` replaces dependencies only before the dependent task has started,
+without changing its route, holder or pipeline. The store refuses a started,
+reserved, handed-out, submitted or reported dependent, any current or historical
+attempt or effect, and an unsettled decision. These are store facts checked
+inside the writer transaction; a pending task may still depend on a started or
+done prerequisite. The queue exposes `deps_editable` from those same facts;
+an absent value keeps the UI read-only. Refusals keep their request receipt.
+It also refuses a stage, missing or repeated dependencies,
+self-dependencies and cycles (including soft edges). The graph in the Team tab
+shows one bounded queue page; dependencies outside the page stay listed on the
+card. Drag a card's output port onto another card, or select its port and then
+the target port, to add a hard dependency. Select an arrow and press Delete
+to remove it. The task detail also lists every dependency and allows editing an off-page
+endpoint by number. Edits send the revision shown and preserve other edges.
 
 Rules the store enforces beyond the table: a lead's `accept` and `reply` need
 the team's `accept_results` and `answer_members` delegations; a lead accepts
@@ -7611,13 +7627,15 @@ it. The read is `action: "composer"`, which returns the text, `clearable` and
 the reason when it is not.
 
 **Release unconfirmed input** uses the same Terminal toolbar slot for a local
-Claude session whose conversation identity is already known, whose native
+Claude, Codex or Kimi session whose conversation identity is already known, whose native
 composer is verified empty, and whose previous input remains unconfirmed
 (zerus-iitw8.9). It requires the person's explicit **I checked Terminal: mark
 the previous input as handled** confirmation. The message may or may not have
-reached Claude. This action sends no keys, does not send or retype the message,
-and does not claim that Claude accepted it. A busy agent, copy mode, an active
+reached the agent. This action sends no keys, does not send or retype the message,
+and does not claim that the agent accepted it. A busy agent, copy mode, an active
 delivery proof, a changed input or terminal, and unknown native state refuse it.
+For Codex and Kimi, a positive completed native main turn can establish eligibility
+when cached hook status is stale. That older completion never confirms a later input.
 If hooks never established a conversation identity, the identity refusal stays;
 finish startup or repair the hooks in Terminal instead.
 
@@ -7631,6 +7649,28 @@ The composer read supplies the exact original request and timestamp in
 `composer.recovery`; review that input before authorizing the command. A JSON
 role or confirmation flag grants no authority. The desktop uses its native
 frontend request authority instead of this CLI terminal path.
+
+Codex and Kimi can also repair a missed acceptance hook from bounded native
+history: the exact full submitted text must occur as a main user input after
+the pending timestamp in that same conversation. The original request, receipt
+digest and run must still match; new sends additionally bind the submitted-text
+hash in the record. This updates native acceptance only and never replays or
+rewrites the original receipt. Completion, tool activity, age, partial text,
+other conversations and absent or unreadable evidence never prove acceptance.
+Codex also requires a typed native turn start after the pending input; a delayed
+user row from an older turn and in-turn steers without this context stay unknown.
+Each Kimi send captures its already-observed native main-user turn floor, bound
+to that request. A prior submit without typed ordering leaves this context
+unknown; a later old prompt or typed hook cannot fill that gap for the new send.
+Only a strictly newer integer native prompt can repair a complete context.
+Legacy or incomplete ordering stays unknown and retains the person's recovery.
+A person-acknowledged unknown input is not cancelled. Before opening its gate,
+Zerus durably retains bounded uncertainty for that provider and conversation,
+across session renames and runs. An indistinguishable later input cannot be
+confirmed by a delayed native row, hook or Claude transcript entry. Different
+complete input can still confirm normally. Incomplete legacy uncertainty,
+unreadable evidence or overflow stays unknown; nothing expires or is replayed.
+Attachments or text outside the bounded native window remain unconfirmed.
 
 The settlement is audited as `person-acknowledged-unknown`, with the original
 request, run, conversation and terminal binding. The record keeps only its

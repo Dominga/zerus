@@ -18,16 +18,17 @@ import { Icon } from "../lib/icons";
 import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
 import { followTeamScope, type TeamScope } from "./team-tab-scope";
+import { TaskDependencies } from "./TaskDependencies";
+import { PlanView } from "./PlanView";
 import { TeamTaskCard } from "./TeamTaskCard";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
-// The Team workspace adapts the fork's team bar, members, paged Board, task
-// detail and decisions. Feed, Inbox, Reports and Cards read bounded pages;
-// Lead chat uses the bound lead's ordinary guarded composer. The Board uses
-// the store's followed team view, and team actions use its existing intents.
+// The Team workspace combines the paged Board and dependency Graph with
+// bounded Feed, Inbox, Reports and Cards drawers. Lead chat uses the bound
+// lead's guarded composer. Views follow the store; actions use its intents.
 
 function columnLabel(column: BoardColumn): string {
   switch (column.key) {
@@ -59,6 +60,7 @@ export function TeamWorkspace(props: {
   onSettingsSave?: (call: TeamCall) => Promise<TeamOutcome>;
   settingsBlocked?: boolean;
 }) {
+  const [planMode, setPlanMode] = createSignal<"board" | "graph">("board");
   const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
@@ -130,12 +132,12 @@ export function TeamWorkspace(props: {
       </Show>
       <div class="team-body">
         <section class="team-main">
-          <header class="team-board-head"><Icon name="columns-3" size={14} /><b>{tr("Board")}</b><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
+          <header class="team-board-head"><Icon name="columns-3" size={14} /><button type="button" class="btn small" aria-pressed={planMode() === "board"} onClick={() => setPlanMode("board")}>{tr("Board")}</button><button type="button" class="btn small" data-team-graph-mode aria-pressed={planMode() === "graph"} onClick={() => setPlanMode("graph")}>{tr("Graph")}</button><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
           <div class="team-canvas">
             <Show when={all().length} fallback={
               <div class="empty team-empty"><Icon name="list-todo" size={24} /><h3>{tr("The queue is empty.")}</h3><p>{tr("Send a task to the team from the task board.")}</p></div>
             }>
-              <div class="team-board" data-team-board>
+              <Show when={planMode() === "graph"} fallback={<div class="team-board" data-team-board>
                 <For each={groups()}>
                   {(group) => (
                     <section class="team-column" data-group={group.key}>
@@ -147,7 +149,9 @@ export function TeamWorkspace(props: {
                     </section>
                   )}
                 </For>
-              </div>
+              </div>}>
+                <PlanView view={props.view} busy={props.busy} selected={selectedNode()} onSelect={select} onSetDeps={(node, deps) => send("set_deps", { node, deps })} />
+              </Show>
             </Show>
             <Show when={card()}>
               {(shown) => (
@@ -179,6 +183,7 @@ export function TeamWorkspace(props: {
                       )}</For>
                     </dl>
                   </Show>
+                  <TaskDependencies task={shown()} status={props.view.bar.status} busy={props.busy} onSetDeps={(deps) => send("set_deps", { node: shown().node, deps })} />
                   <TaskActions card={shown()} teamStatus={props.view.bar.status} busy={props.busy} onAction={(kind) => send(kind, { node: shown().node })}
                     onReason={(button) => { setAsking(button); setReason(""); }} />
                   <Show when={asking()}>

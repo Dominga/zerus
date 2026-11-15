@@ -6,6 +6,17 @@ use sha2::{Digest as _, Sha256};
 pub(super) struct Digest([u8; 32]);
 
 impl Digest {
+    /// Canonical correlation data only; formatting does not add authority.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(super) fn hex(&self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(64);
+        for byte in self.0 {
+            out.push(char::from(HEX[usize::from(byte >> 4)]));
+            out.push(char::from(HEX[usize::from(byte & 15)]));
+        }
+        out
+    }
     pub(super) fn capture(value: &Value) -> Self {
         let mut hash = Sha256::new();
         // Preserve the archive fence's existing canonical encoding exactly.

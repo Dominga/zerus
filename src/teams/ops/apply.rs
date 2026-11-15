@@ -190,6 +190,7 @@ fn dispatch(ctx: &mut Context<'_>) -> Result<()> {
         Operation::AddTask { .. } => queue::add(ctx),
         Operation::Admit { .. } => queue::admit(ctx),
         Operation::Route { .. } => queue::route(ctx),
+        Operation::SetDeps { .. } => dependencies::set(ctx),
         Operation::Hold { .. } => queue::hold(ctx),
         Operation::Release { .. } => queue::release(ctx),
         Operation::ObserveTask { .. } => queue::observe(ctx),

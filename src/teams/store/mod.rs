@@ -9,6 +9,7 @@ mod cross;
 mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
+pub(crate) mod dependency_edit;
 mod holder;
 pub(in crate::teams) mod non_delivery;
 pub(crate) mod editing;

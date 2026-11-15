@@ -836,6 +836,10 @@ fn only_api_verified_pending_opencode_question_tools_route() {
     inspected["agent"] = json!("opencode");
     inspected["name"] = child["name"].clone();
     assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
+    let mut provider_card = claimed.clone();
+    provider_card["native_question"]["tool_call_id"] = json!("toolu_native_provider_id");
+    inspected["pending_questions"] = json!([provider_card]);
+    assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
     for (key, value) in [
         ("native_question", Value::Null),
         ("blocking", json!(false)),

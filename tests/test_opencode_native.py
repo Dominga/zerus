@@ -152,7 +152,7 @@ class Model(http.server.BaseHTTPRequestHandler):
             elif 'BASH_NATIVE' in last_user:
                 tool = ('shell', {'command': 'printf native-tool-output', 'description': 'Print isolated fixture output'})
         if tool:
-            call = {'index': 0, 'id': 'call_' + uuid.uuid4().hex[:12], 'type': 'function',
+            call = {'index': 0, 'id': ('toolu_' if 'QUESTION_NATIVE_TOOLU' in last_user else 'call_') + uuid.uuid4().hex[:12], 'type': 'function',
                     'function': {'name': tool[0], 'arguments': json.dumps(tool[1])}}
             choices = [{'index': 0, 'delta': {'tool_calls': [call]}, 'finish_reason': None},
                        {'index': 0, 'delta': {}, 'finish_reason': 'tool_calls'}]
@@ -1071,6 +1071,18 @@ class OpenCodeNative(unittest.TestCase):
         [stale] = self.hgs(['inspect', name])['pending_questions']
         self.assertIs(stale['blocking'], False)
         self.assertEqual(answer(binding, stale)['status'], 'answered')
+
+    def test_04_native_provider_tool_ids_do_not_require_an_openai_prefix(self):
+        binding = self.create()
+        name = binding['name']
+        self.hgs(['send', name, '--json'], self.payload(binding, text='QUESTION_NATIVE_TOOLU provider identity'))
+        [card] = self.wait(name, lambda v: v['pending_questions'])['pending_questions']
+        self.assertIs(card['blocking'], True)
+        self.assertTrue(card['native_question']['tool_call_id'].startswith('toolu_'))
+        request = self.payload(binding, question_id=card['question_id'], expected_question_hash=card['question_hash'],
+                               answers=[dict(question_id=card['questions'][0]['id'], selected_option_ids=['Green'], text='')])
+        self.assertEqual(self.hgs(['answer', name, '--json'], request)['status'], 'answered')
+        self.wait(name, lambda v: v['phase'] == 'idle' and not v['pending_questions'])
 
     def test_04_current_read_names_what_read_accepts_on_the_shown_observation(self):
         """zerus-a4mub.24: `inspect --current-read` names exactly what `hgs read` accepts

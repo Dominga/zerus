@@ -13,8 +13,11 @@ fn reference(form: &Value) -> Option<(&str, &str)> {
     (form["metadata"]["kind"] == "question"
         && message.len() > 4
         && super::super::native_id(message, "msg_")
-        && call.len() > 5
-        && super::super::native_id(call, "call_"))
+        && !call.is_empty()
+        && call.len() <= 200
+        && call
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-'))
     .then_some((message, call))
 }
 
@@ -189,6 +192,11 @@ mod tests {
     fn only_exact_running_question_input_matches_the_complete_form() {
         let (form, message) = fixture();
         assert!(matches(&form, &message));
+        let mut provider_form = form.clone();
+        let mut provider_message = message.clone();
+        provider_form["metadata"]["tool"]["id"] = json!("toolu_native_provider_id");
+        provider_message["content"][0]["id"] = json!("toolu_native_provider_id");
+        assert!(matches(&provider_form, &provider_message));
         for (pointer, value) in [
             ("/id", json!("msg_other")),
             ("/type", json!("user")),

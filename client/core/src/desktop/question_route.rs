@@ -352,7 +352,13 @@ fn opencode_question(card: &Value) -> bool {
         && id(&card["question_id"], "frm_")
         && proof.as_object().is_some_and(|p| p.len() == 2)
         && id(&proof["message_id"], "msg_")
-        && id(&proof["tool_call_id"], "call_")
+        && proof["tool_call_id"].as_str().is_some_and(|call| {
+            !call.is_empty()
+                && call.len() <= 200
+                && call
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+        })
 }
 
 /// The routable questions of `inspect` (one bounded metadata read of the

@@ -1,6 +1,7 @@
 # Legacy mobile task media presentation
 
-Proposed compatibility slice for zerus-oqh7.7, following caller PR #2466.
+Coordinator-approved compatibility slice for zerus-oqh7.7 (2026-11-15),
+following caller PR #2466.
 No runtime changes are included in this design commit. Rebase shared phone
 integration onto the admitted #2466 merge before implementation.
 
@@ -20,7 +21,7 @@ new legacy task. `media` and `read_media` already expose at most eight files
 for one selected immutable history entry. History rows carry stable entry IDs
 and attachment counts; file bodies stay out of the row DTO.
 
-## Proposed implementation
+## Implementation scope
 
 Complete both phones in one client PR, keeping the ordinary schema-2 writer
 cap and the existing qualified schema-8 controls:
@@ -53,15 +54,15 @@ cap and the existing qualified schema-8 controls:
   Ordinary schema-3 tasks remain read-only in this slice. New visible strings
   use both existing English/Russian catalogs.
 
-## Scope decision before code
+## Approved schema boundary
 
-The originally filed follow-up also mentioned legacy comment-file creation.
-That requires an explicit new ordinary schema-3 writer contract, rather than
-just UI wiring. The proposal above completes the compatible description and
-history-media surfaces without that expansion. Confirm this boundary before
-implementation; if legacy schema-3 writing is required now, review its FFI
-method, precise writer limit, old-reader controls and failure semantics first.
-Never change the general writer cap as an incidental picker fix.
+Coordinator decision of 2026-11-15: legacy schema-3 comment creation stays
+outside this slice. Keep TaskStore's schema-2 writer cap and the read-only
+comment-media contract exactly as they are. New comment files use the
+qualified schema-8 editor; the owner's current tasks are cut over. There is
+no new FFI writer, protocol, relay or execution authority. A future concrete
+legacy comment-write need requires its own narrow schema-3 writer contract
+and early G1 review. Rebase onto the admitted #2466 main point first.
 
 ## Local proof
 

@@ -106,6 +106,8 @@ struct TaskSettingsSheet: View {
                 }
                 let note = TasksPresentation.note(task)
                 if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(Theme.muted) }
+                SavedExecutionSection(state: SavedExecutionSectionState(available: false, notices:
+                    SavedExecutionText.notices(conflict: false, unknown: false, unexplained: false, legacy: false, stale: tasks.taskExecutionStale)))
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(actions, id: \.action) { state in
                         Button {

@@ -4,4 +4,34 @@
     <string name="activity_reading_previous_own">Reading earlier messages…</string>
     <string name="activity_reading_next_own">Reading newer messages…</string>
     <string name="session_name_unsafe">Names cannot contain shell syntax or invisible formatting characters.</string>
+
+    <!-- Saved task execution evidence; never native status or controls. -->
+    <string name="saved_execution">Saved execution</string>
+    <string name="saved_execution_unavailable">Execution details unavailable.</string>
+    <string name="saved_execution_conflict">Execution records conflict.</string>
+    <string name="saved_execution_unknown">Some attempt delivery is unknown.</string>
+    <string name="saved_execution_unexplained">Some execution history is unexplained.</string>
+    <string name="saved_execution_legacy">Legacy execution record</string>
+    <string name="saved_execution_stale">This saved execution could not be refreshed.</string>
+    <string name="saved_execution_no_current">No current attempt recorded.</string>
+    <string name="saved_execution_attempt">Attempt</string>
+    <string name="saved_execution_generation">Generation</string>
+    <string name="saved_execution_requirement">Requirement revision</string>
+    <string name="saved_execution_current_requirement">Current requirement revision</string>
+    <string name="saved_execution_request">Request</string>
+    <string name="saved_execution_executor">Recorded executor</string>
+    <string name="saved_execution_not_recorded">Not recorded</string>
+    <string name="saved_execution_unresolved">Executor identity unresolved</string>
+    <string name="saved_execution_at">Recorded at</string>
+    <string name="saved_execution_began">Begin recorded at</string>
+    <string name="saved_execution_progress">Progress recorded at</string>
+    <string name="saved_execution_footer">Saved evidence only. Live execution state and executor queue are unavailable.</string>
+    <string name="saved_execution_submitted">Submitted — begin unconfirmed</string>
+    <string name="saved_execution_running">Begin recorded</string>
+    <string name="saved_execution_paused">Pause recorded</string>
+    <string name="saved_execution_ready">Ready for review recorded</string>
+    <string name="saved_execution_cancelled">Cancellation recorded</string>
+    <string name="saved_execution_not_started">Not started</string>
+    <string name="saved_execution_delivery_unknown">Delivery unknown</string>
+    <string name="saved_execution_unconfirmed">Begin unconfirmed</string>
 </resources>

@@ -12,6 +12,9 @@ pub struct Problem {
     pub code: String,
     /// A short explanation for a person.
     pub message: String,
+    /// The exact input field a settings refusal belongs to, absent on old replies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
     /// Optional diagnostic cause, bounded by the producer and absent on old replies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -25,9 +28,15 @@ impl Problem {
         Self {
             code: code.to_owned(),
             message: message.into(),
+            field: None,
             detail: None,
             refs: Vec::new(),
         }
+    }
+
+    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = Some(field.into());
+        self
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {

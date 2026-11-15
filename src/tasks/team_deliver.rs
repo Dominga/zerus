@@ -1100,7 +1100,8 @@ fn delivered_test_answer(body: &Input, result: attempts::Delivered) -> Value {
 mod tests;
 #[cfg(all(test, unix))]
 pub(crate) use tests::processes::{
-    blocked_handout, removed_stage_cancel, waiting_handout, with_legacy_cancel, Blocked, RealCancel, RealHandout,
+    blocked_handout, fence_delivery_cycle, removed_stage_cancel, waiting_handout, with_legacy_cancel,
+    Blocked, RealCancel, RealHandout,
 };
 
 #[cfg(test)]

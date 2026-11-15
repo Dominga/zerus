@@ -7,21 +7,34 @@ pub fn validate_settings(settings: &Settings) -> Result<(), Problem> {
         return Err(Problem::new(
             code::INVALID_STATE,
             "A phase cannot be accepted by a pipeline.",
-        ));
+        )
+        .with_field("settings.phase_acceptance"));
     }
-    if settings.caps.max_members == 0
-        || settings.caps.max_members > 200
-        || settings.caps.max_open_tasks == 0
-        || settings.caps.max_open_tasks > 500
-        || settings.caps.max_phase_tasks == 0
-        || settings.caps.max_phase_tasks > 200
-        || settings.caps.max_open_questions == 0
-        || settings.caps.max_open_questions > 200
-    {
-        return Err(Problem::new(
-            code::OVER_CAP,
-            "Settings exceed the supported storage bounds.",
-        ));
+    for (field, value, maximum) in [
+        ("settings.caps.max_members", settings.caps.max_members, 200),
+        (
+            "settings.caps.max_open_tasks",
+            settings.caps.max_open_tasks,
+            500,
+        ),
+        (
+            "settings.caps.max_phase_tasks",
+            settings.caps.max_phase_tasks,
+            200,
+        ),
+        (
+            "settings.caps.max_open_questions",
+            settings.caps.max_open_questions,
+            200,
+        ),
+    ] {
+        if value == 0 || value > maximum {
+            return Err(Problem::new(
+                code::OVER_CAP,
+                "Settings exceed the supported storage bounds.",
+            )
+            .with_field(field));
+        }
     }
     Ok(())
 }
@@ -46,6 +59,16 @@ mod tests {
                 let result = validate_settings(&settings);
                 assert_eq!(result.is_ok(), (1..=maximum).contains(&value));
                 if let Err(problem) = result {
+                    let field = [
+                        "max_members",
+                        "max_phase_tasks",
+                        "max_open_tasks",
+                        "max_open_questions",
+                    ][key];
+                    assert_eq!(
+                        problem.field.as_deref(),
+                        Some(format!("settings.caps.{field}").as_str())
+                    );
                     assert_eq!(problem.code, code::OVER_CAP);
                     assert_eq!(
                         problem.message,

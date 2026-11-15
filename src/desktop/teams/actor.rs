@@ -18,6 +18,7 @@ mod maintenance;
 pub(super) mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native_work;
+mod non_delivery;
 mod observe;
 mod ports;
 mod presence;
@@ -107,6 +108,7 @@ impl Runtime {
         if team.home != self.machine {
             return Ok(());
         }
+        self.non_deliveries(store, &team, now)?;
         if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
             let settled = self.terminal_deliveries(store, &team, now);
             self.for_row(|_| settled)?;

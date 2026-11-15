@@ -473,11 +473,9 @@ impl Runtime {
             // the terminal gate (zerus-63rru.79) nor of the project's own
             // limit (zerus-63rru.23).
             let refused = match &d.outcome {
-                Some(HandoutOutcome::Refused { reason })
-                    if !d.waiting
-                        && !d.project
-                        && store.effect_reserved(&team.id, &d.id)? =>
-                {
+                Some(
+                    HandoutOutcome::Refused { reason } | HandoutOutcome::CuttingOver { reason },
+                ) if !d.waiting && !d.project && store.effect_reserved(&team.id, &d.id)? => {
                     Some(reason)
                 }
                 _ => None,
@@ -498,13 +496,7 @@ impl Runtime {
             // A refusal of the terminal gate is not a failed hand-out: the
             // member's terminal is not free (zerus-63rru.79).
             if d.waiting {
-                self.terminal_refused(
-                    &team.id,
-                    &d.member,
-                    d.stamp.clone(),
-                    d.dialog.clone(),
-                    now,
-                )?;
+                self.terminal_refused(&team.id, &d.member, d.stamp.clone(), d.dialog.clone(), now)?;
             }
             // A refusal of the project's own limit is not a failed hand-out:
             // it is a fact about the team (zerus-63rru.23).
@@ -521,7 +513,10 @@ impl Runtime {
                     d.outcome,
                     Some(HandoutOutcome::Submitted { .. } | HandoutOutcome::Refused { .. })
                 )
-                && self.ledger.get(&team.id, super::project_limit::KEY)?.is_some()
+                && self
+                    .ledger
+                    .get(&team.id, super::project_limit::KEY)?
+                    .is_some()
             {
                 // The probe's own answer, and the project admitted: only a
                 // submitted delivery or the command's own refusal with

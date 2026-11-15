@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { createTeamPlanPreferences } from "../../store/teamPlan";
 import type { TeamCard } from "../../store/teams";
-import { fitPlanZoom, planMatches, planProblem, planTone } from "./planToolbar";
+import { fitPlanZoom, planMatches, planProblem, planTone } from "./planFilters";
 
 // Synthetic decoder controls only. These fragments are intentionally written
 // by hand; product-written graph/held fixtures cover the mounted view separately.

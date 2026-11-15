@@ -545,6 +545,7 @@
   "Could not copy the computer code.": "Не удалось скопировать код компьютера.",
   "Could not copy the pairing code.": "Не удалось скопировать код сопряжения.",
   "Could not copy: %1": "Не удалось скопировать: %1",
+  "Could not find this session's team here. Open it from Teams.": "Здесь не удалось найти команду этой сессии. Откройте её из раздела «Команды».",
   "Could not load user skins: %1": "Не удалось загрузить пользовательские оформления: %1",
   "Could not open session terminal": "Не удалось открыть терминал сессии",
   "Could not open system settings automatically.": "Не удалось автоматически открыть системные настройки.",

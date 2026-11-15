@@ -15,6 +15,7 @@ mod readiness;
 mod removed_handout;
 mod replace;
 mod roster;
+mod settings_fields;
 mod storage;
 mod talk;
 mod team;

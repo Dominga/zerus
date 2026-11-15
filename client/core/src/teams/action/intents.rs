@@ -77,6 +77,7 @@ fn refused(request_id: &str, code: &str, detail: &str) -> Admission {
     Admission::Refused(TeamOutcome::Failed {
         detail: detail.to_owned(),
         code: code.to_owned(),
+        field: None,
         request_id: request_id.to_owned(),
     })
 }

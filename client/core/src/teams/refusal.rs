@@ -14,6 +14,10 @@ const CODE_CHARS: usize = 64;
 /// false and the error names a well-formed stable code. A message may be
 /// empty; the code may not.
 pub(crate) fn parse(stdout: &[u8]) -> Option<(String, String)> {
+    parse_with_field(stdout).map(|(code, message, _)| (code, message))
+}
+
+pub(crate) fn parse_with_field(stdout: &[u8]) -> Option<(String, String, Option<String>)> {
     let reply: Value = serde_json::from_slice(stdout).ok()?;
     if reply.get("ok").and_then(Value::as_bool) != Some(false) {
         return None;
@@ -30,7 +34,21 @@ pub(crate) fn parse(stdout: &[u8]) -> Option<(String, String)> {
         .chars()
         .take(MESSAGE_CHARS)
         .collect();
-    Some((code.to_owned(), message))
+    let field = error
+        .get("field")
+        .and_then(Value::as_str)
+        .filter(|field| {
+            !field.is_empty()
+                && field.len() <= 128
+                && field.split('.').all(|part| {
+                    !part.is_empty()
+                        && part
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+        })
+        .map(str::to_owned);
+    Some((code.to_owned(), message, field))
 }
 
 /// A stable code: lowercase letters, digits and underscores, short.

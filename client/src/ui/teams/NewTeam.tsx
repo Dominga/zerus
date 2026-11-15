@@ -1,7 +1,8 @@
 import { For, Show, createEffect, createMemo, createSignal, createUniqueId, on, onCleanup, onMount } from "solid-js";
 import type { JSX } from "solid-js";
+import { openTeamCatalog } from "./catalog-navigation";
 import { tr } from "../../i18n";
-import { selected, setPage } from "../../store/ui";
+import { selected } from "../../store/ui";
 import { machineCards } from "../../store/machines";
 import {
   teams, type TeamCall, type TeamCatalog, type TeamCatalogTemplate, type TeamProjectFacts,
@@ -447,7 +448,7 @@ export function NewTeamDialog() {
               if (outcome.outcome === "done") close();
               return outcome;
             }}
-            onOpenCatalog={() => { close(); setPage("team-catalog"); }}
+            onOpenCatalog={openTeamCatalog}
             onSaveTemplate={(template) => teams.saveTemplate(template)}
             onReloadCatalog={() => teams.reloadCatalog()}
             onClose={close}

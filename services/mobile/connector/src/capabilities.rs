@@ -20,6 +20,8 @@ pub const TASK_IDENTITY_HELP_MARKER: &str = "Mobile task identity ABI: task-sess
 pub const TASK_IDENTITY_FEATURE: &str = "task_session_identity_v2";
 pub const TASK_UPLOAD_HELP_MARKER: &str = "Mobile task media ABI: task-media-upload-v1";
 pub const TASK_UPLOAD_FEATURE: &str = "task_media_upload_v1";
+pub const TASK_EDIT_HELP_MARKER: &str = "Mobile task edit ABI: task-admitted-edit-v1";
+pub const TASK_EDIT_FEATURE: &str = "task_admitted_edit_v1";
 /// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
 /// providers absent from the host, speech and voice. Same table drives
 /// advertisement and dispatch refusal, after durable duplicate handling.
@@ -396,6 +398,8 @@ pub struct Flags {
     pub task_session_identity: bool,
     /// Bounded upload frames inside task exchange, independently negotiated.
     pub task_media_upload: bool,
+    /// Native admitted edits; advertised only on the qualified encrypted route.
+    pub task_admitted_edit: bool,
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
@@ -481,6 +485,10 @@ impl Flags {
             task_media_upload: help
                 .lines()
                 .any(|line| line.trim() == TASK_UPLOAD_HELP_MARKER),
+            task_admitted_edit: has("hgs task exchange|digests --json")
+                && help
+                    .lines()
+                    .any(|line| line.trim() == TASK_EDIT_HELP_MARKER),
             task_session_identity: help
                 .lines()
                 .any(|line| line.trim() == TASK_IDENTITY_HELP_MARKER),
@@ -512,6 +520,7 @@ impl Flags {
     }
     pub fn windows_local(mut self) -> Self {
         self.windows_gateway = true;
+        self.task_admitted_edit = false;
         self.peers = false;
         self.voice = false;
         self.voice_video = false;

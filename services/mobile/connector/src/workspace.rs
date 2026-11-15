@@ -28,54 +28,7 @@ fn false_flag(value: &bool) -> bool {
 }
 const PAGE: usize = 100;
 
-/// Never Debug: bearer and private keys are intentionally absent from reports.
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Profile {
-    pub server_url: String,
-    pub workspace_name: String,
-    pub computer_name: String,
-    pub node_token: String,
-    pub identity: IdentityRecord,
-    pub membership: MembershipState,
-    pub historical_heads: BTreeMap<u64, String>,
-    pub state_dir: PathBuf,
-}
-impl Profile {
-    fn validate_record(&self) -> Result<()> {
-        let identity = cc(Identity::from_record(&self.identity))?;
-        cc(self.membership.validate())?;
-        if identity.public().role != Role::Computer
-            || (self.membership.members.get(&identity.public().device_id)
-                != Some(identity.public())
-                && !self.retired())
-            || self.historical_heads.get(&self.membership.revision) != Some(&self.membership.head)
-            || !self.state_dir.is_absolute()
-            || self.node_token.is_empty()
-        {
-            return Err(fail("Workspace identity is unavailable or retired"));
-        }
-        if self.historical_heads.len() > 8192 {
-            return Err(fail("Workspace membership history exceeds its bound"));
-        }
-        Ok(())
-    }
-    pub fn validate(&self) -> Result<()> {
-        self.validate_record()?;
-        if self.retired() {
-            return Err(fail("Workspace identity is unavailable or retired"));
-        }
-        Ok(())
-    }
-    fn retired(&self) -> bool {
-        self.membership
-            .revoked_device_ids
-            .contains(&self.identity.device.device_id)
-    }
-    fn report(&self) -> Value {
-        json!({"state":if self.retired(){"retired"}else{"active"},"encrypted":true,"server_url":self.server_url,"workspace_id":self.membership.workspace_id,"workspace_name":self.workspace_name,"computer_name":self.computer_name,"node_id":self.identity.device.device_id,"membership_revision":self.membership.revision,"membership_head":self.membership.head})
-    }
-}
+pub use zerus_mobile_endpoint::Profile;
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Pending {
@@ -221,18 +174,9 @@ pub(crate) fn validate_config_profile_binding(
     private_dir: &Path,
     profile: &Profile,
 ) -> Result<()> {
-    validate_marker(config, private_dir)?;
-    profile.validate_record()?;
-    if config["server_url"].as_str() != Some(&profile.server_url)
-        || config["state_dir"] != json!(profile.state_dir)
-        || profile.state_dir
-            != private_dir.join(format!("receipts-{}", profile.identity.device.device_id))
-    {
-        return Err(fail(
-            "Encrypted workspace configuration does not match its private identity",
-        ));
-    }
-    Ok(())
+    profile
+        .check_configuration(config, private_dir)
+        .map_err(Into::into)
 }
 fn pending_activation_matches(config: &Value, revision: &str, private_dir: &Path) -> Result<bool> {
     let Some(bytes) = workspace_cli::read_private(private_dir, PENDING)? else {
@@ -451,7 +395,7 @@ pub fn public_status(config_path: &Path) -> Result<Value> {
 
 async fn synchronize(store: &Store, profile: &mut Profile, relay: &Relay) -> Result<()> {
     synchronize_record(store, profile, relay).await?;
-    profile.validate()
+    profile.validate().map_err(Into::into)
 }
 fn publish_membership(
     store: &Store,
@@ -463,6 +407,7 @@ fn publish_membership(
     let previous_heads = std::mem::replace(&mut profile.historical_heads, heads);
     let published = profile
         .validate_record()
+        .map_err(ConnectorError::from)
         .and_then(|()| save(store, ACTIVE, profile));
     if published.is_err() {
         let attempted_membership = std::mem::replace(&mut profile.membership, previous_membership);

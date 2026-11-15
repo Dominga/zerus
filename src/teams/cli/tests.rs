@@ -3,8 +3,8 @@
 mod board;
 mod catalog;
 mod create_binding;
-mod dispatch;
 mod dependencies;
+mod dispatch;
 mod drawer_pages;
 mod fixtures;
 mod guides;

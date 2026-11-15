@@ -57,9 +57,10 @@ it("selects an arrow without mutation and Delete removes only that edge", () => 
 });
 
 it("keeps arrows read-only when busy, decided or the team is stopped", () => {
-  for (const state of ["busy", "decided", "stopped"]) {
+  for (const state of ["busy", "decided", "stopped", "history"]) {
     const view = structuredClone(graphView) as unknown as TeamView;
     if (state === "stopped") view.bar.status = "stopped";
+    if (state === "history") view.groups.forEach((group) => group.cards.forEach((card) => card.deps_editable = false));
     if (state === "decided") view.groups.forEach((group) => group.cards.forEach((card) => card.state = "accepted"));
     const { host, calls } = setup({ view, busy: state === "busy" });
     host.querySelector('[data-edge="2/3"]')!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -99,4 +100,15 @@ it("the Team tab sends dependency edits through its ordinary action callback", (
   host.querySelector<HTMLButtonElement>('[data-plan-task="1"] .output')!.click();
   host.querySelector<HTMLButtonElement>('[data-plan-task="3"] .input')!.click();
   expect(actions).toEqual([["set_deps", { node: 3, deps: [{ node: 2 }, { node: 4 }, { node: 1 }] }]]);
+});
+
+it("lets a pending target depend on a started source without editing the source", () => {
+  const view = structuredClone(graphView) as unknown as TeamView;
+  const source = view.groups.flatMap((group) => group.cards).find((card) => card.node === 1)!;
+  source.state = "in_progress"; source.deps_editable = false;
+  const { button, calls } = setup({ view });
+  expect(button('[data-plan-task="1"] .output').disabled).toBe(false);
+  button('[data-plan-task="1"] .output').click();
+  button('[data-plan-task="3"] .input').click();
+  expect(calls).toEqual([[3, [{ node: 2 }, { node: 4 }, { node: 1 }]]]);
 });

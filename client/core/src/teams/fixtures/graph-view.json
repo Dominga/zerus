@@ -125,6 +125,7 @@
       "state": "pending",
       "cards": [
         {
+          "deps_editable": true,
           "node": 1,
           "title": "Task 1",
           "state": "pending",
@@ -150,6 +151,7 @@
           "pending_replaceable": false
         },
         {
+          "deps_editable": true,
           "node": 2,
           "deps": [
             {
@@ -182,6 +184,7 @@
           "pending_replaceable": false
         },
         {
+          "deps_editable": true,
           "node": 3,
           "deps": [
             {

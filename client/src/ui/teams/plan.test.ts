@@ -21,7 +21,7 @@ it("ends a malformed dependency cycle", () => {
 it("refuses stages, pending decisions, decided and unknown states in the edit affordance", () => {
   const task = cards()[0];
   expect(canSetDeps(task, "running", false)).toBe(true);
-  for (const overlay of [{ kind: "stage" as const }, { pending_decision: "accept" }, { state: "accepted" }, { state: "cancelled" }, { state: "future" }]) {
+  for (const overlay of [{ kind: "stage" as const }, { pending_decision: "accept" }, { state: "accepted" }, { state: "cancelled" }, { state: "future" }, { state: "in_progress" }, { state: "reported" }, { deps_editable: false }, { deps_editable: undefined }]) {
     expect(canSetDeps({ ...task, ...overlay }, "running", false)).toBe(false);
   }
 });

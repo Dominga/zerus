@@ -2,7 +2,7 @@ import { For, Show, createEffect, createSignal, on } from "solid-js";
 import { tr } from "../../i18n";
 import { TextInput } from "../lib/TextField";
 import type { TeamCard, TeamDependency } from "../../store/teams";
-import { canSetDeps } from "./planTasks";
+import { canSetDeps, dependencyEditCause } from "./planTasks";
 
 /** The complete edge list, including endpoints outside the graph's page. */
 export function TaskDependencies(props: { task: TeamCard; status: string; busy: boolean; onSetDeps: (deps: TeamDependency[]) => void }) {
@@ -13,6 +13,7 @@ export function TaskDependencies(props: { task: TeamCard; status: string; busy: 
   const valid = () => editable() && Number.isInteger(id()) && id() > 0 && id() <= 0xffff_ffff && id() !== props.task.node && !props.task.deps?.some((dep) => dep.node === id());
   return <section data-task-dependencies>
     <h4>{tr("Dependencies")}</h4>
+    <Show when={dependencyEditCause(props.task, props.status)}>{(cause) => <p role="note" data-dependency-edit-cause>{cause()}</p>}</Show>
     <For each={props.task.deps ?? []}>{(dep) => <p>
       <span>#{dep.node}<Show when={dep.kind === "soft"}> ({tr("soft")})</Show></span>{" "}
       <Show when={editable()}><button type="button" class="btn small" aria-label={tr("Remove dependency on #%1", dep.node)}

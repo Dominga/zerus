@@ -354,6 +354,10 @@ prevents its removal. Run Terminate from outside the target's own process tree.
 The dormant [Linux descendant-custody resource](linux-descendant-custody.md) is
 qualified separately. It has no installed caller and does not enable graceful
 Terminate or change the verified tree and cleanup rules above.
+The [dormant original supervisor bridge](original-supervisor-owner.md) retains
+source-bound ownership behind a const-false gate. Its read-only observations
+grant no graceful, signal or cleanup authority; owned-mode records refuse the
+legacy root-only finalizer.
 
 Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
 supported native DeepSeek operation. It preserves the original folder, account
@@ -6028,9 +6032,14 @@ member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.
 
-`set-deps` replaces dependencies on an undecided task in an active team,
-including one already in work, without changing its route, holder or pipeline.
-It refuses a stage, a pending decision, missing or repeated dependencies,
+`set-deps` replaces dependencies only before the dependent task has started,
+without changing its route, holder or pipeline. The store refuses a started,
+reserved, handed-out, submitted or reported dependent, any current or historical
+attempt or effect, and an unsettled decision. These are store facts checked
+inside the writer transaction; a pending task may still depend on a started or
+done prerequisite. The queue exposes `deps_editable` from those same facts;
+an absent value keeps the UI read-only. Refusals keep their request receipt.
+It also refuses a stage, missing or repeated dependencies,
 self-dependencies and cycles (including soft edges). The graph in the Team tab
 shows one bounded queue page; dependencies outside the page stay listed on the
 card. Drag a card's output port onto another card, or select its port and then

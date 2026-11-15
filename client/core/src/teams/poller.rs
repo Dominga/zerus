@@ -112,9 +112,13 @@ impl TeamsPoller {
     ) -> Option<u64> {
         let mut state = self.shared.lock();
         let (epoch, updates) = if enabled {
-            state.model.follow_phases(team, phase, true, Instant::now())?
+            state
+                .model
+                .follow_phases(team, phase, true, Instant::now())?
         } else {
-            state.model.close_phases(team, expected_epoch, Instant::now())?
+            state
+                .model
+                .close_phases(team, expected_epoch, Instant::now())?
         };
         state.outbox.extend(updates);
         drop(state);

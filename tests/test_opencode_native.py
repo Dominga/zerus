@@ -1045,16 +1045,27 @@ class OpenCodeNative(unittest.TestCase):
         status, message = self.api('GET', f'/api/session/{cid}/message/{form["metadata"]["tool"]["messageID"]}')
         self.assertEqual(status, 200)
         self.assertEqual(message['data']['content'][0]['state']['status'], 'running')
+        def answer(b, c):
+            return self.hgs(['answer', b['name'], '--json'], self.payload(b,
+                question_id=c['question_id'], expected_question_hash=c['question_hash'],
+                answers=[dict(question_id=c['questions'][0]['id'], selected_option_ids=['Green'], text='')]))
+        # Exercise native message proof with a live question: an idle generic
+        # form alone would be refused by the independent active-session guard.
+        forged_body = {**body, 'metadata': dict(kind='question', tool=dict(
+            id='call_nonexistent', messageID='msg_nonexistent'))}
+        status, _ = self.api('POST', f'/api/session/{cid}/form', forged_body)
+        self.assertIn(status, (200, 201))
+        cards = self.hgs(['inspect', name])['pending_questions']
+        forged = next(c for c in cards if c['question_id'] != card['question_id'])
+        self.assertIs(forged['blocking'], False)
+        self.assertIs(next(c for c in cards if c['question_id'] == card['question_id'])['blocking'], True)
+        self.assertEqual(answer(binding, forged)['status'], 'answered')
         status, clone = self.api('POST', f'/api/session/{cid}/form', body)
         self.assertIn(status, (200, 201))
         cards = self.hgs(['inspect', name, '--after', str(2**63-1), '--skip-processes'])['pending_questions']
         self.assertEqual(len(cards), 2)
         self.assertTrue(all(c['blocking'] is False for c in cards), 'Two forms claiming one tool are ambiguous')
         clone_card = next(c for c in cards if c['question_id'] != card['question_id'])
-        def answer(b, c):
-            return self.hgs(['answer', b['name'], '--json'], self.payload(b,
-                question_id=c['question_id'], expected_question_hash=c['question_hash'],
-                answers=[dict(question_id=c['questions'][0]['id'], selected_option_ids=['Green'], text='')]))
         self.assertEqual(answer(binding, clone_card)['status'], 'answered')
         [again] = self.hgs(['inspect', name])['pending_questions']
         self.assertIs(again['blocking'], True)

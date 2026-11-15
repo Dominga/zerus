@@ -787,7 +787,7 @@ class HostOfAnOlderHgs(DirectlyStarted, unittest.TestCase):
                          {'HGS_AGENT': 'claude', 'HGS_SESSION': self.launcher['name']})
         start = result['runs']['start']
         self.assertNotEqual(start['code'], 0)
-        self.assertIn('names the agent session claude/test/launcher, but that run is not live', start['stderr'])
+        self.assertIn('unregistered DeepSeek agent host', start['stderr'])
         # A host without per-call tokens proves no hosted call, even with that
         # session's own markers and a token-shaped value.
         claimed = {'HGS_AGENT': 'dsh', 'HGS_SESSION': self.session['name'], 'HGS_RUN_ID': self.session['run_id'],

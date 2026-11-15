@@ -1874,6 +1874,9 @@ fn check_send_caller() -> Result<()> {
             .iter()
             .all(|name| env::var(name).is_ok_and(|value| !value.is_empty()));
     let check = crate::state::dsh::host_check();
+    if check == crate::state::dsh::HostCheck::Unregistered {
+        return Err(Error::new(1, crate::state::dsh::UNREGISTERED_HOST));
+    }
     if check == crate::state::dsh::HostCheck::Under
         && state::session_graph::send_origin().is_none()
         && !proven_hosted
@@ -1967,6 +1970,9 @@ fn person_only_forwarding(command: &str, args: &[String]) -> Result<()> {
     else {
         return Ok(());
     };
+    if state::dsh::host_check() == state::dsh::HostCheck::Unregistered {
+        return Err(Error::new(1, state::dsh::UNREGISTERED_HOST));
+    }
     if !agent_caller() {
         // A peer loses readable local ancestry as well as session markers.
         // Apply the same refusal as a local person action before any SSH,

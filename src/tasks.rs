@@ -361,6 +361,9 @@ const UNPROVEN_HOSTED_AGENT: &str = "a DeepSeek agent's tool call (HGS_AGENT=dsh
 /// to the session's current name. A send or cancel another computer forwards
 /// (`forwardable`) names its agent with `--agent NODE/SESSION`.
 fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
+    if crate::state::dsh::host_check() == crate::state::dsh::HostCheck::Unregistered {
+        return Err(fail(crate::state::dsh::UNREGISTERED_HOST));
+    }
     let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(agent) = option(args, "--agent")? {
         if !forwardable {
@@ -380,12 +383,16 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         }
         let (machine, session) = agent
             .split_once('/')
-            .filter(|(machine, session)| uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty())
+            .filter(|(machine, session)| {
+                uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty()
+            })
             .ok_or_else(|| fail("--agent is NODE/SESSION, NODE being a computer's identity"))?;
         return Ok(Actor::Agent(SessionKey {
             machine: machine.to_owned(),
             session: session.to_owned(),
-            session_id: option(args, "--agent-session-id")?.unwrap_or_default().into(),
+            session_id: option(args, "--agent-session-id")?
+                .unwrap_or_default()
+                .into(),
         }));
     }
     // A resident DeepSeek host's tool call is an agent's even without markers

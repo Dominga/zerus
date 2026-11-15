@@ -5,6 +5,9 @@ import XCTest
 @testable import ZerusKit
 
 final class TaskEditDraftFilesTests: XCTestCase {
+    private nonisolated static func awaitPrivateGate(_ gate: DispatchSemaphore) -> Bool {
+        gate.wait(timeout: .now() + 10) == .success
+    }
     private var directory: URL!
     private let keys = StaticKeyProvider(SymmetricKey(size: .bits256))
     private let scope = TaskEditDraftScope(connectionId: "connection", swarmId: "swarm", project: "project", task: UUID().uuidString.lowercased())
@@ -212,7 +215,7 @@ final class TaskEditDraftFilesTests: XCTestCase {
         })
         blocked.withLock { $0 = true }
         writer.offer(TaskEditCheckpoint(sequence: 1, changes: "first"))
-        let started = await Task.detached { entered.wait(timeout: .now() + 10) == .success }.value
+        let started = await Task.detached { Self.awaitPrivateGate(entered) }.value
         XCTAssertTrue(started)
         for sequence in Int64(2)...8 {
             writer.offer(TaskEditCheckpoint(sequence: sequence, changes: "change \(sequence)"))

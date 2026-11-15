@@ -105,4 +105,4 @@ CREATE INDEX integration_node ON integration_facts(team,node,decision);
 CREATE TABLE key_clear_finished(team TEXT PRIMARY KEY);
 CREATE TABLE requests (id TEXT PRIMARY KEY, team TEXT NOT NULL, actor TEXT NOT NULL,
  content TEXT NOT NULL, result TEXT NOT NULL);
-PRAGMA user_version=2;
+PRAGMA user_version=__CORE_LEGACY_VERSION__;

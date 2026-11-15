@@ -15,7 +15,7 @@
 //! lock for several seconds, once. Another process opening the store
 //! meanwhile waits for it, up to a minute, instead of the usual two seconds.
 use super::*;
-use crate::teams::store::bases::PINNED_LAYOUT_FLAG;
+use crate::teams::store::{bases::PINNED_LAYOUT_FLAG, versions};
 use std::time::Duration;
 mod legacy_holds;
 use legacy_holds::legacy_owners;
@@ -23,18 +23,18 @@ use legacy_holds::legacy_owners;
 /// The layout the whole transition builds before any step: the first that
 /// reached the integration branch, with the timers. Every lower value was
 /// written only by unmerged development builds of this package.
-pub(crate) const BASE: u32 = 8;
+pub(crate) const BASE: u32 = versions::TIMER_BASE;
 /// The current layout: the base and the steps after it. Layout numbers must
 /// remain below PINNED_LAYOUT_FLAG, which reserves a separate writer fence.
-pub(crate) const EXTENSION: u32 = 12;
+pub(crate) const EXTENSION: u32 = versions::TIMER_CURRENT;
 /// Each layout that reached the integration branch, with the step that
 /// brings a store marked with it to the next; the steps run in order up to
 /// the current layout, after the base for a store from before the extension.
 const STEPS: &[(u32, Step)] = &[
-    (8, answers),
-    (9, card_decisions),
-    (10, hold_owners),
-    (11, key_refusal_order),
+    (versions::TIMER_BASE, answers),
+    (versions::TIMER_ANSWERS, card_decisions),
+    (versions::TIMER_CARD_DECISIONS, hold_owners),
+    (versions::TIMER_HOLD_OWNERS, key_refusal_order),
 ];
 // Core layouts and every timer step destination stay outside the fence range.
 const _: () = {
@@ -51,6 +51,8 @@ const _: () = {
 type Step = fn(&Connection) -> Result<()>;
 /// Layout 8 to 9: the lead's answers reach their members.
 fn answers(db: &Connection) -> Result<()> {
+    #[cfg(test)]
+    record_migration(versions::TIMER_BASE);
     db.execute_batch(include_str!("../answers.sql"))
         .map_err(storage)
 }
@@ -58,6 +60,8 @@ fn answers(db: &Connection) -> Result<()> {
 /// without a list answers by the rule of its kind. The attempt holder
 /// narrows in the same layout, so the Returns it strands are handed back.
 fn card_decisions(db: &Connection) -> Result<()> {
+    #[cfg(test)]
+    record_migration(versions::TIMER_ANSWERS);
     let present: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cards') WHERE name='decisions')",
@@ -89,6 +93,8 @@ fn card_decisions(db: &Connection) -> Result<()> {
 ///
 /// The step reads no clock: only sequence numbers order the events.
 fn hold_owners(db: &Connection) -> Result<()> {
+    #[cfg(test)]
+    record_migration(versions::TIMER_CARD_DECISIONS);
     for table in ["nodes", "node_archive"] {
         for (column, definition) in [
             ("hold_owner", "TEXT"),
@@ -125,6 +131,8 @@ fn hold_owners(db: &Connection) -> Result<()> {
 /// Layout 11 to 12: a team's key refusals are read newest first, for the
 /// team's status, through their own partial index.
 fn key_refusal_order(db: &Connection) -> Result<()> {
+    #[cfg(test)]
+    record_migration(versions::TIMER_HOLD_OWNERS);
     db.execute_batch("CREATE INDEX IF NOT EXISTS key_refusals_newest ON key_clears(team,at_ms,node) WHERE state='refused';")
         .map_err(storage)
 }
@@ -226,6 +234,31 @@ fn unheld_returns_of(db: &Connection, team: &str) -> Result<()> {
             .map_err(storage)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static MIGRATION_CALLS: std::cell::RefCell<Option<Vec<u32>>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn record_migration(from: u32) {
+    MIGRATION_CALLS.with(|slot| {
+        if let Some(calls) = slot.borrow_mut().as_mut() {
+            calls.push(from);
+        }
+    });
+}
+#[cfg(test)]
+pub(in crate::teams::store) fn observe_migrations() {
+    MIGRATION_CALLS.with(|slot| *slot.borrow_mut() = Some(Vec::new()));
+}
+#[cfg(test)]
+pub(in crate::teams::store) fn take_migration_calls() -> Vec<u32> {
+    MIGRATION_CALLS.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+}
+#[cfg(test)]
+pub(in crate::teams::store) fn migration_steps() -> Vec<u32> {
+    STEPS.iter().map(|(from, _)| *from).collect()
 }
 
 #[cfg(test)]

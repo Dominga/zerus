@@ -448,9 +448,11 @@ mod schema;
 #[allow(unused_imports)] // The actor's cancel step (package 8) reads this.
 pub use cancels::PendingCancel;
 #[cfg(test)]
-pub(super) use schema::after_fence;
-#[cfg(test)]
 pub(super) use schema::AFTER_FENCE;
-pub(super) use schema::{as_is, extend, fence, EXTENSION};
+#[cfg(test)]
+pub(super) use schema::{
+    after_fence, migration_steps, observe_migrations, take_migration_calls, EXTENSION,
+};
+pub(super) use schema::{as_is, extend, fence};
 #[cfg(test)]
 mod tests;

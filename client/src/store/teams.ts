@@ -67,6 +67,8 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
+  settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;
   /** The queue page's cursor; absent or null is the first page. */
   after?: string | null;
@@ -313,8 +315,9 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   const [confirmation, setConfirmation] = createSignal<{ call: TeamCall; confirmation: TeamConfirmation } | null>(null);
   /** Every call whose result is unknown, bounded and never evicted by another. */
   const [unresolved, setUnresolved] = createSignal<UnresolvedCall[]>([]);
-  /** The request ids whose invoke is in flight: each holds an admitted slot. */
-  const [sending, setSending] = createSignal<readonly string[]>([]);
+  /** Each in-flight request holds a slot and the team whose controls it locks. */
+  const [inFlight, setInFlight] = createSignal<ReadonlyMap<string, string>>(new Map());
+  const sending = () => [...inFlight().keys()];
   const [createIntent, setCreateIntent] = createSignal<CreateIntent | null>(null);
   /** Resolvers by team id, for the decisions that wait for that team's revision. */
   const pendingViews = new Map<string, Set<(view: TeamView | null) => void>>();
@@ -330,7 +333,8 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   let followGeneration = 0;
   let lastFollow: TeamFollow | undefined;
 
-  const busy = () => sending().length > 0;
+  const busy = (teamId?: string) => teamId === undefined
+    ? inFlight().size > 0 : [...inFlight().values()].includes(teamId);
   const unresolvedOf = (requestId: string) => unresolved().find((entry) => entry.call.request_id === requestId);
   function putUnresolved(call: TeamCall, detail: string, state: UnresolvedCall["state"]) {
     setUnresolved([...unresolved().filter((entry) => entry.call.request_id !== call.request_id), { call, detail, state }]);
@@ -771,7 +775,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     return send(call, source, () => transport.actAgain(call));
   }
   async function send(call: TeamCall, source: string, act: () => Promise<TeamOutcome>): Promise<TeamOutcome> {
-    setSending([...sending(), call.request_id]);
+    setInFlight((old) => new Map(old).set(call.request_id, call.team));
     try {
       const outcome = await act();
       return accept(call, outcome, source);
@@ -780,7 +784,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
       putUnresolved(call, detail, "uncertain");
       return { outcome: "uncertain", detail, request_id: call.request_id };
     } finally {
-      setSending(sending().filter((id) => id !== call.request_id));
+      setInFlight((old) => { const next = new Map(old); next.delete(call.request_id); return next; });
     }
   }
   function accept(call: TeamCall, outcome: TeamOutcome, source: string): TeamOutcome {

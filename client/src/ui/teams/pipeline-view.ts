@@ -67,12 +67,12 @@ export function memberWork(member: MemberView, cards: readonly TaskView[]): Memb
     if (["accepted", "cancelled"].includes(card.state)) continue;
     if (card.kind === "stage") {
       const stage = orphanStage(card);
-      if (stage.assignee === member.id && !roundDisagrees(stage, card.rounds)) work.push({ card, stage });
+      if ((stage.holder || card.holder || stage.assignee) === member.id && !roundDisagrees(stage, card.rounds)) work.push({ card, stage });
       continue;
     }
-    if (card.assignee === member.id) work.push({ card });
+    if ((card.holder || card.assignee) === member.id) work.push({ card });
     // Contradictory stage facts are marked on the card and assert no assignment.
-    for (const stage of card.stages) if (!closedStage(stage) && stage.assignee === member.id && stageAgrees(card, stage)) work.push({ card, stage });
+    for (const stage of card.stages) if (!closedStage(stage) && (stage.holder || stage.assignee) === member.id && stageAgrees(card, stage)) work.push({ card, stage });
   }
   return work;
 }

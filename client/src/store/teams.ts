@@ -45,7 +45,7 @@ export interface TeamMember {
 export interface TeamMemberCounts { total: number; not_created: number; active: number; paused: number; removed: number }
 export interface TeamNodeCounts { waiting: number; pending: number; in_progress: number; reported: number; accepted: number; cancelled: number }
 export interface TeamCounts { members: TeamMemberCounts; nodes: TeamNodeCounts; inbox: number; cards: number }
-export interface TeamStage { node: number; index: number; role: string; state: string; assignee: string; implementer: string; kind?: "review" | "test" | "land" | null; target?: number | null; round?: number | null }
+export interface TeamStage { holder?: string | null; node: number; index: number; role: string; state: string; assignee: string; implementer: string; kind?: "review" | "test" | "land" | null; target?: number | null; round?: number | null }
 export interface TeamTaskRef { project: string; uuid: string }
 export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
@@ -131,7 +131,7 @@ export interface TeamCall {
 }
 export type TeamOutcome =
   | { outcome: "done"; receipt: unknown; request_id: string }
-  | { outcome: "failed"; detail: string; code?: string; request_id: string }
+  | { outcome: "failed"; detail: string; code?: string; field?: string; request_id: string }
   | { outcome: "uncertain"; detail: string; request_id: string }
   | { outcome: "confirm"; confirmation: TeamConfirmation }
   | { outcome: "pending"; request_id: string };
@@ -222,7 +222,7 @@ export interface SessionIdentity { machine?: string | null; launchId?: string | 
 
 /** What the scanned list says about a session's team; an incomplete list says
  * `unknown`, never `none`. */
-export interface TeamOfSession { state: "lead" | "none" | "unknown"; team?: string }
+export interface TeamOfSession { state: "lead" | "none" | "unknown"; team?: string; exhausted?: boolean }
 
 /** The preview switch's answer: a refusal keeps hgs's own reason, and an
  * unknown result changes nothing on screen except a notice. */
@@ -485,7 +485,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     if (!found && scan.missing !== null) { requestListPage(scan.missing); return { state: "unknown" }; }
     requestListPage(null);
     if (found) return { state: "lead", team: found.id };
-    return scan.complete ? { state: "none" } : { state: "unknown" };
+    return scan.complete ? { state: "none" } : { state: "unknown", exhausted: scan.views.length > 0 };
   }
 
   /**

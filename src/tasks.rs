@@ -53,7 +53,9 @@ const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not recor
 
 // The Teams actor's measurement of a removed reviewer's stage (zerus-63rru.77).
 #[cfg(all(test, unix))]
-pub(crate) use team_deliver::{removed_stage_cancel, with_legacy_cancel, RealCancel};
+pub(crate) use team_deliver::{
+    fence_delivery_cycle, removed_stage_cancel, with_legacy_cancel, RealCancel,
+};
 
 /// Whether a failed send may have pasted its prompt: it was sent but not
 /// recorded, or its delivery is uncertain (the paste began, Enter or the

@@ -97,6 +97,9 @@ impl Source {
     pub(super) fn birth(&self) -> &str {
         &self.birth
     }
+    pub(super) fn directories(&self) -> (&Path, &Path, FileIdentity) {
+        (&self.state.path, &self.config.path, self.state.identity)
+    }
     pub(super) fn wire(&self) -> Value {
         json!({"state":self.state.wire(),"configuration":self.config.wire(),"image":self.image.wire()})
     }

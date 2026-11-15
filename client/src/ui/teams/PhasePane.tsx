@@ -5,6 +5,7 @@ import { newRequestId, teams, type TeamOutcome, type TeamView } from "../../stor
 import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow } from "../../store/team-phases";
 import { PhaseDraftEditor, type DraftSnapshot } from "./PhaseDraftEditor";
 import { phaseHeader } from "./phaseHeader";
+import { PhaseMetrics } from "./PhaseMetrics";
 import "../styles/team-phases.css";
 
 /** Layers groups the core's layer numbers. It computes no dependency order. */
@@ -89,6 +90,7 @@ export function PhasePane(props: {
       <Show when={!metadata().rows.some((p) => p.kind === "plan")}><p class="dim">{tr("No planned phases yet. Create a draft or ask the lead to submit one.")}</p></Show>
       <Show when={draft()}>{(d) => <>
         <header class="phase-header"><h3>{phaseHeader(d().phase).title}</h3><span class="tag">{phaseHeader(d().phase).state}</span><span class="tag">{phaseHeader(d().phase).mode}</span>
+          <PhaseMetrics metrics={d().metrics} readFailed={!!failed() || !!pane()?.list_failure || !!pane()?.draft_failure} />
           <Show when={phaseHeader(d().phase).barrier}><span class="dim">{phaseHeader(d().phase).barrier}</span></Show>
           <Show when={phaseHeader(d().phase).paused}><span class="dim">{phaseHeader(d().phase).paused}</span></Show>
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>

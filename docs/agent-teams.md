@@ -71,6 +71,27 @@ the binding changed, the tab asks you to open the team from Teams again. A
 similarly named session is never substituted. The binding stays available
 when you switch tabs of the same selected session.
 
+### Queue views
+
+The lead's Team tab offers **Board**, **Graph**, **Lanes** and **Layers**. Lanes shows
+one section for each member, including empty sections, and **Unassigned** last.
+A task with a verified current pipeline holder appears in that member's lane;
+otherwise its explicit stage assignment or task assignment/implementer is used.
+A member missing from this bounded view does not make a task disappear: it
+stays in Unassigned until a member can be verified. The view preserves every
+card on the returned page; it does not fetch settled tasks from the archive.
+
+Lanes uses only the current queue page. Current work comes first, followed by
+submitted, pending, waiting, draft, accepted and cancelled work. Within a state,
+stages come first in node order; queue tasks keep board-rank order, with task
+UUID and node as tie-breakers. This is a page-local display order, not a claim
+that every shown task is ready for a hand-out. Use the same **More…** and
+**First page** controls as the Board; changing modes does not start another read
+or timer. A card opens the existing task detail, including the parent task for
+a folded pipeline stage. Lane headers fold their cards; fold keys are bounded
+to the current roster. Refreshed snapshots keep unchanged cards and lane scroll
+containers. The mode is local to the current team workspace.
+
 Press **New team** in the screen header or its empty state. The `team.new`
 command is also listed in Settings > Keyboard. It has no default shortcut;
 assign one there to open New team from the keyboard. The dialog starts from
@@ -579,6 +600,22 @@ also clears an older stale mark in Backlog or To do. An attempt still being
 cancelled is settled before the send creates its new queue entry; a task
 still in In review cannot be resent.
 
+## Hand-outs refused before delivery
+
+A task-attempt fence can refuse a hand-out as `cutting_over`: nothing was
+reserved or sent. That closes the effect as not delivered and frees the task
+and member. The service checks again after its normal refusal backoff and
+hands the task out under a new effect when the fence admits it. It never
+replays the refused effect. An ordinary refusal before input follows the same
+rule; an unknown or uncertain delivery keeps its reservation and is never
+sent again automatically.
+
+A proven non-delivery does not open a `delivery_uncertain` inbox item. The
+service also reconciles such effects recorded by older versions and closes
+only the false item bound to their original outcome receipt, including after
+manual recovery. A genuine unknown delivery stays open. A refused reopen
+still hands the task back to the lead, with its own reason and hold.
+
 ## Project limits
 
 A hand-out is written with the lead as its actor and the member as the
@@ -642,7 +679,7 @@ tool approvals.
   shell; run it from the Zerus window." Commands that a lead or a member runs
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
-- Queue execution, a dependency Graph and draft phases in Layers are available.
+- Queue execution has Board, Graph and Lanes views; draft phases use Layers.
   Planning from a goal, phase approval/publication and phase acceptance are
   not yet available.
 - DeepSeek can be a lead or member with a host that proves each tool call

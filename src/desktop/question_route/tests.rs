@@ -93,6 +93,7 @@ mod inventory {
         ("native_statusline", NotACard),
         ("native_terminal", NotACard),
         ("native_usage", NotACard),
+        ("native_user_input", NotACard),
         ("process_tree", NotACard),
         ("provider_hook", NotACard),
         ("read-marks.json", NotACard),

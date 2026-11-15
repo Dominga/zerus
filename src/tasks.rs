@@ -299,11 +299,24 @@ fn machines(config: &Config) -> Result<Machines> {
 }
 
 fn machines_for(config: &Config, here: String) -> Result<Machines> {
+    let mut machines = machine_routes(config, here);
+    machines.bindings = crate::state::task_bindings().map_err(fail)?;
+    Ok(machines)
+}
+
+/// Machine names need no session inventory. List admission and paging happen
+/// before the selected rows ask for their local routing metadata.
+fn machine_routes(config: &Config, here: String) -> Machines {
     #[cfg(unix)]
     let peers = crate::swarm::verified_bindings(config, &here);
     #[cfg(not(unix))]
     let peers = BTreeMap::new();
-    Ok(Machines { here, selves: config.selves.clone(), peers, bindings: crate::state::task_bindings().map_err(fail)? })
+    Machines {
+        here,
+        selves: config.selves.clone(),
+        peers,
+        bindings: Vec::new(),
+    }
 }
 
 impl Machines {
@@ -709,8 +722,9 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
 }
 
 fn list(config: &Config, args: &[String]) -> Result<Value> {
-    let machines = machines(config)?;
-    let who = actor(&machines.here, args, false)?;
+    let here = crate::swarm::local_node_id(config).map_err(fail)?;
+    let who = actor(&here, args, false)?;
+    let mut machines = machine_routes(config, here);
     let (id, name) = project_arg(config, args, &who)?;
     let only = option(args, "--stage")?
         .map(Stage::parse)
@@ -718,7 +732,7 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         .map_err(fail)?;
     if let Some(limit) = option(args, "--limit")? {
         let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
-        return paged(config, args, (&id, &name), stage, limit, &machines);
+        return paged(config, args, (&id, &name), stage, limit, &mut machines);
     }
     for paging in ["--after", "--before", "--if-revision", "--session"] {
         if option(args, paging)?.is_some() {
@@ -739,15 +753,26 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
             continue;
         }
         for task in tasks.iter().filter(|t| t.stage().ok() == Some(stage)) {
-            out.push(view(task, &name, false, &machines)?);
+            out.push(row(task.view().map_err(fail)?, task.revision())?);
         }
+    }
+    sessions::for_rows(config, &mut machines, &out)?;
+    for value in &mut out {
+        *value = label_view(std::mem::take(value), &name, false, &[], &machines)?;
     }
     Ok(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
 }
 
 /// `task list --stage S --limit N`: one page of a stage, from the task index
 /// or, when it cannot answer, from the documents, in the same form.
-fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, limit: &str, machines: &Machines) -> Result<Value> {
+fn paged(
+    config: &Config,
+    args: &[String],
+    project: (&str, &str),
+    stage: Stage,
+    limit: &str,
+    machines: &mut Machines,
+) -> Result<Value> {
     let (id, name) = project;
     let limit = limit
         .parse::<usize>()
@@ -802,6 +827,7 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
         }
     }
     if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
+        sessions::for_rows(config, machines, rows)?;
         for row in rows {
             *row = label_view(std::mem::take(row), name, false, &[], machines)?;
         }
@@ -1013,21 +1039,25 @@ pub(crate) fn window(config: &Config, wanted: &str, limit: usize) -> Result<Valu
     if !(1..=index::MAX_LIMIT).contains(&limit) {
         return Err(fail(format!("a tasks window is between 1 and {}", index::MAX_LIMIT)));
     }
-    let machines = machines(config)?;
     let (id, name) = project(config, wanted)?;
     let pages = window_pages(&store(config, &id)?, limit)?;
+    let mut machines = machine_routes(config, crate::swarm::local_node_id(config).map_err(fail)?);
     // Every page has the same revision, counts and damaged tasks.
     let last = pages.last().cloned().unwrap_or_default();
     let mut tasks = Vec::new();
     let mut stages = serde_json::Map::new();
     for (stage, page) in LIST_STAGES.iter().zip(&pages) {
         for row in page["tasks"].as_array().cloned().unwrap_or_default() {
-            tasks.push(label_view(row, &name, false, &[], &machines)?);
+            tasks.push(row);
         }
         stages.insert(
             stage.as_str().to_owned(),
             json!({"total": last["counts"][stage.as_str()], "next": page["page"]["next"]}),
         );
+    }
+    sessions::for_rows(config, &mut machines, &tasks)?;
+    for row in &mut tasks {
+        *row = label_view(std::mem::take(row), &name, false, &[], &machines)?;
     }
     Ok(json!({
         "project": {"id": id, "name": name},

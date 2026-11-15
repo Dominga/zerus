@@ -281,7 +281,7 @@ pub fn answer_with(
         (None, updates)
     };
     let partial = upload.as_ref().is_some_and(|ack| !ack.complete);
-    let imported = store.import_updates(updates)?;
+    let imported = store.import_mobile_updates(updates)?;
     let range = request.range.unwrap_or_default();
     let theirs = request.inventory;
     let ours = range.narrow(inventories.phone(&theirs)?);

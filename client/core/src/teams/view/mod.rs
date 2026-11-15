@@ -539,6 +539,9 @@ pub struct TeamBar {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TeamView {
     pub bar: TeamBar,
+    /// Complete settings for editing; absent if this version cannot read every field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<zerus_team_plan::Settings>,
     pub members: Vec<MemberCard>,
     pub groups: Vec<BoardGroup>,
     /// Cards or stages over a bound were left out.

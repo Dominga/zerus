@@ -1071,6 +1071,10 @@ fn an_effect_cannot_authorize_a_different_valid_node_or_member() {
 fn delivery_cutover_repeats_reserve_nothing_and_recovery_never_sends() {
     let f = Fixture::new();
     let store = crate::tasks::store(&f.config, &f.task.project).unwrap();
+    // This control holds an already admitted task, after its first floor.
+    let mut task = store.load(&f.task.uuid).unwrap();
+    task.floor().unwrap();
+    store.save(&mut task).unwrap();
     let mut project = store.project().unwrap();
     project
         .set_cutover_hold(true, &Actor::Person, now())

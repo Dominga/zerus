@@ -252,6 +252,10 @@ mod snapshot {
         expected_page: usize,
         until: Instant,
     ) -> SnapshotResult<usize> {
+        // A private structural control can expire this validation's deadline
+        // after a known amount of checksum work, independent of scheduling.
+        #[cfg(test)]
+        let mut until = until;
         live(until)?;
         let bytes = &source.bytes;
         if bytes.is_empty() {
@@ -303,6 +307,15 @@ mod snapshot {
             if stored(&header[4..8]) != 0 {
                 committed = 32 + (index + 1) * frame;
             }
+            #[cfg(test)]
+            WAL_PROGRESS.with(|work| {
+                let (checked, expire_after) = work.get();
+                let checked = checked + 1;
+                work.set((checked, expire_after));
+                if expire_after == Some(checked) {
+                    until = Instant::now();
+                }
+            });
         }
         Ok(committed)
     }
@@ -335,6 +348,9 @@ mod snapshot {
     thread_local! {
         pub(in crate::state) static AFTER_DIRECTORY: DirectoryHook = const { DirectoryHook::new(None) };
         pub(in crate::state) static AFTER_READ: ReadHook = const { ReadHook::new(None) };
+        // Successfully checksummed frames and an optional deterministic
+        // expiry checkpoint. Production builds contain neither field.
+        pub(in crate::state) static WAL_PROGRESS: std::cell::Cell<(usize, Option<usize>)> = const { std::cell::Cell::new((0, None)) };
     }
 
     fn query_copy(
@@ -512,7 +528,9 @@ mod snapshot {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use snapshot::rollout_paths;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
-pub(in crate::state) use snapshot::{AFTER_DIRECTORY, AFTER_READ, MAX_SOURCE, RAW_OPENS};
+pub(in crate::state) use snapshot::{
+    AFTER_DIRECTORY, AFTER_READ, MAX_SOURCE, RAW_OPENS, WAL_PROGRESS,
+};
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests;

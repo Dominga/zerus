@@ -235,7 +235,9 @@ if 'resume' in args or '--resume' in args:
         before = paths[0].read_bytes()
         for flags in ([], ['--no-archives']):
             result = self.hgs('ls', '--json', *flags)
-            rows = json.loads(result)
+            computers = json.loads(result)
+            self.assertEqual(len(computers), 1)
+            rows = computers[0]['sessions']
             self.assertTrue(any(row['name'] == name for row in rows))
             self.assertTrue(any(row['name'] == unrelated for row in rows))
             self.assertEqual(paths[0].read_bytes(), before)

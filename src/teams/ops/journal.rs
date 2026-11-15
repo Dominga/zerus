@@ -62,7 +62,9 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
     let mut refs = references(request)?;
     if let Some(member) = &ctx.reply.member {
         let reference = format!("member:{member}");
-        if !refs.contains(&reference) { refs.push(reference); }
+        if !refs.contains(&reference) {
+            refs.push(reference);
+        }
     }
     if let Some(earlier) = ctx.superseded {
         let (old, new) = replacement(ctx, earlier)?;

@@ -172,7 +172,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
     // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
     private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
-    private val taskSync by lazy { TaskSync({ api }, taskReplicas, mediaUnavailable = getApplication<Application>().getString(R.string.task_media_exchange_update), heldSend = getApplication<Application>().getString(R.string.task_send_unknown_hold)) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas, mediaUnavailable = getApplication<Application>().getString(R.string.task_media_exchange_update), heldSend = getApplication<Application>().getString(R.string.task_send_unknown_hold), capabilities = { machineFeatures }) }
     private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
     private var taskDigestsAt = 0L
     private var taskSyncRunning = false
@@ -2989,7 +2989,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session,
-                    computerName(key, route.computerId))) {
+                    computerName(key, route.computerId), sessionId = route.sessionId)) {
                     TaskOutcome.Done -> "Sent to ${route.session}"
                     is TaskOutcome.Refused -> outcome.reason
                     is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
@@ -3038,7 +3038,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         // The first page may already hold older tasks; showing them needs no read.
         if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
         doneExpanded = more || keepExpanded && doneExpanded
-        val chosen = tasksChosen
+        val chosen = displayedTaskChosen()
         val session = if (!tasksOnlyThisSession) null else {
             TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
             SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId)

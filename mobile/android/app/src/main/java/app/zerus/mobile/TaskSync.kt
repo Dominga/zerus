@@ -73,6 +73,8 @@ internal class TaskExchangeEvidence(tasks: Collection<String>, private val media
 
 object TaskSyncPlan {
     const val OPERATION = "task_exchange"
+    const val IDENTITY_FEATURE = "task_session_identity_v2"
+    const val UPLOAD_FEATURE = "task_media_upload_v1"
 
     /** Each catalogued project's computers that are online, not last known, and offer the exchange, as their relay does. */
     fun peers(digests: Map<ProjectKey, Map<String, String>>, relayOperations: Map<String, Set<String>>,
@@ -147,9 +149,16 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
 
     /** Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back. */
     suspend fun send(connection: Connection, key: ProjectKey, name: String, computerId: String, task: String, session: String,
-                     computerName: String = computerId, sessionId: String = ""): TaskOutcome =
-        act(connection, key, name, computerId, computerName, "task_send",
-            JSONObject().put("schema", 1).put("project", key.id).put("task", task).put("session", session))
+                     computerName: String = computerId, sessionId: String = ""): TaskOutcome {
+        val identity = identitySchema(connection, computerId, sessionId)
+        val payload = JSONObject().put("schema", if (identity) 2 else 1).put("project", key.id).put("task", task).put("session", session)
+        if (identity) payload.put("session_id", sessionId)
+        return act(connection, key, name, computerId, computerName, "task_send", payload)
+    }
+
+    private fun identitySchema(connection: Connection, computerId: String, sessionId: String) =
+        connection.protocolVersion == 2 && sessionId.isNotEmpty() &&
+            TaskSyncPlan.IDENTITY_FEATURE in capabilities()[MachineKey(connection.id, computerId)].orEmpty()
 
     /** A Send now that may have happened holds the task until an exchange with that computer shows its stage. */
     fun held(task: String) = sends.containsKey(task)
@@ -181,9 +190,15 @@ class TaskSync(private val api: () -> RelayApi, private val replicas: TaskReplic
     /** One page of that computer's Done list; with `session`, of the tasks sent to it. */
     suspend fun donePage(connection: Connection, key: ProjectKey, computerId: String, before: DoneCursor?, limit: Int = 50,
                          session: app.zerus.mobile.replica.SessionRef? = null): DonePage {
-        val payload = JSONObject().put("schema", 1).put("project", key.id).put("limit", limit)
+        require(connection.id == key.connectionId)
+        val identity = session != null && identitySchema(connection, computerId, session.sessionId)
+        val payload = JSONObject().put("schema", if (identity) 2 else 1).put("project", key.id).put("limit", limit)
         before?.let { payload.put("before", JSONObject().put("at", it.at).put("uuid", it.uuid)) }
-        session?.let { payload.put("session", JSONObject().put("machine", it.machine).put("session", it.session)) }
+        session?.let {
+            val ref = JSONObject().put("machine", it.machine).put("session", it.session)
+            if (identity) ref.put("session_id", it.sessionId)
+            payload.put("session", ref)
+        }
         val receipt = request(connection, computerId, "task_done", payload)
         check(receipt.string("state") == "completed") { receipt.string("error").ifBlank { "The computer did not list its Done tasks." } }
         val result = receipt.optJSONObject("result") ?: error("The computer's Done list has no result.")

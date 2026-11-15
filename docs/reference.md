@@ -2214,8 +2214,12 @@ line breaks; agent replies render Markdown. New main-session prompt hooks retain
 up to 32,000 characters for Activity separately from their short list previews.
 Larger displayed messages have **Show more** and **Show less** controls. If only
 part of a message is available, Activity says so and points to Terminal. Older
-clipped previews can recover their body from the bounded native-message window
-or one unambiguous attached-message receipt. This display repair adds no row,
+clipped previews can recover their body only through an existing exact native
+message, request or typed Kimi-turn binding in the same conversation. A shared
+prefix, nearby timestamp or one available candidate does not establish identity.
+Unbound pre-upgrade previews stay explicitly partial. Attached-message receipts
+remain reserved to their already bound row, including complete or local rows.
+This display repair adds no row,
 sends no input and never confirms delivery or native acceptance.
 The copy button at the right of a
 reply's header puts its Markdown source on the clipboard; a text selection still

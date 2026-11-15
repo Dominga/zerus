@@ -143,6 +143,7 @@ fn user_message(event: &Value) -> Option<Value> {
         .collect::<Vec<_>>()
         .join("\n");
     let mut body = journal::activity_message_body("kimi_wire", &text, at, id);
+    body["kimi_turn_id"] = event["turnId"].clone();
     let mut remaining = journal::MESSAGE_TEXT_LIMIT;
     let retained: Vec<_> = parts
         .iter()
@@ -334,7 +335,13 @@ fn read_details(record: &Value, include_turns: bool) -> Result<(Vec<Value>, Vec<
         (&mut file).take(MAX_BYTES)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        messages.extend(wire_messages(&bytes, offset > 0));
+        let mut found = wire_messages(&bytes, offset > 0);
+        for message in &mut found {
+            if message["type"] == "UserMessageBody" {
+                message["kimi_conversation_id"] = record["conversation_id"].clone();
+            }
+        }
+        messages.extend(found);
         if include_turns {
             (turns, complete) = wire_turns(&bytes, offset > 0);
             complete &= file.metadata().map_err(|e| e.to_string())?.len() == length;
@@ -594,6 +601,20 @@ mod full_own_message {
         let messages = wire_messages((row.to_string() + "\n").as_bytes(), false);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["detail"], text);
+        assert_eq!(messages[0]["kimi_turn_id"], 3);
+        let temp = tempfile::tempdir().unwrap();
+        let cid = uuid::Uuid::new_v4().to_string();
+        let path = temp
+            .path()
+            .join("sessions/workspace")
+            .join(&cid)
+            .join("agents/main/wire.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, row.to_string() + "\n").unwrap();
+        let found =
+            read(&json!({"agent":"kimi","agent_home":temp.path(),"conversation_id":cid})).unwrap();
+        assert_eq!(found[0]["kimi_turn_id"], 3);
+        assert_eq!(found[0]["kimi_conversation_id"], cid);
         for changed in [
             json!({"agentId":"peer"}),
             json!({"origin":{"kind":"system"}}),

@@ -9,12 +9,16 @@ const echo = `[Image #1] (Inspect the attached image at ${JSON.stringify(path)})
 const full = `${"Before the image. ".repeat(67)}${echo}\n${"After the image. ".repeat(28)}END OF MESSAGE`;
 const clip = (text: string) => Array.from(text.trim()).slice(0, 1200).join("") + "…";
 const hook = (detail: string, extra = {}): ActivityEvent => ({ seq: 1, type: "UserPromptSubmit", at: 100, detail, ...extra });
-const native = (source: string, detail = full): ActivityEvent => ({ type: "UserMessageBody", source, at: 100.01, detail, message_id: "native-1" });
-const items = (events: ActivityEvent[], provider: ActivityEvent[] = [], extra = {}) => buildTranscript(events, { provider_messages: provider, ...extra }) as ActivityItem[];
+const native = (source: string, detail = full): ActivityEvent => ({ type: "UserMessageBody", source, at: 100.01, detail, message_id: "native-1", conversation_id: "cid", ...(source === "kimi_wire" ? { kimi_turn_id: 1, kimi_conversation_id: "cid" } : {}) });
+const items = (events: ActivityEvent[], provider: ActivityEvent[] = [], extra = {}) => buildTranscript(events, { provider_messages: provider, conversation_id: "cid", ...extra }) as ActivityItem[];
+
+const boundHook = (source: string, detail: string, extra = {}) => hook(detail, source === "kimi_wire"
+  ? { type: "TurnStarted", turn_origin: "user", kimi_turn_id: 1, kimi_conversation_id: "cid", ...extra }
+  : { source, message_id: "native-1", ...extra });
 
 describe("full own Activity messages", () => {
-  it.each(["codex_transcript", "claude_transcript", "kimi_wire"])("restores a clipped hook from %s without adding a row", source => {
-    const shown = items([hook(clip(full))], [native(source)]);
+  it.each(["codex_transcript", "claude_transcript", "kimi_wire"])("restores an exactly bound row from %s without adding a row", source => {
+    const shown = items([boundHook(source, clip(full))], [native(source)]);
     expect(shown).toHaveLength(1);
     expect(shown[0]).toMatchObject({ kind: "user", body: full });
     expect(shown[0].bodyTruncated).not.toBe(true);
@@ -30,17 +34,18 @@ describe("full own Activity messages", () => {
     const clean = full.replace(echo, "[Image #1]");
     const receipts = [{ source: "hgs_delivery", type: "UserPromptSubmit", message_id: "req-image", submitted_text: full, detail: clean,
       attachments: [{ name: "image.png", mime: "image/png", bytes: 68, reference: "[Image #1]", request_id: "req-image", index: 0 }] }];
-    const shown = items([hook(clip(full))], [native("codex_transcript")], { attachment_messages: receipts });
+    const shown = items([boundHook("codex_transcript", clip(full))], [native("codex_transcript")], { attachment_messages: receipts });
     expect(shown).toHaveLength(1);
     expect(shown[0]).toMatchObject({ body: clean, echoBody: full });
     expect(shown[0].attachments).toHaveLength(1);
   });
 
-  it("recovers a legacy preview from one timed exact receipt even outside the native window", () => {
+  it("keeps an unbound legacy preview partial despite a nearby complete receipt", () => {
     const clean = full.replace(echo, "[Image #1]");
     const receipt = { source: "hgs_delivery", type: "UserPromptSubmit", message_id: "req-image", at: 99.5, submitted_text: full, detail: clean,
       attachments: [{ name: "image.png", mime: "image/png", bytes: 68, reference: "[Image #1]", request_id: "req-image", index: 0 }] };
-    expect(items([hook(clip(full))], [], { attachment_messages: [receipt] })[0]).toMatchObject({ body: clean, echoBody: full, bodyTruncated: false });
+    expect(items([hook(clip(full))], [], { attachment_messages: [receipt] })[0]).toMatchObject({ body: clip(full), bodyTruncated: true });
+    expect(items([hook(clip(full), { attachment_request_id: "req-image" })], [], { attachment_messages: [receipt] })[0]).toMatchObject({ body: clean, echoBody: full, bodyTruncated: false });
     for (const receipts of [[receipt, { ...receipt, message_id: "other", submitted_text: full + "Other ending" }], [{ ...receipt, at: 80 }], [{ ...receipt, at: undefined }]]) {
       expect(items([hook(clip(full))], [], { attachment_messages: receipts })[0].body).toBe(clip(full));
     }
@@ -48,9 +53,9 @@ describe("full own Activity messages", () => {
 
   it("uses the separate bounded body window, including a Kimi user part after startup context", () => {
     const body = { ...native("kimi_wire"), message_parts: ["Startup hook context", full] };
-    const shown = items([hook(clip(full), { type: "TurnStarted", turn_origin: "user" })], [], { user_message_bodies: [body] });
+    const shown = items([boundHook("kimi_wire", clip(full))], [], { user_message_bodies: [body] });
     expect(shown[0].body).toBe(full);
-    expect(items([hook(clip(full))], [body], { user_message_bodies: [body] })[0].body).toBe(full);
+    expect(items([boundHook("kimi_wire", clip(full))], [body], { user_message_bodies: [body] })[0].body).toBe(full);
   });
 
   it("keeps the local clean message and one row when a full raw hook arrives", () => {
@@ -64,20 +69,20 @@ describe("full own Activity messages", () => {
   });
 
   it("keeps ambiguous, unrelated, child and system rows untouched and marks an old preview explicitly", () => {
-    const old = hook(clip(full));
+    const old = boundHook("codex_transcript", clip(full));
     expect(items([old], [native("codex_transcript", full + "OTHER"), native("codex_transcript")])[0].body).toBe(old.detail);
     expect(items([old], [native("codex_transcript", "Different")])[0].bodyTruncated).toBe(true);
     for (const extra of [{ agent_id: "child" }, { origin: "system" }, { inherited_from: "other" }]) {
-      expect(items([hook(clip(full), extra)], [native("codex_transcript")])[0].body).not.toBe(full);
+      expect(items([boundHook("codex_transcript", clip(full), extra)], [native("codex_transcript")])[0].body).not.toBe(full);
     }
-    const repeated = items([old, hook(clip(full), { seq: 2, at: 100.5 })], [native("codex_transcript")]);
+    const repeated = items([old, boundHook("codex_transcript", clip(full), { seq: 2, at: 100.5 })], [native("codex_transcript")]);
     expect(repeated.filter(item => item.body === full)).toHaveLength(0);
     expect(repeated).toHaveLength(2);
   });
 
   it("matches Unicode characters, not UTF-16 units, and does not accept an arbitrary prefix", () => {
     const unicode = "😀".repeat(1210) + "TAIL";
-    expect(items([hook(clip(unicode))], [native("claude_transcript", unicode)])[0].body).toBe(unicode);
-    expect(items([hook(full.slice(0, 300) + "…")], [native("codex_transcript")])[0].body).not.toBe(full);
+    expect(items([boundHook("claude_transcript", clip(unicode))], [native("claude_transcript", unicode)])[0].body).toBe(unicode);
+    expect(items([boundHook("codex_transcript", full.slice(0, 300) + "…")], [native("codex_transcript")])[0].body).not.toBe(full);
   });
 });

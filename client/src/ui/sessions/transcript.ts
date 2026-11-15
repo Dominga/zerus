@@ -5,7 +5,7 @@ import type { RouteActivity } from "../../store/questionRouteActivity";
 import { imageSize } from "./attachment-image";
 import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
-import { matchesOwnPreview, ownMessageText, ownMessageTruncated, restoreOwnMessages } from "./full-own-text";
+import { ownMessageText, ownMessageTruncated, restoreOwnMessages } from "./full-own-text";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -155,32 +155,27 @@ export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary
   const events = [...given];
   const valid = receipts.filter(receipt => receipt.source === "hgs_delivery" && receipt.attachments?.length
     && typeof receipt.submitted_text === "string" && receipt.submitted_text.trim() && echoMatchesFiles(receipt.submitted_text, receipt.attachments));
-  const matches = (event: ActivityEvent, receipt: ActivityEvent) => {
-    if (event.source === "hgs_voice" || childEvent(event) || event.origin || event.turn_origin && event.turn_origin !== "user"
-      || event.inherited_from || event.attachments?.length || !PROMPTS.has(event.type ?? "")) return false;
-    const full = String(receipt.submitted_text);
-    if (ownMessageText(event).trim() === full.trim()) return true;
-    // The legacy 1200-character hook projection is deterministic. Require
-    // one timed receipt and one row; a common prefix alone is insufficient.
-    return event.message_text === undefined && matchesOwnPreview(event.detail ?? "", full)
-      && typeof event.at === "number" && Number.isFinite(event.at) && event.at > 0
-      && typeof receipt.at === "number" && Number.isFinite(receipt.at) && receipt.at > 0
-      && Math.abs(event.at - receipt.at) <= 10;
-  };
+  const own = (event: ActivityEvent) => event.source !== "hgs_voice" && !childEvent(event) && !event.origin
+    && (!event.turn_origin || event.turn_origin === "user") && !event.inherited_from && PROMPTS.has(event.type ?? "");
+  const requests = (event: ActivityEvent): string[] => [...new Set([
+    event.attachment_request_id, ...(event.source === "hgs_delivery" ? [event.message_id] : []),
+    ...(event.attachments ?? []).map(file => file.request_id),
+  ].filter((id): id is string => typeof id === "string" && !!id))];
   let changed = false;
   for (const receipt of valid) {
-    const files = Array.isArray(receipt.attachments) ? receipt.attachments : [];
-    const submitted = typeof receipt.submitted_text === "string" ? receipt.submitted_text.trim() : "";
-    if (receipt.source !== "hgs_delivery" || !files.length || !submitted || !echoMatchesFiles(submitted, files)) continue;
-    if (receipts.filter((other) => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
-    const exact: number[] = [];
-    events.forEach((event, index) => { if (matches(event, receipt)) exact.push(index); });
-    if (exact.length !== 1) continue;
-    const at = exact[0];
-    const event = events[at];
-    if (valid.filter(other => matches(event, other)).length !== 1) continue;
+    const request = typeof receipt.message_id === "string" ? receipt.message_id : "";
+    const submitted = String(receipt.submitted_text).trim();
+    if (!request || receipts.filter(other => other.message_id === request).length !== 1 || receipts.filter(other => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
+    // Every already bound row reserves its request, including complete rows,
+    // local cards and rows that are no longer eligible for body replacement.
+    const owners = events.flatMap((event, index) => requests(event).includes(request) ? [index] : []);
+    if (owners.length > 1) continue;
+    const exact = owners.length ? owners : events.flatMap((event, index) => own(event) && !requests(event).length && !event.attachments?.length
+      && ownMessageText(event).trim() === submitted ? [index] : []);
+    if (exact.length !== 1 || !own(events[exact[0]])) continue;
+    const at = exact[0], event = events[at];
     events[at] = {
-      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: files,
+      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: receipt.attachments,
       message_text: typeof receipt.detail === "string" ? receipt.detail : "", message_text_truncated: false,
       attachment_echo: receipt.submitted_text, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
     };
@@ -350,22 +345,17 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
     if (sent && match < 0 && row.attachments.length) {
       source.forEach((e, i) => {
         if (eligible(e, i) && !e.attachments?.length
-          && submitted && (e.detail ?? "").trim() === submitted) exact.push(i);
+          && submitted && ownMessageText(e).trim() === submitted) exact.push(i);
       });
       const competing = candidates.filter((other) => other.status !== "error" && other.attachments.length && submittedOf(other) === submitted).length;
       // Qt also remembers which of several exact events a row was bound to; with one it is that one.
       if (competing === 1 && exact.length === 1) match = exact[0];
     }
     if (sent && match < 0 && !exact.length) {
-      let nearest = NEAREST;
-      const head = submitted.slice(0, 1000);
-      source.forEach((e, i) => {
-        if (!eligible(e, i)) return;
-        const body = (e.detail ?? "").trim();
-        const distance = Math.abs((e.at ?? NaN) - row.submitted_at);
-        if (e.source !== "hgs_voice" && !e.attachments?.length && distance <= nearest && submitted && body
-          && (body.startsWith(head) || submitted.startsWith(body.slice(0, 1000)))) { match = i; nearest = distance; }
-      });
+      const full = source.flatMap((e, i) => eligible(e, i) && !e.attachments?.length
+        && !e.message_id && !e.attachment_request_id && submitted && ownMessageText(e).trim() === submitted
+        && Math.abs((e.at ?? NaN) - row.submitted_at) <= NEAREST ? [i] : []);
+      if (full.length === 1) match = full[0];
     }
     if (match >= 0) {
       claimed.add(match);

@@ -538,6 +538,37 @@ mod tests {
 mod full_own_message {
     use super::*;
     #[test]
+    fn handwritten_oversize_native_row_does_not_supply_the_missing_older_body() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = temp.path().join(format!("rollout-{id}.jsonl"));
+        let prefix = "Common instructions. "
+            .repeat(70)
+            .chars()
+            .take(1200)
+            .collect::<String>();
+        let a = prefix.clone() + " KEEP the file";
+        let b = prefix + " DELETE the file";
+        let old = json!({"type":"response_item","timestamp":100.0,"payload":{"type":"message","role":"user",
+            "content":[{"type":"input_text","text":a},{"type":"input_image","image_url":"x".repeat(LINE_BYTES)}]}});
+        let new = json!({"type":"response_item","timestamp":105.0,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":b}]}});
+        std::fs::write(
+            &path,
+            json!({"type":"session_meta","payload":{"id":id}}).to_string()
+                + "\n"
+                + &old.to_string()
+                + "\n"
+                + &new.to_string()
+                + "\n",
+        )
+        .unwrap();
+        let shown = read_activity(&json!({"agent":"codex","conversation_id":id,"transcript":path}))
+            .unwrap();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["detail"], b);
+    }
+
+    #[test]
     fn native_codex_and_claude_user_text_is_available_for_activity_hydration() {
         let text = "before ".repeat(170)
             + "[Image #1] (Inspect the attached image at \"/example/image.png\") AFTER IMAGE";

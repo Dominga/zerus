@@ -191,6 +191,7 @@ public actor TaskSync {
     private let clock: @Sendable () -> Date
     private let mediaUnavailable: String
     private let heldSend: String
+    private let capabilities: @MainActor @Sendable () -> [MachineKey: Set<String>]
     private var waiting: [PeerKey: Date] = [:]
     private var quiet: [PeerKey: Quiet] = [:]
     private var locked: Set<ProjectKey> = []
@@ -202,15 +203,17 @@ public actor TaskSync {
     private var known: Set<ProjectKey> = []
 
     public init(client: RelayClient, replicas: TaskReplicas, exchangeTimeout: Duration = .seconds(300),
-                clock: @escaping @Sendable () -> Date = Date.init,
                 mediaUnavailable: String = "Update Zerus on this computer to transfer this task's media.",
-                heldSend: String = "It may have been sent already; its stage arrives with the next sync") {
+                heldSend: String = "It may have been sent already; its stage arrives with the next sync",
+                capabilities: @escaping @MainActor @Sendable () -> [MachineKey: Set<String>] = { [:] },
+                clock: @escaping @Sendable () -> Date = Date.init) {
         self.client = client
         self.replicas = replicas
         self.exchangeTimeout = exchangeTimeout
         self.clock = clock
         self.mediaUnavailable = mediaUnavailable
         self.heldSend = heldSend
+        self.capabilities = capabilities
     }
 
     /// Exchanges `key`'s tasks with each of `peers` whose digest is not the phone's; the failures by computer ID.
@@ -288,7 +291,7 @@ public actor TaskSync {
 
     /// Send now: the phone's edits reach the session's computer first, then it sends, then its copy comes back.
     public func send(_ connection: Connection, _ key: ProjectKey, name: String, computerId: String, task: String,
-                     session: String, computerName: String? = nil) async -> TaskOutcome {
+                     session: String, computerName: String? = nil, sessionId: String = "") async -> TaskOutcome {
         let payload: JSONObject = ["schema": 1, "project": .string(key.id), "task": .string(task), "session": .string(session)]
         return await act(connection, key, name: name, computerId: computerId, computerName: computerName ?? computerId,
                          operation: "task_send", payload: payload)

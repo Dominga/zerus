@@ -150,7 +150,9 @@ pub(crate) fn agent_refusal() -> Option<Value> {
     }
     match super::dsh::host_check() {
         super::dsh::HostCheck::Outside => None,
-        super::dsh::HostCheck::Under => Some(json!({"ok": false, "error": "agent_refused"})),
+        super::dsh::HostCheck::Under | super::dsh::HostCheck::Unregistered => {
+            Some(json!({"ok": false, "error": "agent_refused"}))
+        }
         super::dsh::HostCheck::Unverified(message) => {
             Some(json!({"ok": false, "error": "host_unverified", "message": message}))
         }

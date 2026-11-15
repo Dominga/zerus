@@ -37,7 +37,7 @@ mod teams;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod person;
 mod team_deliver;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) use team_deliver::planned::write as create_planned_task_for_test;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use team_deliver::{PROJECT_LIMIT, TERMINAL_WAITING};

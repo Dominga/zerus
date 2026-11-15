@@ -42,6 +42,9 @@ fn member_cards(status: &Value) -> Vec<MemberCard> {
             session: session(member),
             model: optional_name(member, "model"),
             person_stopped: flag(member, "person_stopped"),
+            effort: optional_name(member, "effort"),
+            account_choice: super::editing::choice(member),
+            open_work: optional_count(member, "open_work"),
         })
         .collect()
 }
@@ -75,7 +78,19 @@ fn is_stage(node: &Value) -> bool {
 fn card(node: &Value) -> QueueCard {
     QueueCard {
         assigned_base: optional_name(node, "assigned_base"),
+        deps_editable: node.get("deps_editable").and_then(Value::as_bool),
         node: count(node, "id"),
+        deps: graph::dependencies(node),
+        phase: node
+            .get("phase")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .filter(|n| *n > 0),
+        origin: node
+            .get("origin")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok()),
+        layer: None,
         title: text(node, "title", LINE_CHARS),
         state: or_default(node, "state", "draft"),
         task: task_ref(node),
@@ -177,7 +192,8 @@ fn group_by_state(mut cards: Vec<QueueCard>) -> Vec<BoardGroup> {
 
 /// The queue as the board's groups.
 pub(super) fn board(nodes: &[Value]) -> (Vec<BoardGroup>, bool) {
-    let (cards, truncated) = fold_stages(nodes);
+    let (mut cards, truncated) = fold_stages(nodes);
+    graph::layers(&mut cards);
     (group_by_state(cards), truncated)
 }
 
@@ -188,6 +204,7 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
     let (groups, truncated) = board(array(queue, "rows"));
     let revision = count(team, "revision");
     TeamView {
+        plan: None,
         bar: TeamBar {
             id: name(team, "id"),
             project: name(team, "project"),
@@ -202,6 +219,8 @@ pub fn team(status: &Value, queue: &Value) -> TeamView {
         },
         settings: crate::teams::settings::complete(&team["settings"]),
         members: member_cards(status),
+        member_roles: super::editing::roles(status),
+        edit_goal: super::editing::goal(status),
         groups,
         truncated,
         next: next_cursor(queue),

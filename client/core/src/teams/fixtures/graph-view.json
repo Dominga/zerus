@@ -1,0 +1,259 @@
+{
+  "bar": {
+    "id": "00000000-0000-4000-8000-00000000beef",
+    "project": "example-project",
+    "name": "Fixes",
+    "status": "running",
+    "goal": "",
+    "lead": "lead",
+    "integration_branch": "zerus/team/fixes",
+    "base_commit": "0123456789abcdef0123456789abcdef01234567",
+    "revision": 13,
+    "counts": {
+      "members": {
+        "total": 4,
+        "not_created": 2,
+        "active": 2,
+        "paused": 0,
+        "removed": 0
+      },
+      "nodes": {
+        "waiting": 0,
+        "pending": 4,
+        "in_progress": 0,
+        "reported": 0,
+        "accepted": 0,
+        "cancelled": 0
+      },
+      "inbox": 0,
+      "cards": 0
+    }
+  },
+  "settings": {
+    "delegations": {
+      "accept_results": true,
+      "answer_members": true,
+      "confirm_trust": true,
+      "resume_exited": true,
+      "merge_accepted": true
+    },
+    "caps": {
+      "max_members": 6,
+      "max_phase_tasks": 50,
+      "max_open_tasks": 500,
+      "max_open_questions": 3
+    },
+    "timers": {
+      "report_timeout_seconds": 120,
+      "start_timeout_seconds": 180,
+      "inbox_interval_seconds": 120,
+      "remind_lead_minutes": 15,
+      "remind_person_minutes": 60,
+      "lead_stall_minutes": 20,
+      "answer_escalate_minutes": 10,
+      "resume_limit_per_hour": 3
+    },
+    "queue": true,
+    "routing": "direct",
+    "plan_approval": "review",
+    "phase_acceptance": "lead",
+    "integration": "branch",
+    "land_allowed": false
+  },
+  "members": [
+    {
+      "id": "lead",
+      "role": "lead",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "lead": true,
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+      },
+      "model": null,
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
+    },
+    {
+      "id": "m1",
+      "role": "developer",
+      "agent": "claude",
+      "account": "account-example",
+      "state": "active",
+      "lead": false,
+      "session": {
+        "machine": "00000000-0000-4000-8000-0000000000aa",
+        "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+      },
+      "model": null,
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
+    },
+    {
+      "id": "m2",
+      "role": "developer",
+      "agent": "claude",
+      "account": "",
+      "state": "not_created",
+      "lead": false,
+      "session": null,
+      "model": null,
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
+    },
+    {
+      "id": "m3",
+      "role": "reviewer",
+      "agent": "claude",
+      "account": "",
+      "state": "not_created",
+      "lead": false,
+      "session": null,
+      "model": null,
+      "person_stopped": false,
+      "account_choice": {
+        "mode": "freest"
+      },
+      "open_work": 0
+    }
+  ],
+  "groups": [
+    {
+      "state": "draft",
+      "cards": []
+    },
+    {
+      "state": "waiting",
+      "cards": []
+    },
+    {
+      "state": "pending",
+      "cards": [
+        {
+          "deps_editable": true,
+          "node": 1,
+          "title": "Task 1",
+          "state": "pending",
+          "task": {
+            "project": "example-project",
+            "uuid": "00000000-0000-4000-8000-000000000001"
+          },
+          "role": "developer",
+          "pipeline": "reviewed",
+          "assignee": "",
+          "implementer": "",
+          "rank": "a01",
+          "round": 1,
+          "kind": "task",
+          "rounds": 3,
+          "held": false,
+          "admitted": true,
+          "integrated": false,
+          "decided_by": "",
+          "stages": [],
+          "holder": null,
+          "pending_decision": null,
+          "pending_replaceable": false
+        },
+        {
+          "deps_editable": true,
+          "node": 2,
+          "deps": [
+            {
+              "node": 1,
+              "kind": "soft"
+            }
+          ],
+          "layer": 1,
+          "title": "Task 2",
+          "state": "pending",
+          "task": {
+            "project": "example-project",
+            "uuid": "00000000-0000-4000-8000-000000000002"
+          },
+          "role": "developer",
+          "pipeline": "reviewed",
+          "assignee": "",
+          "implementer": "",
+          "rank": "a02",
+          "round": 1,
+          "kind": "task",
+          "rounds": 3,
+          "held": false,
+          "admitted": true,
+          "integrated": false,
+          "decided_by": "",
+          "stages": [],
+          "holder": null,
+          "pending_decision": null,
+          "pending_replaceable": false
+        },
+        {
+          "deps_editable": true,
+          "node": 3,
+          "deps": [
+            {
+              "node": 2
+            },
+            {
+              "node": 4
+            }
+          ],
+          "layer": 2,
+          "title": "Task 3",
+          "state": "pending",
+          "task": {
+            "project": "example-project",
+            "uuid": "00000000-0000-4000-8000-000000000003"
+          },
+          "role": "developer",
+          "pipeline": "reviewed",
+          "assignee": "",
+          "implementer": "",
+          "rank": "a03",
+          "round": 1,
+          "kind": "task",
+          "rounds": 3,
+          "held": false,
+          "admitted": true,
+          "integrated": false,
+          "decided_by": "",
+          "stages": [],
+          "holder": null,
+          "pending_decision": null,
+          "pending_replaceable": false
+        }
+      ]
+    },
+    {
+      "state": "in_progress",
+      "cards": []
+    },
+    {
+      "state": "reported",
+      "cards": []
+    },
+    {
+      "state": "accepted",
+      "cards": []
+    },
+    {
+      "state": "cancelled",
+      "cards": []
+    }
+  ],
+  "truncated": false,
+  "next": "t1.eyJzY29wZSI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwYmVlZjpub2RlczpOb25lIiwiY2VpbGluZyI6NCwiYWZ0ZXIiOjMsInJhbmsiOiJhMDMifQ",
+  "revision": 13
+}

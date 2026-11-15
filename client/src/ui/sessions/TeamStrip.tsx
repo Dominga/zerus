@@ -1,12 +1,9 @@
 import { Show } from "solid-js";
 import type { TeamSummary } from "../../store/teams";
 import { tr } from "../../i18n";
+import { teamStatusLabel } from "../teams/team-status";
 
 // Adapted from WhiteWh's TeamStrip/TeamBar (12d02d58a, 065ebb036).
-const TEAM_STATUS: Record<string, () => string> = {
-  running: () => tr("Running"), planning: () => tr("Planning"), paused: () => tr("Paused"),
-  stuck: () => tr("Stuck"), finished: () => tr("Finished"), stopped: () => tr("Stopped"), archived: () => tr("Archived"),
-};
 const count = (value: number, more: boolean) => `${value}${more ? "+" : ""}`;
 
 function TeamBar(props: { label: string; done: number; total: number; approximate: boolean; muted?: boolean }) {
@@ -20,7 +17,7 @@ function TeamBar(props: { label: string; done: number; total: number; approximat
 /** The bounded list supplies everything; rendering never follows a team view. */
 export function TeamStrip(props: { team: TeamSummary; onOpen: () => void }) {
   const p = () => props.team.progress!;
-  const status = () => p().stuck ? tr("Stuck") : (TEAM_STATUS[props.team.status]?.() ?? props.team.status);
+  const status = () => p().stuck ? tr("Stuck") : teamStatusLabel(props.team.status);
   const members = () => {
     const n = p().members;
     const label = n === 1 ? tr("%n member", n) : tr("%n members", n);

@@ -1,5 +1,6 @@
 [
   "accept",
+  "add_member",
   "admit",
   "advance_base",
   "archive",
@@ -8,17 +9,23 @@
   "cancel",
   "create",
   "decide",
+  "edit_draft_phase",
   "hold",
   "pause",
   "pause_member",
   "reassign",
   "release",
+  "rename_team",
   "reply",
   "resume",
   "resume_member",
   "return",
   "route",
+  "set_deps",
+  "set_goal",
   "settings",
   "stop",
-  "stop_member"
+  "stop_member",
+  "submit_draft_phase",
+  "swap_member"
 ]

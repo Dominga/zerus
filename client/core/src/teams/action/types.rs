@@ -43,6 +43,15 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
+    SubmitDraftPhase {
+        phase: u32,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditDraftPhase {
+        phase: u32,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
     /// Creates a team from a catalog template; the CLI resolves the bundle,
     /// and `team` is the new team's id.
     Create {
@@ -67,6 +76,32 @@ pub enum TeamAction {
         /// The five permissions exactly as the form shows them; they become
         /// the team's in place of the template's.
         delegations: CreateDelegations,
+    },
+    AddMember {
+        role: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    SwapMember {
+        member: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    RenameTeam {
+        name: String,
+    },
+    SetGoal {
+        goal: String,
     },
     /// Pauses a team: it hands nothing out until resumed.
     // A variant with no fields is written `{}` so that, like every other
@@ -117,6 +152,11 @@ pub enum TeamAction {
         writes: Vec<String>,
         #[serde(default)]
         assignee: Option<String>,
+    },
+    /// Changes a task's dependencies before its first attempt or hand-out.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
     },
     /// Accepts a node's report.
     Accept {

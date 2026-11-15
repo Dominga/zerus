@@ -23,7 +23,7 @@ const setup = (view = teamView, onAction = vi.fn(), width = 1300) => {
 it("shows the team's name, status and progress", () => {
   const { host } = setup();
   expect(host.querySelector(".team-name")?.textContent).toBe("Fixes");
-  expect(host.querySelector(".tm-state-badge")?.textContent).toBe("running");
+  expect(host.querySelector(".tm-state-badge")?.textContent).toBe("Running");
   expect(host.querySelector(".tm-state-badge")?.getAttribute("data-state")).toBe("running");
   expect(host.querySelector(".team-count")?.textContent).toBe("0/2");
   // One segment for each non-zero count: one reported and one waiting.

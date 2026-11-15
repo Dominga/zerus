@@ -13,7 +13,9 @@
 pub mod accounts;
 pub mod builtin;
 pub mod catalog;
+pub mod draft;
 pub mod graph;
+pub mod member;
 pub mod model;
 pub mod overlap;
 pub mod pipeline;

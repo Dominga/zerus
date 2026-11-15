@@ -3,6 +3,7 @@ use super::*;
 pub(super) use store::OPEN_EFFECT_STATES;
 pub(super) struct Context<'a> {
     pub db: &'a Connection,
+    pub state: &'a std::path::Path,
     pub actor: &'a Actor,
     pub team: &'a Team,
     pub op: &'a Operation,
@@ -49,6 +50,12 @@ impl Context<'_> {
                 |r| r.get(0),
             )
             .map_err(storage)
+    }
+    /// Work charged to the admitted-task cap includes separate draft rows.
+    pub fn task_capacity_used(&self) -> Result<u32> {
+        Ok(self
+            .count(true)?
+            .saturating_add(store::drafts::count(self.db, &self.team.id)?))
     }
     pub fn person_stopped(&self, member: &str) -> Result<bool> {
         self.db

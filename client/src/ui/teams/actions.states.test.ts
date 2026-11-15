@@ -69,6 +69,7 @@ describe("the actions the Team tab offers", () => {
         ...(state === "active" ? ["pause_member"] : []),
         ...(state === "paused" && session ? ["resume_member"] : []),
         ...(state === "active" || state === "paused" ? ["stop_member"] : []),
+        ...(state !== "removed" ? ["swap_member"] : []),
         ...(state !== "removed" && !lead ? ["archive_member"] : []),
       ];
       expect(memberActions(value, team).map((action) => action.id), JSON.stringify({ team, state, session, lead })).toEqual(expected);

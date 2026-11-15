@@ -1,0 +1,91 @@
+{
+  "list": {
+    "next": null,
+    "teams": [
+      {
+        "home": "00000000-0000-4000-8000-0000000000aa",
+        "id": "00000000-0000-4000-8000-000000012001",
+        "lead": "lead",
+        "lead_session": null,
+        "name": "Project team",
+        "progress": {
+          "accepted": 0,
+          "accepted_more": false,
+          "members": 1,
+          "members_more": false,
+          "phases": 1,
+          "phases_done": 0,
+          "phases_done_more": false,
+          "phases_more": false,
+          "questions": 0,
+          "questions_more": false,
+          "stuck": false,
+          "tasks": 0,
+          "tasks_more": false
+        },
+        "project": "00000000-0000-4000-8000-0000000000ee",
+        "revision": 1,
+        "status": "running"
+      }
+    ],
+    "truncated": false
+  },
+  "projects": {
+    "conflicts": 0,
+    "loaded": true,
+    "notice": null,
+    "projects": [
+      {
+        "accessible": true,
+        "color": "#64b5f6",
+        "folders": [],
+        "id": "00000000-0000-4000-8000-0000000000ee",
+        "is_default": true,
+        "name": "Example project",
+        "palette": 0
+      },
+      {
+        "accessible": true,
+        "color": "#64b5f6",
+        "folders": [],
+        "id": "example-project",
+        "is_default": false,
+        "name": "Проект с длинным названием для проверки строк команды",
+        "palette": 1
+      }
+    ],
+    "status": "Local catalog. Connect another computer to sync projects.",
+    "status_error": false,
+    "swarm_id": "",
+    "unconnected": []
+  },
+  "renamed_projects": {
+    "conflicts": 0,
+    "loaded": true,
+    "notice": null,
+    "projects": [
+      {
+        "accessible": true,
+        "color": "#64b5f6",
+        "folders": [],
+        "id": "00000000-0000-4000-8000-0000000000ee",
+        "is_default": true,
+        "name": "Renamed project",
+        "palette": 0
+      },
+      {
+        "accessible": true,
+        "color": "#64b5f6",
+        "folders": [],
+        "id": "example-project",
+        "is_default": false,
+        "name": "Проект с длинным названием для проверки строк команды",
+        "palette": 1
+      }
+    ],
+    "status": "Local catalog. Connect another computer to sync projects.",
+    "status_error": false,
+    "swarm_id": "",
+    "unconnected": []
+  }
+}

@@ -272,6 +272,9 @@ impl Transcript {
             return None;
         }
         let mut transcript = Transcript::at(path, 0);
+        if !super::acceptance::allows_pending(record) {
+            transcript.unavailable = true;
+        }
         transcript.next = transcript.length;
         // A named but unreadable source stays present: never fall back to a
         // composer's empty state as proof of this send.
@@ -486,7 +489,7 @@ fn comparison(line: &str) -> String {
 /// The lines that must reach the transcript, in order: the message without
 /// blank lines, image-path lines Claude attaches instead, Claude's own
 /// `[Image #N]` tokens and its `<pasted_content>` wrapper.
-fn significant(text: &str) -> Vec<String> {
+pub(in crate::state) fn significant(text: &str) -> Vec<String> {
     text.lines()
         .map(|line| {
             let mut line = line.trim();

@@ -57,6 +57,12 @@ impl TeamAction {
     /// The operation: `hgs team <op> --json`.
     pub fn op(&self) -> &'static str {
         match self {
+            Self::SubmitDraftPhase { .. } => "submit-draft-phase",
+            Self::EditDraftPhase { .. } => "edit-draft-phase",
+            Self::AddMember { .. } => "add-member",
+            Self::SwapMember { .. } => "swap-member",
+            Self::RenameTeam { .. } => "rename-team",
+            Self::SetGoal { .. } => "set-goal",
             Self::Create { .. } => "create",
             Self::Pause {} => "pause",
             Self::Resume {} => "resume",
@@ -71,6 +77,7 @@ impl TeamAction {
             Self::Decide { .. } => "decide",
             Self::Admit { .. } => "admit",
             Self::Route { .. } => "route",
+            Self::SetDeps { .. } => "set-deps",
             Self::Accept { .. } => "accept",
             Self::Return { .. } => "return",
             Self::Reassign { .. } => "reassign",
@@ -90,6 +97,12 @@ impl TeamAction {
     /// The fields the operation sends besides the envelope's.
     pub fn input(&self) -> Map<String, Value> {
         let value = match self {
+            Self::SubmitDraftPhase { phase, draft } => json!({"phase":phase,"draft":draft}),
+            Self::EditDraftPhase {
+                phase,
+                generation,
+                draft,
+            } => json!({"phase":phase,"generation":generation,"draft":draft}),
             Self::Create {
                 project,
                 name,
@@ -110,6 +123,24 @@ impl TeamAction {
                 "expected_template": expected_template,
                 "delegations": delegations,
             }),
+            Self::AddMember {
+                role,
+                agent,
+                model,
+                effort,
+                account,
+            } => json!({"role":role,"agent":agent,"model":model,"effort":effort,"account":account}),
+            Self::SwapMember {
+                member,
+                agent,
+                model,
+                effort,
+                account,
+            } => {
+                json!({"member":member,"agent":agent,"model":model,"effort":effort,"account":account})
+            }
+            Self::RenameTeam { name } => json!({"name":name}),
+            Self::SetGoal { goal } => json!({"goal":goal}),
             Self::Pause {} | Self::Resume {} | Self::Stop {} | Self::Archive {} => json!({}),
             Self::PauseMember { member }
             | Self::ResumeMember { member }
@@ -133,6 +164,7 @@ impl TeamAction {
                 }
                 input
             }
+            Self::SetDeps { node, deps } => json!({"node": node, "deps": deps}),
             Self::Accept { node } => json!({"node": node}),
             Self::Return { node, reason } => json!({"node": node, "reason": reason}),
             Self::Reassign {
@@ -158,6 +190,21 @@ impl TeamAction {
     /// Checks what the call sends before anything runs.
     pub fn check(&self) -> Result<(), String> {
         match self {
+            Self::SubmitDraftPhase { phase, draft } => super::drafts::check(*phase, draft),
+            Self::EditDraftPhase {
+                phase,
+                generation,
+                draft,
+            } => {
+                if *generation == 0 {
+                    return Err("The draft's generation is not known; read it again.".into());
+                }
+                super::drafts::check(*phase, draft)
+            }
+            Self::AddMember { .. }
+            | Self::SwapMember { .. }
+            | Self::RenameTeam { .. }
+            | Self::SetGoal { .. } => super::editing::check(self),
             Self::Create { .. } => check_create(self),
             Self::AdvanceBase { commit } => {
                 if matches!(commit.len(), 40 | 64)
@@ -182,6 +229,16 @@ impl TeamAction {
             | Self::Accept { node: id }
             | Self::Hold { node: id }
             | Self::Release { node: id } => node(*id),
+            Self::SetDeps { node: id, deps } => {
+                node(*id)?;
+                if deps.len() > 200 {
+                    return Err("Too many dependencies.".into());
+                }
+                for dep in deps {
+                    node(dep.node)?;
+                }
+                Ok(())
+            }
             Self::Route {
                 node: id,
                 role,
@@ -230,6 +287,10 @@ impl TeamAction {
                 "teamAdvanceBaseConfirm", "Advance base?",
                 format!("Advance the base of {name} to {commit}? Future hand-outs use it. Earlier hand-outs keep their assigned base. Branches are unchanged."),
                 "Advance base",
+            )),
+            Self::SwapMember { member, .. } => Some(ask(
+                "teamSwapMemberConfirm", "Swap member?",
+                format!("Replace the agent for {member} of {name}? The old session stays outside the team. The member keeps its ID, task history, folder and branch. Only a person-stopped member with no open or unsettled work can be swapped."), "Swap member",
             )),
             Self::Stop {} => Some(ask(
                 "teamStopConfirm",

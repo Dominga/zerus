@@ -81,6 +81,8 @@ mod task_binding_index;
 pub(crate) use task_binding_index::rows as task_binding_rows;
 // Process projection data. The advisory writer never grants caller authority.
 mod process_index;
+// Advisory display data only; no production reader uses it in this slice.
+mod listing_metadata;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_index_writer;
 mod labels;
@@ -1504,6 +1506,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if args.first().map(String::as_str)==Some("receipt-index-worker") {
         if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
         return receipt_index::worker();
+    }
+    if args.first().map(String::as_str) == Some("archive-catalog-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected archive catalog worker arguments".into());
+        }
+        return archive_catalog::worker();
     }
     if args.first().map(String::as_str) == Some("task-binding-index-worker") {
         if args.len() != 1 {

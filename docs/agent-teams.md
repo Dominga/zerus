@@ -1,8 +1,8 @@
 # Agent Teams
 
 Agent Teams are a preview. They are off on every computer until a person turns
-them on, and this guide describes the first milestone: a team that takes tasks
-from a queue. The commands, their replies and their codes are in the
+them on. A team takes tasks from a queue; the Team tab also shows dependencies
+and lets you prepare phase drafts. The commands, their replies and their codes are in the
 [Agent Teams reference](reference.md#agent-teams).
 
 ## What a team is
@@ -64,12 +64,17 @@ Counts with `+` are lower bounds. **More teams** reads one bounded cursor page;
 does not grow the bounded session lookup cache.
 
 Select a row to open its bound lead session's **Team** tab. The binding uses
-the computer's machine identity and launch or run identity. If the lead is
-missing from the session list or has changed, the screen explains that instead
-of opening a similarly named session.
+the computer's machine identity and launch or run identity. If the lead has no
+session yet, the list says so. A bound session missing from the session list
+gets its own notice. If a fresh Team tab read shows that
+the binding changed, the tab asks you to open the team from Teams again. A
+similarly named session is never substituted. The binding stays available
+when you switch tabs of the same selected session.
 
 Press **New team** in the screen header or its empty state. The `team.new`
-command also remains available. The dialog starts from a **Template**:
+command is also listed in Settings > Keyboard. It has no default shortcut;
+assign one there to open New team from the keyboard. The dialog starts from
+a **Template**:
 
 | Template | Roster besides the lead | Default pipeline | A queued task starts |
 |---|---|---|---|
@@ -278,6 +283,33 @@ stop recorded: cancellation, release, key clearing, a refusal and its reason,
 or work not yet reached. An older stop without a recorded identity shows no
 invented outcome.
 
+## Preparing phase drafts
+
+Open **Layers** in the Team tab to read planned phases. **New phase draft**
+creates a proposed phase; **Edit draft** changes its title, barrier and tasks.
+Each task has a description, acceptance criteria, pipeline, optional assignee,
+dependencies, write paths and estimate. Layers uses the shared dependency
+projection; opening a task shows its original description and criteria.
+
+A person or the team's bound lead may save a draft. Drafts reserve task IDs
+and count against the team's planned-work cap, including when a pipeline
+creates a stage. They create no task documents, launches or hand-outs.
+**Approve phase** is unavailable in this slice. Phase 0 remains the only
+intake queue; planned startup and phase publication are still to come.
+
+The CLI reads are `hgs team phases --team TEAM` and
+`hgs team phase --team TEAM --phase N`. Use the returned revision, next phase
+and node IDs for `submit-draft-phase`; an `edit-draft-phase` also carries the
+generation read from the draft. Both accept the complete draft as JSON on
+stdin, with `request_id`, `team` and `expected_revision`; see the
+[draft input contract](reference.md#agent-teams) for its fields and bounds.
+Saved IDs stay attached to their tasks, and removed IDs are never reused.
+
+A failed read shows its reason and **Read again**, never an editable empty
+plan. A stale save retains the editor text for copying. An unconfirmed save
+locks saving and points to **Check** in the team's unresolved actions; it is
+never automatically sent again under a new request identity.
+
 ## Sending a task to a team
 
 - On the task board, a task in Backlog or To do has **Send to team: %1** in
@@ -296,7 +328,33 @@ sent by a member or by another agent waits until the lead admits it. The queue
 is taken in the order of the board's To do column, and each member works on
 one task at a time.
 
-### Routing
+### Editing a team
+
+In the **Team** tab, **Add member** chooses a role from this team's pinned
+catalog, an agent, model, effort and account. The account can be named or
+**The freest account**; empty model and effort use that account's defaults.
+Launch effort is available for Claude and Codex; DeepSeek keeps its model in
+its native account. The member gets its own readable session and worktree through the usual launch
+service. Existing members keep their sessions and work.
+
+**Rename team** and **Edit goal** change the team's name and goal. Clearing the
+goal is allowed. A rename keeps existing session, folder and branch names.
+All four edits are yours alone and refuse a stale team revision; reopening the
+form after a refresh shows the current values.
+
+The member menu's **Swap…** replaces the agent for a member you have already
+stopped with **Stop**, after its open tasks and attempts settle. The menu shows
+the open-work count when Swap is unavailable. A swap keeps the member ID,
+role, task history, folder and branch. The old session stays outside the team;
+Swap never stops, archives or adopts a session. The new session's readable
+name gains a revision suffix. Unknown launch or delivery receipts refuse a
+swap rather than repeating unfinished work. Active cutover and adoption are
+follow-up work, not choices in this dialog.
+
+Opening a form makes no write. A result that cannot be confirmed stays in the
+existing action list: use **Check**, without submitting another edit.
+
+## Routing
 
 On a `routing: lead` team, admitted tasks wait until the lead chooses their
 role and pipeline with `hgs team route`. Admission waits and routing waits
@@ -584,7 +642,9 @@ tool approvals.
   shell; run it from the Zerus window." Commands that a lead or a member runs
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
-- Only a queue: no planning from a goal, no phases and no Graph yet.
+- Queue execution, a dependency Graph and draft phases in Layers are available.
+  Planning from a goal, phase approval/publication and phase acceptance are
+  not yet available.
 - DeepSeek can be a lead or member with a host that proves each tool call
   with its per-call token, witnesses task input and reports its lifecycle.
   A host lacking those capabilities stays unavailable; Zerus never reloads

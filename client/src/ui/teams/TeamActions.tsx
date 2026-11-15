@@ -71,7 +71,7 @@ export function MemberActions(props: { member: MemberView; teamStatus: string; b
               // An item like its neighbours, with its icon; it says Hide while the details are open.
               ...(props.onDetails ? [{ label: props.detailsOpen ? tr("Hide member details") : tr("Member details"), icon: "info", action: () => { trigger.focus(); props.onDetails?.(); } }] : []),
               ...memberActions(props.member, props.teamStatus).map((action) => ({
-              label: action.text, icon: action.id.startsWith("pause") ? "pause" : action.id.startsWith("resume") ? "play" : action.id.startsWith("stop") ? "square" : "trash",
+              label: action.text, icon: action.id.startsWith("pause") ? "pause" : action.id.startsWith("resume") ? "play" : action.id.startsWith("stop") ? "square" : action.id === "swap_member" ? "refresh-cw" : "trash",
               danger: action.danger, disabled: props.busy || action.disabled, hint: action.reason,
               action: () => { if (props.busy || action.disabled) return; trigger.focus(); props.onAction(action.id, memberId); },
             }))];

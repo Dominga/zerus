@@ -74,6 +74,8 @@ socket2 = "0.6"
 
 # Linux: the refresh rate of the window's monitor (display.rs); the same gtk as tauri's.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Replay builds also use the shared Unix spawn/endpoint gate for single-instance activation.
+zerus-client-core = { path = "../core" }
 gtk = "0.18"
 webkit2gtk = "2.0.2"
 # Tauri's AppIndicator backend has no primary-click events on Linux. The

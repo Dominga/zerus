@@ -105,8 +105,23 @@ fn decode(bytes: &[u8]) -> Result<(Header, &[u8])> {
     Ok((header, chunk))
 }
 
+/// Inspect a framed body without touching its private assembly slot. The
+/// authenticated edit lane checks its permit before accepting any chunk.
+pub(crate) fn inspect(bytes: &[u8]) -> Result<Ack> {
+    if bytes.len() > PAGE {
+        return Err(Error::new("the task upload frame exceeds its page budget"));
+    }
+    let (header, chunk) = decode(bytes)?;
+    let offset = header.offset + chunk.len();
+    Ok(Ack {
+        complete: offset == header.source.size,
+        source: header.source,
+        offset,
+    })
+}
+
 /// The frozen update stays byte-identical while the project receives edits.
-pub(super) struct Outbound {
+pub(crate) struct Outbound {
     pub source: Source,
     bytes: Vec<u8>,
     pub offset: usize,
@@ -313,7 +328,7 @@ fn save(
     result
 }
 
-pub(super) fn receive(store: &ProjectStore, update: Update) -> Result<(Ack, Option<Update>)> {
+pub(crate) fn receive(store: &ProjectStore, update: Update) -> Result<(Ack, Option<Update>)> {
     let _turn = store
         .upload
         .turn

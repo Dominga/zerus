@@ -545,6 +545,7 @@ fn an_unopenable_items_file_leaves_the_bind_successful_and_saved() {
         parent: None,
         launch_id: "00000000-0000-4000-8000-000000000009".into(),
         session_name: String::new(),
+        member_generation: None,
     };
     let observed = super::super::ports::ObservedSession {
         machine: machine.clone(),

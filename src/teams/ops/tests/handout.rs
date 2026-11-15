@@ -686,6 +686,7 @@ fn readiness_view_contains_only_live_nodes_and_their_archived_direct_leaves() {
     let actor = service();
     let ctx = Context {
         db: h.store.db.as_ref().unwrap(),
+        state: h.temp.path(),
         actor: &actor,
         team: &team,
         op: &op,
@@ -693,6 +694,7 @@ fn readiness_view_contains_only_live_nodes_and_their_archived_direct_leaves() {
         reply: Reply {
             ok: true,
             revision: 0,
+            member: None,
             node: None,
             item: None,
         },

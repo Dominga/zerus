@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { createRoot, createSignal, batch } from "solid-js";
 import { inTauri } from "../bridge";
 import type { TeamsOut } from "../types";
+import type { PhasePane } from "./team-phases";
 
 // The Teams views the desktop shows (M1): the team list, one followed team
 // and the owner cards. Every value comes from the `teams` key of the per-frame
@@ -37,14 +38,21 @@ export interface TeamMember {
   id: string; role: string; agent: string; account: string; state: string; lead: boolean; session: TeamSession | null; model?: string | null;
   /** The person stopped this member (the store refuses a second Stop). */
   person_stopped?: boolean;
+  effort?: string | null;
+  account_choice?: { mode: string; account?: string } | null;
+  open_work?: number | null;
 }
 export interface TeamMemberCounts { total: number; not_created: number; active: number; paused: number; removed: number }
 export interface TeamNodeCounts { waiting: number; pending: number; in_progress: number; reported: number; accepted: number; cancelled: number }
 export interface TeamCounts { members: TeamMemberCounts; nodes: TeamNodeCounts; inbox: number; cards: number }
 export interface TeamStage { node: number; index: number; role: string; state: string; assignee: string; implementer: string; kind?: "review" | "test" | "land" | null; target?: number | null; round?: number | null }
 export interface TeamTaskRef { project: string; uuid: string }
+export interface TeamDependency { node: number; kind?: "hard" | "soft" }
 export interface TeamCard {
   assigned_base?: string | null;
+  /** Authoritative store fact; absent on older reads keeps editing disabled. */
+  deps_editable?: boolean | null;
+  deps?: TeamDependency[]; phase?: number | null; origin?: number | null; layer?: number | null;
   node: number; title: string; state: string; task: TeamTaskRef | null; role: string; pipeline: string;
   assignee: string; implementer: string; rank: string; round: number; held: boolean; admitted: boolean;
   integrated: boolean; decided_by: string; stages: TeamStage[];
@@ -68,6 +76,10 @@ export interface TeamBar {
   integration_branch: string; base_commit: string; revision: number; counts: TeamCounts;
 }
 export interface TeamView {
+  plan?: PhasePane | null;
+  /** Complete bounded goal for the editor, distinct from the bar preview. */
+  edit_goal?: string | null;
+  member_roles?: Array<{ id: string; name: string; agent: string; model: string; effort: string; account: { mode: string; account?: string } }>;
   /** Absent when an older core or an incomplete/unknown read cannot show them whole. */
   settings?: import("./team-settings").TeamSettings | null;
   bar: TeamBar; members: TeamMember[]; groups: TeamGroup[]; truncated: boolean; next: string | null; revision: number;

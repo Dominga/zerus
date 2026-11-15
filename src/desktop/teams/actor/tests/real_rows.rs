@@ -104,6 +104,7 @@ pub(super) fn store(state: &std::path::Path, key: &str, row: &Value) {
 
 fn member(run: &str) -> Member {
     Member {
+        launch: None,
         id: "m1".into(),
         role: "developer".into(),
         agent: "claude".into(),

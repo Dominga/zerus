@@ -6,6 +6,7 @@ import { newRequestId, teams, type TeamCall, type TeamOutcome, type UnresolvedCa
 import { rowIdentity, rowIsSession } from "./session-binding";
 import { navigationTeamFor } from "./lead-navigation";
 import { teamCall, type TaskButton } from "./actions";
+import { createTeamEditors, TeamEditButtons, type EditAction } from "./TeamEditors";
 import { MemberCard } from "./MemberCard";
 import { TeamBar } from "./team-bar";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
@@ -17,17 +18,20 @@ import { Icon } from "../lib/icons";
 import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
 import { followTeamScope, type TeamScope } from "./team-tab-scope";
+import { TaskDependencies } from "./TaskDependencies";
+import { PlanView } from "./PlanView";
 import { TeamTaskCard } from "./TeamTaskCard";
 import { TeamAdvanceBase } from "./TeamAdvanceBase";
+import { PhasePane } from "./PhasePane";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
 import "../styles/teams.css";
 
 // The Team workspace adapts the fork's team bar, members, paged Board, task
-// detail and decisions. Feed, Inbox, Reports and Cards read bounded pages;
-// Lead chat uses the bound lead's ordinary guarded composer. The Board uses
-// the store's followed team view, and team actions use its existing intents.
+// detail and decisions. Graph and Layers share the core's projection. Feed,
+// Inbox, Reports and Cards read bounded pages; Lead chat uses the bound lead's
+// ordinary guarded composer. Team actions use the store's existing intents.
 
 function columnLabel(column: BoardColumn): string {
   switch (column.key) {
@@ -52,13 +56,14 @@ export function TeamWorkspace(props: {
   busy: boolean;
   failure: { code: string; message: string } | null;
   actionFailure?: string | null;
-  onAction: (kind: string, fields?: Record<string, unknown>, revision?: number) => void;
+  onAction: EditAction;
   /** A queue page by its cursor; null is the first page. */
   onPage: (cursor: string | null) => void;
   onAddTask: () => void;
   onSettingsSave?: (call: TeamCall) => Promise<TeamOutcome>;
   settingsBlocked?: boolean;
 }) {
+  const [planMode, setPlanMode] = createSignal<"board" | "graph" | "layers">("board");
   const [settingsView, setSettingsView] = createSignal<TeamView>();
   const [selectedNode, setSelectedNode] = createSignal<number | null>(null);
   const [drawer, setDrawer] = createSignal<TeamDrawer | null>(null);
@@ -76,7 +81,7 @@ export function TeamWorkspace(props: {
   const teamId = createMemo(() => props.view.bar.id);
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
   createEffect(on(teamId, () => setAdvance(false), { defer: true }));
-  createEffect(on(teamId, () => { setSettingsView(undefined); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
+  createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
   // Waiting for you's Open task: the node it names, or the card a stage of that
@@ -108,7 +113,8 @@ export function TeamWorkspace(props: {
   });
   const select = (node: number) => { setSelectedNode(node); setFocusStage(null); setOpenNotice(""); };
   const card = createMemo(() => all().find((candidate) => candidate.node === selectedNode()) ?? null);
-  const send = (kind: string, fields: Record<string, unknown> = {}) => { props.onAction(kind, fields); setAsking(null); setReason(""); };
+  const editors = createTeamEditors(() => props.view, props.onAction);
+  const send = (kind: string, fields: Record<string, unknown> = {}) => { if (kind === "swap_member") { editors.open(kind, String(fields.member)); return; } props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
     <div class="team-tab" data-team-tab>
       <TeamBar view={props.view} busy={props.busy} onAction={(kind) => kind === "advance_base" ? setAdvance(true) : send(kind)}
@@ -119,6 +125,8 @@ export function TeamWorkspace(props: {
       <Show when={advance()}><TeamAdvanceBase team={props.view.bar.id} busy={props.busy}
         onCancel={() => setAdvance(false)} onAdvance={(commit, revision) => { props.onAction("advance_base", { commit }, revision); setAdvance(false); }} /></Show>
       <Show when={drawer()} keyed>{(kind) => <TeamDrawers kind={kind} view={props.view} busy={props.busy} onAction={props.onAction} onClose={() => setDrawer(null)} />}</Show>
+      <TeamEditButtons view={props.view} busy={props.busy} open={editors.open} />
+      {editors.dialogs()}
       <Show when={openNotice()}>{(text) => <div class="notice team-notice" role="status" data-team-open-notice><Icon name="info" size={16} /><span>{text()}</span></div>}</Show>
       <Show when={props.actionFailure}>{(reason) => <div class="notice danger team-notice" role="alert" data-team-action-failure><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>
       <Show when={props.failure}>
@@ -131,12 +139,13 @@ export function TeamWorkspace(props: {
       </Show>
       <div class="team-body">
         <section class="team-main">
-          <header class="team-board-head"><Icon name="columns-3" size={14} /><b>{tr("Board")}</b><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
+          <header class="team-board-head"><Icon name="columns-3" size={14} /><button type="button" class="btn small" aria-pressed={planMode() === "board"} onClick={() => setPlanMode("board")}>{tr("Board")}</button><button type="button" class="btn small" data-team-graph-mode aria-pressed={planMode() === "graph"} onClick={() => setPlanMode("graph")}>{tr("Graph")}</button><button type="button" class="btn small" data-team-layers-mode aria-pressed={planMode() === "layers"} onClick={() => { setSelectedNode(null); setPlanMode("layers"); }}>{tr("Layers")}</button><span class="grow" /><button type="button" class="btn small" onClick={props.onAddTask}><Icon name="plus" size={12} />{tr("Add task")}</button></header>
           <div class="team-canvas">
+            <Show when={planMode() === "layers"} fallback={
             <Show when={all().length} fallback={
               <div class="empty team-empty"><Icon name="list-todo" size={24} /><h3>{tr("The queue is empty.")}</h3><p>{tr("Send a task to the team from the task board.")}</p></div>
             }>
-              <div class="team-board" data-team-board>
+              <Show when={planMode() === "graph"} fallback={<div class="team-board" data-team-board>
                 <For each={groups()}>
                   {(group) => (
                     <section class="team-column" data-group={group.key}>
@@ -148,8 +157,11 @@ export function TeamWorkspace(props: {
                     </section>
                   )}
                 </For>
-              </div>
+              </div>}>
+                <PlanView view={props.view} busy={props.busy} selected={selectedNode()} onSelect={select} onSetDeps={(node, deps) => send("set_deps", { node, deps })} />
+              </Show>
             </Show>
+            }><PhasePane view={props.view} busy={props.busy} /></Show>
             <Show when={card()}>
               {(shown) => (
                 <div class="team-task-detail" data-team-detail>
@@ -181,6 +193,7 @@ export function TeamWorkspace(props: {
                       )}</For>
                     </dl>
                   </Show>
+                  <TaskDependencies task={shown()} status={props.view.bar.status} busy={props.busy} onSetDeps={(deps) => send("set_deps", { node: shown().node, deps })} />
                   <TaskActions card={shown()} teamStatus={props.view.bar.status} busy={props.busy} onAction={(kind) => send(kind, { node: shown().node })}
                     onReason={(button) => { setAsking(button); setReason(""); }} />
                   <Show when={asking()}>
@@ -281,12 +294,14 @@ export function TeamTab() {
     return !leadChanged() && ready?.key === current.key && ready.team === current.team && shown?.bar.id === current.team ? shown : undefined;
   });
   const readFailure = () => target().team ? teams.readFailureFor(`team:${target().team}`) : null;
-  const act = (kind: string, fields: Record<string, unknown> = {}, revision?: number) => {
+  const act: EditAction = (kind: string, fields: Record<string, unknown> = {}, revision?: number, team?: string) => {
     const current = view();
-    if (!current) return;
+    if (!current || (team !== undefined && team !== current.bar.id)) return {
+      outcome: "failed", request_id: "", detail: tr("The selected team changed. Reopen the form."),
+    };
     const call: TeamCall = teamCall(current, newRequestId(), kind, fields);
     if (revision !== undefined) call.expected_revision = revision;
-    void teams.run(call, source());
+    return teams.run(call, source());
   };
   return <>
     <Show when={scope.failure()}>{(reason) => <div class="notice danger team-notice" role="alert"><Icon name="triangle-alert" size={16} /><span>{reason()}</span></div>}</Show>

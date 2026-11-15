@@ -1,0 +1,441 @@
+{
+  "pipelines": [
+    {
+      "default": "",
+      "label": "ID",
+      "name": "id",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Name",
+      "name": "name",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Implementer",
+      "name": "implementer",
+      "type": "text"
+    },
+    {
+      "default": [],
+      "fields": [
+        {
+          "default": "review",
+          "label": "Kind",
+          "name": "kind",
+          "options": [
+            "review",
+            "test",
+            "land"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": "",
+          "label": "Role",
+          "name": "role",
+          "type": "text"
+        }
+      ],
+      "label": "Stages",
+      "name": "stages",
+      "type": "list"
+    },
+    {
+      "default": 0,
+      "label": "Maximum rounds",
+      "name": "max_rounds",
+      "type": "number"
+    },
+    {
+      "default": "lead",
+      "label": "Final acceptance",
+      "name": "accept",
+      "options": [
+        "lead",
+        "person",
+        "pipeline"
+      ],
+      "type": "choice"
+    }
+  ],
+  "roles": [
+    {
+      "default": "",
+      "label": "ID",
+      "name": "id",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Name",
+      "name": "name",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Prompt",
+      "name": "prompt",
+      "type": "multiline"
+    },
+    {
+      "default": "claude",
+      "label": "Agent",
+      "name": "agent",
+      "options": [
+        "claude",
+        "codex",
+        "kimi",
+        "dsh"
+      ],
+      "type": "choice"
+    },
+    {
+      "fields": [
+        {
+          "default": "freest",
+          "label": "Account choice",
+          "name": "mode",
+          "options": [
+            "freest",
+            "named"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": "",
+          "label": "Account ID",
+          "name": "account",
+          "type": "text"
+        }
+      ],
+      "label": "Account",
+      "name": "account",
+      "type": "group"
+    },
+    {
+      "default": "",
+      "label": "Model",
+      "name": "model",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Effort",
+      "name": "effort",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Pipeline",
+      "name": "pipeline",
+      "type": "text"
+    },
+    {
+      "default": "keep",
+      "label": "Context",
+      "name": "context",
+      "options": [
+        "keep",
+        "fresh"
+      ],
+      "type": "choice"
+    }
+  ],
+  "templates": [
+    {
+      "default": "",
+      "label": "ID",
+      "name": "id",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Name",
+      "name": "name",
+      "type": "text"
+    },
+    {
+      "default": "",
+      "label": "Description",
+      "name": "description",
+      "type": "text"
+    },
+    {
+      "fields": [
+        {
+          "default": "claude",
+          "label": "Agent",
+          "name": "agent",
+          "options": [
+            "claude",
+            "codex",
+            "kimi",
+            "dsh"
+          ],
+          "type": "choice"
+        },
+        {
+          "fields": [
+            {
+              "default": "freest",
+              "label": "Account choice",
+              "name": "mode",
+              "options": [
+                "freest",
+                "named"
+              ],
+              "type": "choice"
+            },
+            {
+              "default": "",
+              "label": "Account ID",
+              "name": "account",
+              "type": "text"
+            }
+          ],
+          "label": "Account",
+          "name": "account",
+          "type": "group"
+        },
+        {
+          "default": "",
+          "label": "Model",
+          "name": "model",
+          "type": "text"
+        },
+        {
+          "default": "",
+          "label": "Effort",
+          "name": "effort",
+          "type": "text"
+        },
+        {
+          "default": "",
+          "label": "Lead rules",
+          "name": "rules",
+          "type": "multiline"
+        }
+      ],
+      "label": "Lead",
+      "name": "lead",
+      "type": "group"
+    },
+    {
+      "default": [],
+      "fields": [
+        {
+          "default": "",
+          "label": "Role",
+          "name": "role",
+          "type": "text"
+        },
+        {
+          "default": 1,
+          "label": "Count",
+          "name": "count",
+          "type": "number"
+        },
+        {
+          "default": false,
+          "label": "Optional",
+          "name": "optional",
+          "type": "bool"
+        }
+      ],
+      "label": "Roster",
+      "name": "roster",
+      "type": "list"
+    },
+    {
+      "default": "",
+      "label": "Default pipeline",
+      "name": "default_pipeline",
+      "type": "text"
+    },
+    {
+      "fields": [
+        {
+          "fields": [
+            {
+              "default": true,
+              "label": "Accept results",
+              "name": "accept_results",
+              "type": "bool"
+            },
+            {
+              "default": true,
+              "label": "Answer members",
+              "name": "answer_members",
+              "type": "bool"
+            },
+            {
+              "default": true,
+              "label": "Confirm folder trust",
+              "name": "confirm_trust",
+              "type": "bool"
+            },
+            {
+              "default": true,
+              "label": "Resume exited members",
+              "name": "resume_exited",
+              "type": "bool"
+            },
+            {
+              "default": true,
+              "label": "Merge accepted work",
+              "name": "merge_accepted",
+              "type": "bool"
+            }
+          ],
+          "label": "Delegations",
+          "name": "delegations",
+          "type": "group"
+        },
+        {
+          "fields": [
+            {
+              "default": 6,
+              "label": "Maximum members",
+              "name": "max_members",
+              "type": "number"
+            },
+            {
+              "default": 50,
+              "label": "Maximum phase tasks",
+              "name": "max_phase_tasks",
+              "type": "number"
+            },
+            {
+              "default": 500,
+              "label": "Maximum open tasks",
+              "name": "max_open_tasks",
+              "type": "number"
+            },
+            {
+              "default": 3,
+              "label": "Maximum open questions",
+              "name": "max_open_questions",
+              "type": "number"
+            }
+          ],
+          "label": "Limits",
+          "name": "caps",
+          "type": "group"
+        },
+        {
+          "fields": [
+            {
+              "default": 120,
+              "label": "Report timeout (seconds)",
+              "name": "report_timeout_seconds",
+              "type": "number"
+            },
+            {
+              "default": 180,
+              "label": "Start timeout (seconds)",
+              "name": "start_timeout_seconds",
+              "type": "number"
+            },
+            {
+              "default": 120,
+              "label": "Inbox interval (seconds)",
+              "name": "inbox_interval_seconds",
+              "type": "number"
+            },
+            {
+              "default": 15,
+              "label": "Lead reminder (minutes)",
+              "name": "remind_lead_minutes",
+              "type": "number"
+            },
+            {
+              "default": 60,
+              "label": "Person reminder (minutes)",
+              "name": "remind_person_minutes",
+              "type": "number"
+            },
+            {
+              "default": 20,
+              "label": "Lead stall (minutes)",
+              "name": "lead_stall_minutes",
+              "type": "number"
+            },
+            {
+              "default": 10,
+              "label": "Answer escalation (minutes)",
+              "name": "answer_escalate_minutes",
+              "type": "number"
+            },
+            {
+              "default": 3,
+              "label": "Resumes per hour",
+              "name": "resume_limit_per_hour",
+              "type": "number"
+            }
+          ],
+          "label": "Timers",
+          "name": "timers",
+          "type": "group"
+        },
+        {
+          "default": true,
+          "label": "Queue",
+          "name": "queue",
+          "type": "bool"
+        },
+        {
+          "default": "direct",
+          "label": "Routing",
+          "name": "routing",
+          "options": [
+            "direct",
+            "lead"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": "review",
+          "label": "Plan approval",
+          "name": "plan_approval",
+          "options": [
+            "review",
+            "auto"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": "lead",
+          "label": "Phase acceptance",
+          "name": "phase_acceptance",
+          "options": [
+            "lead",
+            "person"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": "branch",
+          "label": "Integration",
+          "name": "integration",
+          "options": [
+            "branch",
+            "none"
+          ],
+          "type": "choice"
+        },
+        {
+          "default": false,
+          "label": "Allow landing",
+          "name": "land_allowed",
+          "type": "bool"
+        }
+      ],
+      "label": "Settings",
+      "name": "settings",
+      "type": "group"
+    }
+  ]
+}

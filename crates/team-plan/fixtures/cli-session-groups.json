@@ -80,6 +80,7 @@
       {
         "admitted": true,
         "assigned_base": null,
+        "deps_editable": true,
         "holder": null,
         "id": 1,
         "kind": "task",
@@ -103,6 +104,7 @@
       {
         "admitted": true,
         "assigned_base": "0123456789abcdef0123456789abcdef01234567",
+        "deps_editable": false,
         "holder": "m1",
         "id": 2,
         "implementer": "m1",
@@ -164,11 +166,38 @@
       "items": [],
       "more": 0
     },
+    "member_roles": [
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "developer",
+        "model": "",
+        "name": "Developer"
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "reviewer",
+        "model": "",
+        "name": "Reviewer"
+      }
+    ],
     "members": [
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
+        "effort": "",
         "id": "lead",
+        "open_work": 0,
         "ownership_nonce": "nonce-lead",
         "person_stopped": false,
         "role": "lead",
@@ -181,8 +210,13 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
+        "effort": "",
         "id": "m1",
+        "open_work": 1,
         "ownership_nonce": "nonce-m1",
         "person_stopped": false,
         "role": "developer",
@@ -195,8 +229,13 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
+        "effort": "",
         "id": "m2",
+        "open_work": 0,
         "ownership_nonce": "nonce-m2",
         "person_stopped": false,
         "role": "developer",
@@ -209,8 +248,13 @@
       },
       {
         "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
         "agent": "claude",
+        "effort": "",
         "id": "m3",
+        "open_work": 0,
         "ownership_nonce": "nonce-m3",
         "person_stopped": false,
         "role": "reviewer",

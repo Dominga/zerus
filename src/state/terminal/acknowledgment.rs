@@ -33,12 +33,12 @@ fn bounded(path: &Path, limit: u64) -> Result<Option<Value>> {
 
 pub(crate) fn pending(record: &Value) -> Result<PendingInput> {
     if !cfg!(any(target_os = "linux", target_os = "macos"))
-        || string(record, "agent") != "claude"
+        || !matches!(string(record, "agent"), "claude" | "codex" | "kimi")
         || string(record, "conversation_id").is_empty()
         || string(record, "conversation_state") == "unknown"
         || !string(record, "expected_id").is_empty()
-        || string(record, "activity") != "idle"
-        || string(record, "phase") != "idle"
+        || (!(string(record, "activity") == "idle" && string(record, "phase") == "idle")
+            && !input::acceptance::native_idle(record))
         || !string(record, "error").is_empty()
         || pause_active(record)
         || input::input_typing(record).is_some()
@@ -186,10 +186,14 @@ pub(crate) fn settle(
         "run_id":ack.expected_run_id,"conversation_id":ack.expected_conversation_id,
         "status":"claimed","accepted":null,"durable":false,"source":authority.source(),"acknowledgment":ack});
     atomic(&path, &receipt.to_string())?;
+    input::acceptance::remember_unknown(&record)?;
     // Revalidate the original native caller and session immediately before the
     // record write. A failed reserved decision remains unknown and is not replayed.
     authority.check(ack)?;
-    check_handoff(&ack.name, &request)?;
+    let fresh = check_handoff(&ack.name, &request)?;
+    if pending(&fresh)? != original {
+        return Err("The pending input changed; review it again".into());
+    }
     if composer_now(backend::current(), &record) != Some(input::composer::Composer::Empty) {
         return Err("The native input changed before acknowledgment".into());
     }

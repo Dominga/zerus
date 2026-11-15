@@ -45,6 +45,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": true,
           "holder": "m1",
           "implementer": "m1",
@@ -80,6 +81,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": false,
           "holder": "m1",
           "implementer": "m1",
@@ -106,6 +108,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": false,
           "holder": "m1",
           "implementer": "m1",
@@ -132,6 +135,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": false,
           "holder": "m1",
           "implementer": "m1",
@@ -158,6 +162,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": false,
           "holder": "m1",
           "implementer": "m1",
@@ -184,6 +189,7 @@
           "assigned_base": "0123456789abcdef0123456789abcdef01234567",
           "assignee": "",
           "decided_by": "",
+          "deps_editable": false,
           "held": false,
           "holder": "m1",
           "implementer": "m1",
@@ -217,13 +223,39 @@
       "state": "cancelled"
     }
   ],
+  "member_roles": [
+    {
+      "account": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "effort": "",
+      "id": "developer",
+      "model": "",
+      "name": "Developer"
+    },
+    {
+      "account": {
+        "mode": "freest"
+      },
+      "agent": "claude",
+      "effort": "",
+      "id": "reviewer",
+      "model": "example-model",
+      "name": "Reviewer"
+    }
+  ],
   "members": [
     {
       "account": "account-example",
+      "account_choice": {
+        "mode": "freest"
+      },
       "agent": "claude",
       "id": "lead",
       "lead": true,
       "model": null,
+      "open_work": 0,
       "person_stopped": false,
       "role": "lead",
       "session": {
@@ -234,10 +266,14 @@
     },
     {
       "account": "account-example",
+      "account_choice": {
+        "mode": "freest"
+      },
       "agent": "claude",
       "id": "m1",
       "lead": false,
       "model": null,
+      "open_work": 1,
       "person_stopped": false,
       "role": "developer",
       "session": {
@@ -248,10 +284,14 @@
     },
     {
       "account": "",
+      "account_choice": {
+        "mode": "freest"
+      },
       "agent": "claude",
       "id": "m2",
       "lead": false,
       "model": null,
+      "open_work": 0,
       "person_stopped": false,
       "role": "developer",
       "session": null,
@@ -259,10 +299,14 @@
     },
     {
       "account": "account-example",
+      "account_choice": {
+        "mode": "freest"
+      },
       "agent": "claude",
       "id": "m3",
       "lead": false,
       "model": "example-model",
+      "open_work": 1,
       "person_stopped": false,
       "role": "reviewer",
       "session": {
@@ -274,7 +318,6 @@
   ],
   "next": null,
   "revision": 18,
-  "truncated": false,
   "settings": {
     "caps": {
       "max_members": 6,
@@ -305,5 +348,6 @@
       "resume_limit_per_hour": 3,
       "start_timeout_seconds": 180
     }
-  }
+  },
+  "truncated": false
 }

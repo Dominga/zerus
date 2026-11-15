@@ -1876,8 +1876,24 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
     keep_warm::observe(&mut record, &mut event, now());
+    let seen_before = record["input_seen_at"].clone();
+    let acceptance_allowed = input::acceptance::allows_hook(&record, &event);
     journal::update_activity(&mut record, &event);
+    if !acceptance_allowed {
+        record["input_seen_at"] = seen_before.clone();
+    }
     keep_warm::settle(&mut record, &event, now());
+    // Native acceptance is gate evidence, not a by-product of Activity or
+    // analytics. Persist it after the existing caller/conversation checks and
+    // keep-warm classification, before a busy journal can exhaust the hook's
+    // native timeout. A later journal failure must not lose this acceptance.
+    let first_context = input::acceptance::first_native_context(&mut record, &event);
+    if record["input_seen_at"] != seen_before {
+        input::acceptance::record_native_context(&mut record, &event);
+    }
+    if record["input_seen_at"] != seen_before || first_context {
+        write(&mut record)?;
+    }
     if resumed_clear_end {
         // The real main hook ended this requested clear, not its supervised
         // process. Keep the exact deferred-start fence, never fabricate Ready.

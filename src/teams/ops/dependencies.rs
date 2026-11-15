@@ -1,7 +1,7 @@
 //! Person-only dependency edits. The existing operation transaction binds the
 //! revision, authority, receipt and journal to the same dependency replacement.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub(super) fn set(ctx: &mut Context<'_>) -> Result<()> {
     let Operation::SetDeps { node, deps } = ctx.op else {
@@ -9,7 +9,7 @@ pub(super) fn set(ctx: &mut Context<'_>) -> Result<()> {
     };
     ctx.active()?;
     ctx.undecided(*node)?;
-    let mut target = ctx.live_node(*node)?;
+    let target = ctx.live_node(*node)?;
     if target.source == NodeSource::Planned {
         return Err(invalid("Approved plan changes require a logged plan edit."));
     }
@@ -31,30 +31,7 @@ pub(super) fn set(ctx: &mut Context<'_>) -> Result<()> {
             return Err(invalid("Missing dependency."));
         }
     }
-    target.deps = deps.clone();
-    // Walk only this candidate's ancestors by primary key, including archived
-    // nodes. Historical edges can still close a cycle. Bound rows and bytes as
-    // readiness does; never scan the team's complete journal or archive.
-    let mut nodes = BTreeMap::from([(*node, target)]);
-    let mut pending: Vec<_> = deps.iter().map(|d| d.node).collect();
-    let mut bytes = 0usize;
-    while let Some(id) = pending.pop() {
-        if nodes.contains_key(&id) {
-            continue;
-        }
-        let Some(ancestor) = rows::node(ctx.db, &ctx.team.id, id)? else {
-            continue;
-        };
-        bytes += encode(&ancestor)?.len();
-        if nodes.len() >= 600 * (200 + 2) || bytes > 8 * 1024 * 1024 {
-            return Err(over("Dependency graph exceeds its row or byte bound."));
-        }
-        pending.extend(ancestor.deps.iter().map(|d| d.node));
-        nodes.insert(id, ancestor);
-    }
-    if !zerus_team_plan::graph::cycles(&nodes.into_values().collect::<Vec<_>>()).is_empty() {
-        return Err(Problem::new(code::DEPENDENCY_CYCLE, "Dependency cycle."));
-    }
+    dependency_graph::check(ctx, *node, deps)?;
     ctx.db
         .execute(
             "DELETE FROM dependencies WHERE team=?1 AND node=?2",

@@ -207,30 +207,42 @@ pub(super) fn problem(ctx: &mut Context<'_>) -> Result<()> {
         node,
         reason: message,
         kind,
+        clear,
     } = ctx.op
     else {
         unreachable!()
     };
     reason(message)?;
     text(message, 2048)?;
-    let (state,failures):(String,u32)=ctx.db.query_row("SELECT state,failures FROM phase_publication_nodes WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or_else(missing)?;
+    let (state,failures):(String,u32)=ctx.db.query_row("SELECT state,CASE WHEN ?4 THEN clear_failures ELSE failures END FROM phase_publication_nodes WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node,clear],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?.ok_or_else(missing)?;
     let terminal = matches!(ctx.team.status, TeamStatus::Stopped | TeamStatus::Archived);
+    if *clear && !terminal {
+        return Err(invalid("Only a stopped publication can report cleanup."));
+    }
     let failures = if *kind == PublicationProblemKind::Uncertain {
         failures.saturating_add(1).min(3)
     } else {
         failures
     };
+    // A known non-write caused by Pause can resume with this same request.
+    // A stopped team's creation answer is not a cleanup answer, even when
+    // it arrives after Stop committed.
+    let paused = !*clear
+        && !terminal
+        && *kind == PublicationProblemKind::Refused
+        && !writing_allowed(ctx.db, ctx.team)?;
     let final_state = match kind {
+        _ if paused => None,
         PublicationProblemKind::Refused => Some("refused"),
         PublicationProblemKind::Uncertain if failures >= 3 => Some("uncertain"),
         _ => None,
     };
-    let next = if !terminal && matches!(state.as_str(), "writing" | "created") {
+    let next = if !*clear && matches!(state.as_str(), "pending" | "writing" | "created") {
         final_state.unwrap_or(&state)
     } else {
         &state
     };
-    ctx.db.execute("UPDATE phase_publication_nodes SET state=?4,reason=?5,failures=?6,clear_outcome=CASE WHEN ?7 THEN COALESCE(?8,clear_outcome) ELSE clear_outcome END WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node,next,message,failures,terminal,final_state]).map_err(storage)?;
+    ctx.db.execute("UPDATE phase_publication_nodes SET state=?4,reason=?5,failures=CASE WHEN ?6 THEN failures ELSE ?7 END,clear_failures=CASE WHEN ?6 THEN ?7 ELSE clear_failures END,clear_outcome=CASE WHEN ?6 THEN COALESCE(clear_outcome,?8) ELSE clear_outcome END WHERE team=?1 AND publication=?2 AND node=?3",params![ctx.team.id,publication,node,next,message,clear,failures,final_state]).map_err(storage)?;
     Ok(())
 }
 
@@ -289,11 +301,28 @@ pub(super) fn publish(ctx: &mut Context<'_>) -> Result<()> {
             .map_err(storage)?;
         ctx.db.execute("INSERT INTO nodes(team,id,data,rank,admitted,routed,task_revision,task_stage,task_cancelled,integration_required) VALUES(?1,?2,?3,'',1,1,'','unobserved',0,?4)",params![ctx.team.id,n.id,rows::node_payload(&n)?,ctx.team.settings.integration==Integration::Branch]).map_err(storage)?;
     }
+    // Promote incoming edges while both the new confirmed identity and its
+    // draft row exist. No transaction exposes a missing prerequisite.
+    ctx.db.execute("INSERT INTO dependencies(team,node,dependency,kind) SELECT d.team,d.node,d.dependency,d.kind FROM phase_draft_dependencies d JOIN phase_publication_nodes n ON n.team=d.team AND n.node=d.dependency WHERE n.publication=?1",[publication]).map_err(storage)?;
+    ctx.db.execute("DELETE FROM phase_draft_dependencies WHERE team=?1 AND dependency IN (SELECT node FROM phase_publication_nodes WHERE publication=?2)",params![ctx.team.id,publication]).map_err(storage)?;
     for request in &requests {
         for d in &request.node.deps {
+            let confirmed: bool = ctx
+                .db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM node_identity WHERE team=?1 AND id=?2)",
+                    params![ctx.team.id, d.node],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            let table = if confirmed {
+                "dependencies"
+            } else {
+                "phase_draft_dependencies"
+            };
             ctx.db
                 .execute(
-                    "INSERT INTO dependencies(team,node,dependency,kind) VALUES(?1,?2,?3,?4)",
+                    &format!("INSERT INTO {table}(team,node,dependency,kind) VALUES(?1,?2,?3,?4)"),
                     params![ctx.team.id, request.node.id, d.node, encode(&d.kind)?],
                 )
                 .map_err(storage)?;

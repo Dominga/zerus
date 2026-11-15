@@ -202,3 +202,44 @@ fn pause_and_stop_win_before_writing_and_stop_clears_an_unbound_created_task() {
     let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
     assert!(tasks.load(&r.task.uuid).unwrap().team().unwrap().is_none());
 }
+
+#[test]
+fn the_real_cli_writes_the_saved_request_and_echoes_the_native_bridge_identity() {
+    let (mut f, _, requests) = fixture();
+    let r = &requests[0];
+    let args = ["task".into(), "team-planned".into(), "--json".into()];
+    let mut input = json!({"schema":1,"id":r.task.uuid,"team":TEAM,"node":r.node.id,"clear":false});
+    input["schema"] = 2.into();
+    let (exit, _, error) = f.cli(&args, &input.to_string());
+    assert_ne!(exit, 0);
+    assert!(error.is_some());
+    assert!(!super::super::super::task_present(&f.config, &r.task).unwrap());
+    input["schema"] = 1.into();
+    let (exit, stdout, error) = f.cli(&args, &input.to_string());
+    assert_eq!(exit, 0, "{error:?}");
+    let reply: Value = serde_json::from_str(&stdout).unwrap();
+    for key in ["schema", "id", "team", "node"] {
+        assert_eq!(reply[key], input[key]);
+    }
+    assert_eq!(reply["state"], "created");
+    assert_eq!(reply["error"], "");
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    let doc = tasks.load(&r.task.uuid).unwrap();
+    let revision = doc.revision();
+    let view = doc.view().unwrap();
+    assert_eq!(view.text, r.text);
+    assert_eq!(view.author, Actor::Agent(f.lead.clone()));
+    drop(tasks);
+    assert_eq!(f.cli(&args, &input.to_string()).0, 0);
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    assert_eq!(tasks.load(&r.task.uuid).unwrap().revision(), revision);
+    drop(tasks);
+    f.h.run(&person(), Operation::Stop).unwrap();
+    input["clear"] = true.into();
+    let (exit, stdout, error) = f.cli(&args, &input.to_string());
+    assert_eq!(exit, 0, "{error:?}");
+    let reply: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(reply["state"], "cleared");
+    let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+    assert!(tasks.load(&r.task.uuid).unwrap().team().unwrap().is_none());
+}

@@ -8,7 +8,7 @@ pub(crate) const PUBLICATION_LAYOUT: u32 = 4;
 
 pub(super) fn extend(db: &Connection) -> Result<()> {
     let complete = |db: &Connection| -> Result<bool> {
-        db.query_row("SELECT count(*)=9 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive','phase_draft_previous','phase_cards')", [], |r| r.get(0)).map_err(storage)
+        db.query_row("SELECT count(*)=11 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive','phase_draft_previous','phase_cards','phase_draft_dependencies','phase_draft_dependants')", [], |r| r.get(0)).map_err(storage)
     };
     if complete(db)? {
         return Ok(());

@@ -111,10 +111,12 @@ impl Runtime {
         }
         self.non_deliveries(store, &team, now)?;
         let planning_pass = team.status == TeamStatus::Planning;
-        if !matches!(team.status, TeamStatus::Running|TeamStatus::Paused) {
+        if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
             self.publications(store, ports, &team, now)?;
         }
-        let Some(team) = store.team(id)? else { return Ok(()) };
+        let Some(team) = store.team(id)? else {
+            return Ok(());
+        };
         if team.status == TeamStatus::Planning {
             // Planning has no task/reopen/stage/integration work. Its durable
             // goal uses the existing lead inbox and witnessed doorbell route.
@@ -139,7 +141,9 @@ impl Runtime {
         if ports.stopped() {
             return Ok(());
         }
-        if !planning_pass { self.publications(store, ports, &team, now)?; }
+        if !planning_pass {
+            self.publications(store, ports, &team, now)?;
+        }
         self.stage_tasks(store, ports, &team, now)?;
         if store
             .team(id)?

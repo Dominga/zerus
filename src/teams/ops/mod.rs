@@ -7,6 +7,7 @@ mod common;
 mod decisions;
 mod delegation;
 mod dependencies;
+mod dependency_graph;
 mod drafts;
 mod editing;
 pub(super) mod handout;

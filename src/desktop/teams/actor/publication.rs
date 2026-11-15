@@ -59,6 +59,7 @@ impl Runtime {
                             node: request.node.id,
                             reason,
                             kind,
+                            clear: terminal,
                         },
                         now,
                     )?;
@@ -97,11 +98,17 @@ impl Runtime {
             TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused
         ) {
             for phase in store.phases(&team.id, 200, None)?.rows {
-                if phase.kind != PhaseKind::Plan || phase.state != PhaseState::Draft {
+                if phase.kind != PhaseKind::Plan {
+                    continue;
+                }
+                let key = format!("phase-auto:{}", phase.n);
+                if phase.state != PhaseState::Draft {
+                    self.recovered(store, &fresh, &key, now)?;
                     continue;
                 }
                 let draft = store.phase_draft(&team.id, phase.n)?;
                 if draft.publication.is_some() {
+                    self.recovered(store, &fresh, &key, now)?;
                     continue;
                 }
                 let Some(generation) = draft.generation else {
@@ -111,7 +118,11 @@ impl Runtime {
                     && fresh.settings.plan_approval == Approval::Auto
                     && phase.approval == Approval::Auto
                 {
-                    write(
+                    let stamp = format!("{}:{}", generation, fresh.revision);
+                    if !self.due(store, &fresh, &key, &stamp, now)? {
+                        continue;
+                    }
+                    match write(
                         store,
                         &fresh.id,
                         Operation::ApprovePhase {
@@ -120,8 +131,21 @@ impl Runtime {
                             confirm_initial: false,
                         },
                         now,
-                    )?;
-                } else if store.phase_review_generation(&team.id, phase.n)? != Some(generation) {
+                    ) {
+                        Ok(_) => self.recovered(store, &fresh, &key, now)?,
+                        Err(mut error) => {
+                            error.message = format!(
+                                "Phase {} could not be approved: {}",
+                                phase.n, error.message
+                            );
+                            self.failure(store, &fresh, &key, &stamp, &error, now)?;
+                        }
+                    }
+                } else {
+                    self.recovered(store, &fresh, &key, now)?;
+                    if store.phase_review_generation(&team.id, phase.n)? == Some(generation) {
+                        continue;
+                    }
                     write(
                         store,
                         &fresh.id,

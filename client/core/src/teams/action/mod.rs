@@ -35,10 +35,10 @@
 //! uncertain intents are never evicted, and the table refuses a new intent
 //! when every entry is unresolved.
 mod drafts;
-mod phases;
 pub mod editing;
 pub mod input;
 pub mod intents;
+mod phases;
 #[cfg(test)]
 mod planning;
 pub mod types;

@@ -17,10 +17,21 @@ CREATE TABLE IF NOT EXISTS phase_publication_nodes (
  request TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
  CHECK(state IN ('pending','writing','created','refused','uncertain')),
  reason TEXT NOT NULL DEFAULT '', cleared INTEGER NOT NULL DEFAULT 0,
- failures INTEGER NOT NULL DEFAULT 0, clear_outcome TEXT CHECK(clear_outcome IN ('cleared','refused','uncertain')),
+ failures INTEGER NOT NULL DEFAULT 0, clear_failures INTEGER NOT NULL DEFAULT 0,
+ clear_outcome TEXT CHECK(clear_outcome IN ('cleared','refused','uncertain')),
  PRIMARY KEY(team,node), UNIQUE(publication,node)
 );
 CREATE INDEX IF NOT EXISTS phase_publication_work ON phase_publication_nodes(publication,state,node);
+-- A confirmed task may depend on a node still in another draft. Both ends
+-- retain real identities; publication promotes the edge before deleting
+-- the prerequisite's draft row.
+CREATE TABLE IF NOT EXISTS phase_draft_dependencies (
+ team TEXT NOT NULL, node INTEGER NOT NULL, dependency INTEGER NOT NULL, kind TEXT NOT NULL,
+ PRIMARY KEY(team,node,dependency),
+ FOREIGN KEY(team,node) REFERENCES node_identity(team,id),
+ FOREIGN KEY(team,dependency) REFERENCES phase_draft_nodes(team,id)
+);
+CREATE INDEX IF NOT EXISTS phase_draft_dependants ON phase_draft_dependencies(team,dependency,node);
 CREATE INDEX IF NOT EXISTS phase_nodes_live ON nodes(team,json_extract(data,'$.phase'),id);
 CREATE INDEX IF NOT EXISTS phase_nodes_archive ON node_archive(team,json_extract(data,'$.phase'),id);
 CREATE TABLE IF NOT EXISTS phase_draft_previous (

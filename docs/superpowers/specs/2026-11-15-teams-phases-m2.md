@@ -145,6 +145,22 @@ available only before publication is reserved. A mid-publication failure keeps
 the snapshot frozen and reports progress; it is not silently rolled back by
 deleting already-created tasks.
 
+A published task can depend on a node that is still in another draft. Keep
+that edge in a companion table whose foreign keys name the confirmed source
+and the actual draft prerequisite. Publish the prerequisite by promoting its
+incoming edges to ordinary dependencies in the same transaction, before
+removing its draft rows. Draft edits preserve referenced IDs and validate
+cycles through live, archived and draft nodes. The hand-out kernel still
+treats the unpublished prerequisite as missing; no task identity is invented
+for it.
+
+Creation answers and Stop cleanup answers are distinct facts with separate
+three-read unknown budgets. A late creation answer after Stop cannot close
+cleanup. A known pause before a document write can resume with the saved
+request; an active command refusal ends creation. Auto-approval failures use
+the existing bounded retry gate, and changed settings or draft generations
+trigger a fresh policy check.
+
 ## Projection and WhiteWh UI mapping
 
 Add bounded `team phases` and `team phase` reads in new modules: phase summaries

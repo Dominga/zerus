@@ -6,9 +6,9 @@ use std::collections::BTreeSet;
 use zerus_team_plan::{draft::DraftNode, model::Phase};
 
 mod snapshot;
-pub use snapshot::PhaseNodeSnapshot;
 use super::graph::{self, PlanGraph};
 use super::phase_metrics::{self, PhaseMetrics, Unavailable};
+pub use snapshot::PhaseNodeSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseList {
@@ -53,7 +53,10 @@ pub struct Rejection {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PreviousDraft { pub generation: u64, pub draft: zerus_team_plan::draft::DraftInput }
+pub struct PreviousDraft {
+    pub generation: u64,
+    pub draft: zerus_team_plan::draft::DraftInput,
+}
 
 #[derive(Deserialize)]
 struct DraftRead {
@@ -140,13 +143,18 @@ pub fn list(value: &Value) -> Result<PhaseList, String> {
 pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
     let data = value.get("draft").ok_or("The phase read gives no draft.")?;
     let mut frozen = data.clone();
-    if let Some(fields) = frozen.as_object_mut() { fields.remove("live"); }
+    if let Some(fields) = frozen.as_object_mut() {
+        fields.remove("live");
+    }
     if data
         .get("nodes")
         .and_then(Value::as_array)
         .is_none_or(|a| a.len() > 200)
-        || serde_json::to_vec(&frozen).map_err(|e| e.to_string())?.len() > 600_000
-        || serde_json::to_vec(data).map_err(|e|e.to_string())?.len() > 8*1024*1024
+        || serde_json::to_vec(&frozen)
+            .map_err(|e| e.to_string())?
+            .len()
+            > 600_000
+        || serde_json::to_vec(data).map_err(|e| e.to_string())?.len() > 8 * 1024 * 1024
     {
         return Err("The draft exceeds its row or byte bound.".into());
     }
@@ -174,50 +182,100 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
         || (out.editable
             && (!out.complete
                 || out.phase.kind != zerus_team_plan::PhaseKind::Plan
-                || !matches!(out.phase.state, zerus_team_plan::PhaseState::Draft | zerus_team_plan::PhaseState::Rejected)
+                || !matches!(
+                    out.phase.state,
+                    zerus_team_plan::PhaseState::Draft | zerus_team_plan::PhaseState::Rejected
+                )
                 || out.publication.is_some()))
     {
         return Err("The phase read has incomplete or conflicting draft identities.".into());
     }
     if let Some(p) = &out.publication {
-        if !crate::teams::action::canonical_uuid(&p.id) || out.generation!=Some(p.generation)
-            || !matches!(p.state.as_str(),"reserved"|"published") || p.total==0 || p.total>200 || p.total as usize!=out.nodes.len()
-            || p.created>p.total || p.blocked>p.total || p.reason.as_ref().is_some_and(|s|s.len()>2048) {
+        if !crate::teams::action::canonical_uuid(&p.id)
+            || out.generation != Some(p.generation)
+            || !matches!(p.state.as_str(), "reserved" | "published")
+            || p.total == 0
+            || p.total > 200
+            || p.total as usize != out.nodes.len()
+            || p.created > p.total
+            || p.blocked > p.total
+            || p.reason.as_ref().is_some_and(|s| s.len() > 2048)
+        {
             return Err("The phase publication has conflicting identities or counts.".into());
         }
     }
     if let Some(previous) = &out.previous {
-        if out.generation.is_none_or(|g|previous.generation>=g) || previous.generation==0 {
+        if out.generation.is_none_or(|g| previous.generation >= g) || previous.generation == 0 {
             return Err("The previous draft has a conflicting generation.".into());
         }
-        crate::teams::action::TeamAction::SubmitDraftPhase {phase:wanted,draft:previous.draft.clone()}.check()?;
+        crate::teams::action::TeamAction::SubmitDraftPhase {
+            phase: wanted,
+            draft: previous.draft.clone(),
+        }
+        .check()?;
     }
     if let Some(r) = &out.rejection {
-        if !crate::teams::action::canonical_uuid(&r.id) || out.generation!=Some(r.generation)
-            || out.phase.state!=zerus_team_plan::PhaseState::Rejected || r.comment.trim().is_empty() || r.comment.len()>16_384 || out.publication.is_some() {
+        if !crate::teams::action::canonical_uuid(&r.id)
+            || out.generation != Some(r.generation)
+            || out.phase.state != zerus_team_plan::PhaseState::Rejected
+            || r.comment.trim().is_empty()
+            || r.comment.len() > 16_384
+            || out.publication.is_some()
+        {
             return Err("The phase rejection is no longer this draft's episode.".into());
         }
     }
-    let published = matches!(out.phase.state,zerus_team_plan::PhaseState::Approved|zerus_team_plan::PhaseState::AwaitingAcceptance|zerus_team_plan::PhaseState::Done);
-    let live = out.live.map(|value|snapshot::read(value,wanted,out.revision)).transpose()?;
-    if live.is_some() && (!published || !out.publication.as_ref().is_some_and(|p|p.state=="published" && p.created==p.total && p.blocked==0)) {
+    let published = matches!(
+        out.phase.state,
+        zerus_team_plan::PhaseState::Approved
+            | zerus_team_plan::PhaseState::AwaitingAcceptance
+            | zerus_team_plan::PhaseState::Done
+    );
+    let live = out
+        .live
+        .map(|value| snapshot::read(value, wanted, out.revision))
+        .transpose()?;
+    if live.is_some()
+        && (!published
+            || !out
+                .publication
+                .as_ref()
+                .is_some_and(|p| p.state == "published" && p.created == p.total && p.blocked == 0))
+    {
         return Err("A live phase snapshot has no settled publication.".into());
     }
-    if live.as_ref().is_some_and(|scope|scope.complete && out.nodes.iter().any(|original|!scope.nodes.iter().any(|n|n.id==original.id))) {
+    if live.as_ref().is_some_and(|scope| {
+        scope.complete
+            && out
+                .nodes
+                .iter()
+                .any(|original| !scope.nodes.iter().any(|n| n.id == original.id))
+    }) {
         return Err("A complete live phase snapshot omits an approved task.".into());
     }
     let nodes = out.nodes.iter().map(|n| n.node(wanted)).collect::<Vec<_>>();
     let metrics = if !unknown.is_empty() {
         PhaseMetrics::unavailable(Unavailable::UnknownFields)
     } else if published {
-        live.as_ref().map_or_else(||PhaseMetrics::unavailable(Unavailable::LiveSnapshotUnavailable),|scope|phase_metrics::project(&scope.nodes,scope.complete))
+        live.as_ref().map_or_else(
+            || PhaseMetrics::unavailable(Unavailable::LiveSnapshotUnavailable),
+            |scope| phase_metrics::project(&scope.nodes, scope.complete),
+        )
     } else {
         phase_metrics::project(&nodes, out.complete)
     };
     let graph = if published {
-        live.as_ref().map_or_else(||graph::project(&[],false),|scope|graph::project(&scope.nodes,scope.complete && unknown.is_empty()))
-    } else { graph::project(&nodes,out.complete && unknown.is_empty()) };
-    let accept_available = out.accept_available && unknown.is_empty() && live.as_ref().is_some_and(|s|s.complete) && out.phase.state==zerus_team_plan::PhaseState::AwaitingAcceptance;
+        live.as_ref().map_or_else(
+            || graph::project(&[], false),
+            |scope| graph::project(&scope.nodes, scope.complete && unknown.is_empty()),
+        )
+    } else {
+        graph::project(&nodes, out.complete && unknown.is_empty())
+    };
+    let accept_available = out.accept_available
+        && unknown.is_empty()
+        && live.as_ref().is_some_and(|s| s.complete)
+        && out.phase.state == zerus_team_plan::PhaseState::AwaitingAcceptance;
     Ok(PhaseDraft {
         phase: out.phase,
         revision: out.revision,

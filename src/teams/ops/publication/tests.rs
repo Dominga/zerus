@@ -53,6 +53,119 @@ pub(crate) fn reserved(h: &mut Harness, ids: &[u32]) -> String {
 }
 
 #[test]
+fn phase_person_operations_refuse_bound_sessions_and_service_facts_keep_their_own_authority() {
+    let mut h = Harness::new();
+    let lead = h.bind("lead");
+    let member = h.bind("m1");
+    h.run(
+        &person(),
+        Operation::SubmitDraftPhase {
+            phase: 1,
+            draft: input(&[1]),
+        },
+    )
+    .unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let operations = [
+        Operation::RejectPhase {
+            phase: 1,
+            generation: 1,
+            comment: "Review again.".into(),
+        },
+        Operation::UndoRejectPhase {
+            phase: 1,
+            generation: 1,
+            rejection: id.clone(),
+        },
+        Operation::AcceptPhase {
+            phase: 1,
+            publication: id.clone(),
+        },
+    ];
+    for op in operations {
+        for actor in [&lead, &member, &other(), &service()] {
+            refused(h.run(actor, op.clone()), code::NOT_ALLOWED);
+        }
+    }
+    let approve = Operation::ApprovePhase {
+        phase: 1,
+        generation: 1,
+        confirm_initial: true,
+    };
+    for actor in [&lead, &member, &other()] {
+        refused(h.run(actor, approve.clone()), code::NOT_ALLOWED);
+    }
+    refused(h.run(&service(), approve), code::INVALID_STATE);
+    for op in [
+        Operation::ReconcilePhaseReview {
+            phase: 1,
+            generation: 1,
+        },
+        Operation::ReconcilePublication {
+            phase: 1,
+            publication: id.clone(),
+        },
+        Operation::ReconcilePhase {
+            phase: 1,
+            publication: id,
+        },
+    ] {
+        refused(h.run(&person(), op), code::NOT_ALLOWED);
+    }
+    assert!(h.store.phase_draft(TEAM, 1).unwrap().publication.is_none());
+}
+
+#[test]
+fn initial_approval_requires_the_persons_roster_confirmation_even_with_auto_policy() {
+    let mut h = Harness::empty();
+    let mut start = serde_json::to_value(create()).unwrap();
+    start["op"] = "start_planning".into();
+    start["goal"] = "Prepare the initial review.".into();
+    start["bundle"]["template"]["settings"]["plan_approval"] = "auto".into();
+    h.run(&person(), serde_json::from_value(start).unwrap())
+        .unwrap();
+    h.bind("lead");
+    h.run(
+        &person(),
+        Operation::SubmitDraftPhase {
+            phase: 1,
+            draft: input(&[1]),
+        },
+    )
+    .unwrap();
+    for (actor, confirm_initial) in [(service(), true), (person(), false)] {
+        refused(
+            h.run(
+                &actor,
+                Operation::ApprovePhase {
+                    phase: 1,
+                    generation: 1,
+                    confirm_initial,
+                },
+            ),
+            code::INVALID_STATE,
+        );
+    }
+    assert!(h.store.publication_work(TEAM).unwrap().is_empty());
+    h.run(
+        &person(),
+        Operation::ApprovePhase {
+            phase: 1,
+            generation: 1,
+            confirm_initial: true,
+        },
+    )
+    .unwrap();
+    let phase = h.store.phase_draft(TEAM, 1).unwrap();
+    assert!(phase.publication.is_some());
+    assert!(phase.live.is_none());
+    assert_eq!(
+        h.store.team(TEAM).unwrap().unwrap().status,
+        TeamStatus::Planning
+    );
+}
+
+#[test]
 fn approval_freezes_original_requests_and_does_not_publish_partial_tasks() {
     let mut h = Harness::new();
     let id = reserved(&mut h, &[1, 2]);

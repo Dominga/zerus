@@ -99,7 +99,7 @@ pub(crate) fn write(
             }
         }
         db.execute(
-            "UPDATE phase_publication_nodes SET cleared=1,clear_outcome='cleared' WHERE team=?1 AND node=?2",
+            "UPDATE phase_publication_nodes SET cleared=1,clear_outcome='cleared',clear_failures=0 WHERE team=?1 AND node=?2",
             params![team_id, node],
         )
         .map_err(fail)?;

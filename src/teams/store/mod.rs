@@ -410,8 +410,13 @@ pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
 /// store when another team starts planning. Called under the operation lock.
 pub(crate) fn raise_execution_floor(db: &Connection, floor: u32) -> Result<()> {
     execution_fence(db)?;
-    let current: u32 = db.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(storage)?;
-    if current < floor { db.pragma_update(None,"user_version",floor).map_err(storage)?; }
+    let current: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if current < floor {
+        db.pragma_update(None, "user_version", floor)
+            .map_err(storage)?;
+    }
     Ok(())
 }
 

@@ -30,8 +30,11 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         .map_err(storage)?;
     let old_nodes = if let Some(wanted) = generation {
         let p = old.as_ref().ok_or_else(missing)?;
-        if p.kind != PhaseKind::Plan || !matches!(p.state, PhaseState::Draft | PhaseState::Rejected) {
-            return Err(invalid("Only a draft or rejected planned phase can be edited."));
+        if p.kind != PhaseKind::Plan || !matches!(p.state, PhaseState::Draft | PhaseState::Rejected)
+        {
+            return Err(invalid(
+                "Only a draft or rejected planned phase can be edited.",
+            ));
         }
         if store::publication::publication(ctx.db, &ctx.team.id, phase)?.is_some() {
             return Err(invalid("Publication has frozen this draft."));
@@ -94,8 +97,8 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
         )
         .map_err(storage)?;
     let next_node = validate(ctx, &record, draft, &old_nodes, next_node)?;
-    if let (Some(record),Some(generation)) = (&previous,generation) {
-        phase_review::remember(ctx,record,&old_nodes,generation)?;
+    if let (Some(record), Some(generation)) = (&previous, generation) {
+        phase_review::remember(ctx, record, &old_nodes, generation)?;
     }
     let next_generation = generation
         .unwrap_or(0)
@@ -122,23 +125,32 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
             )
             .map_err(storage)?;
         ctx.db.execute("UPDATE phase_drafts SET generation=?3,actor=?4,updated_ms=?5 WHERE team=?1 AND phase=?2",params![ctx.team.id,phase,next_generation,encode(ctx.actor)?,ctx.now]).map_err(storage)?;
-        ctx.db
-            .execute(
-                "DELETE FROM phase_draft_nodes WHERE team=?1 AND phase=?2",
-                params![ctx.team.id, phase],
-            )
-            .map_err(storage)?;
+        for node in &old_nodes {
+            if !draft.nodes.iter().any(|n| n.id == node.id) {
+                ctx.db
+                    .execute(
+                        "DELETE FROM phase_draft_nodes WHERE team=?1 AND phase=?2 AND id=?3",
+                        params![ctx.team.id, phase, node.id],
+                    )
+                    .map_err(storage)?;
+            }
+        }
     }
     for node in &draft.nodes {
         ctx.db
             .execute(
-                "INSERT INTO phase_draft_nodes(team,phase,id,data) VALUES(?1,?2,?3,?4)",
+                "INSERT INTO phase_draft_nodes(team,phase,id,data) VALUES(?1,?2,?3,?4) ON CONFLICT(team,id) DO UPDATE SET data=excluded.data",
                 params![ctx.team.id, phase, node.id, encode(node)?],
             )
             .map_err(storage)?;
     }
-    phase_review::close_rejection(ctx,phase)?;
-    ctx.db.execute("UPDATE phase_reviews SET rejection=NULL,comment=NULL WHERE team=?1 AND phase=?2",params![ctx.team.id,phase]).map_err(storage)?;
+    phase_review::close_rejection(ctx, phase)?;
+    ctx.db
+        .execute(
+            "UPDATE phase_reviews SET rejection=NULL,comment=NULL WHERE team=?1 AND phase=?2",
+            params![ctx.team.id, phase],
+        )
+        .map_err(storage)?;
     ctx.db
         .execute(
             "UPDATE teams SET next_node=?2 WHERE id=?1",
@@ -150,9 +162,20 @@ pub(super) fn write(ctx: &mut Context<'_>) -> Result<()> {
 }
 
 pub(super) fn revalidate(ctx: &Context<'_>, phase: &Phase, nodes: &[DraftNode]) -> Result<()> {
-    let next: u32 = ctx.db.query_row("SELECT next_node FROM teams WHERE id=?1",[&ctx.team.id],|r|r.get(0)).map_err(storage)?;
-    let input=DraftInput{title:phase.title.clone(),barrier:phase.barrier,nodes:nodes.to_vec()};
-    validate(ctx,phase,&input,nodes,next).map(|_|())
+    let next: u32 = ctx
+        .db
+        .query_row(
+            "SELECT next_node FROM teams WHERE id=?1",
+            [&ctx.team.id],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    let input = DraftInput {
+        title: phase.title.clone(),
+        barrier: phase.barrier,
+        nodes: nodes.to_vec(),
+    };
+    validate(ctx, phase, &input, nodes, next).map(|_| ())
 }
 
 fn named(value: &str, field: &str, bytes: usize) -> Result<()> {
@@ -204,13 +227,23 @@ fn validate(
             .ok_or_else(|| over("Node IDs are exhausted."))?;
     }
     let mut graph = other_drafts(ctx, phase.n)?;
-    graph_scope::extend(ctx, &mut graph)?;
+    graph_scope::extend(ctx, &mut graph, input)?;
     let removed: BTreeSet<_> = old_ids.difference(&ids).copied().collect();
+    for id in &removed {
+        let referenced:bool=ctx.db.query_row("SELECT EXISTS(SELECT 1 FROM phase_draft_dependencies WHERE team=?1 AND dependency=?2)",params![ctx.team.id,id],|r|r.get(0)).map_err(storage)?;
+        if referenced {
+            return Err(invalid(
+                "Another plan node depends on a node being removed.",
+            ));
+        }
+    }
     if graph
         .iter()
         .any(|n| n.deps.iter().any(|d| removed.contains(&d.node)))
     {
-        return Err(invalid("Another plan node depends on a node being removed."));
+        return Err(invalid(
+            "Another plan node depends on a node being removed.",
+        ));
     }
     let others: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n.phase)).collect();
     for n in &input.nodes {
@@ -300,7 +333,9 @@ fn validate(
         phases.insert(p.n, p);
     }
     phases.insert(phase.n, phase.clone());
-    if graph.iter().any(|n|!phases.contains_key(&n.phase)) {return Err(invalid("A plan node names an unknown phase."));}
+    if graph.iter().any(|n| !phases.contains_key(&n.phase)) {
+        return Err(invalid("A plan node names an unknown phase."));
+    }
     let index: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n)).collect();
     // Bound work under the writer lock, including long path components. The
     // request's byte limit alone permits a quadratic number of path pairs.
@@ -318,7 +353,11 @@ fn validate(
     let mut ancestry = BTreeMap::new();
     for a in graph.iter().filter(|n| n.phase == phase.n) {
         for b in graph.iter().filter(|n| n.phase != phase.n || n.id > a.id) {
-            if matches!(a.state,NodeState::Accepted|NodeState::Cancelled) || matches!(b.state,NodeState::Accepted|NodeState::Cancelled) { continue; }
+            if matches!(a.state, NodeState::Accepted | NodeState::Cancelled)
+                || matches!(b.state, NodeState::Accepted | NodeState::Cancelled)
+            {
+                continue;
+            }
             if a.writes.is_empty() || b.writes.is_empty() {
                 continue;
             }

@@ -1,6 +1,47 @@
 use super::*;
 
 #[test]
+fn the_complete_live_snapshot_keeps_pipeline_stages_and_their_unknown_estimate() {
+    let (mut f, p, requests) = fixture();
+    f.h.bind("m1");
+    f.h.bind("m3");
+    for r in &requests {
+        write(&f, r).unwrap();
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::ReconcilePublication {
+            phase: 1,
+            publication: p,
+        },
+    )
+    .unwrap();
+    for r in &requests {
+        crate::teams::tasks::observe(&f.config.state, &r.task).unwrap();
+    }
+    let target = requests[0].node.id;
+    // Native report/attempt observations are supplied to the real operation
+    // writers; this test runs no native agent.
+    f.h.submit(target, "m1");
+    f.h.report(target, "m1");
+    let stage = f.h.store.stage_tasks(TEAM, 1, None).unwrap().rows[0].node;
+    let snapshot = f.h.store.phase_draft(TEAM, 1).unwrap().live.unwrap();
+    assert!(snapshot.complete);
+    assert_eq!(snapshot.nodes.len(), 3);
+    let row = snapshot.nodes.iter().find(|n| n.id == stage).unwrap();
+    assert_eq!(row.kind, zerus_team_plan::NodeKind::Stage);
+    assert_eq!(row.stage_of, Some(target));
+    assert_eq!(row.phase, 1);
+    assert_eq!(row.estimate_minutes, 0);
+    let metrics =
+        zerus_client_core::teams::view::phase_metrics::project(&snapshot.nodes, snapshot.complete);
+    assert_eq!(metrics.total_nodes, 3);
+    assert_eq!(metrics.known_estimates, 2);
+    assert!(metrics.critical_path_minutes.is_none());
+    assert!(metrics.average_parallelism_tenths.is_none());
+}
+
+#[test]
 fn recovery_keeps_the_original_request_and_lead_after_the_lead_is_rebound() {
     let (mut f, _, requests) = fixture();
     let r = &requests[0];

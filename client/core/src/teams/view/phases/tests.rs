@@ -23,7 +23,9 @@ fn decoded(read: &TeamRead, value: Value) -> Result<Value, crate::teams::read::T
         },
     )
 }
-fn ready() -> (TeamsModel, Instant) { ready_from(&context()) }
+fn ready() -> (TeamsModel, Instant) {
+    ready_from(&context())
+}
 fn ready_from(source: &Value) -> (TeamsModel, Instant) {
     let now = Instant::now();
     let mut m = TeamsModel::default();
@@ -56,7 +58,9 @@ fn view_from(source: &Value) -> crate::teams::view::TeamView {
     }
     latest.unwrap()
 }
-fn wire() -> Value { wire_from(&context()) }
+fn wire() -> Value {
+    wire_from(&context())
+}
 fn wire_from(source: &Value) -> Value {
     let v = view_from(source);
     let mut c = crate::Coalescer::new();

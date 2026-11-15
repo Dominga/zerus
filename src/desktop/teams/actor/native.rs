@@ -228,7 +228,7 @@ impl Ports for Native {
         request: &crate::teams::store::publication::PlannedTaskRequest,
         clear: bool,
     ) -> Result<super::ports::TaskReply> {
-        self.planned_task_child(team,request,clear)
+        self.planned_task_child(team, request, clear)
     }
     fn stage(
         &mut self,

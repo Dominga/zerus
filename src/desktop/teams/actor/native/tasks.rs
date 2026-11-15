@@ -10,19 +10,43 @@ impl Native {
         clear: bool,
     ) -> Result<TaskReply> {
         let input = json!({"schema":1,"id":request.task.uuid,"team":request.team,"node":request.node.id,"clear":clear});
-        task_reply(self.task_child(&["task".into(),"team-planned".into(),"--json".into()],&input,&request.task.uuid,|| {
-            let store=Store::open(&self.config.state)?.admission()?;
-            let team=store.team(&expected.id)?.ok_or_else(||problem("Publication team disappeared"))?;
-            if team.home!=self.machine || team.home!=request.home || team.project!=request.task.project || team.owner!=expected.owner || store.planned_task(&team.id,request.node.id,&request.task.uuid)?.as_ref()!=Some(request) {
-                return Err(problem("Publication task admission changed"));
-            }
-            if clear {
-                if !matches!(team.status,TeamStatus::Stopped|TeamStatus::Archived) {return Err(problem("Publication is not stopped"));}
-            } else if !crate::teams::ops::publication::writing_allowed(store.db.as_ref().unwrap(),&team)? {
-                return Err(problem("Publication is paused or stopped"));
-            }
-            Ok(store)
-        }),&input,if clear {"cleared"} else {"created"})
+        task_reply(
+            self.task_child(
+                &["task".into(), "team-planned".into(), "--json".into()],
+                &input,
+                &request.task.uuid,
+                || {
+                    let store = Store::open(&self.config.state)?.admission()?;
+                    let team = store
+                        .team(&expected.id)?
+                        .ok_or_else(|| problem("Publication team disappeared"))?;
+                    if team.home != self.machine
+                        || team.home != request.home
+                        || team.project != request.task.project
+                        || team.owner != expected.owner
+                        || store
+                            .planned_task(&team.id, request.node.id, &request.task.uuid)?
+                            .as_ref()
+                            != Some(request)
+                    {
+                        return Err(problem("Publication task admission changed"));
+                    }
+                    if clear {
+                        if !matches!(team.status, TeamStatus::Stopped | TeamStatus::Archived) {
+                            return Err(problem("Publication is not stopped"));
+                        }
+                    } else if !crate::teams::ops::publication::writing_allowed(
+                        store.db.as_ref().unwrap(),
+                        &team,
+                    )? {
+                        return Err(problem("Publication is paused or stopped"));
+                    }
+                    Ok(store)
+                },
+            ),
+            &input,
+            if clear { "cleared" } else { "created" },
+        )
     }
     pub(super) fn create_task(
         &self,

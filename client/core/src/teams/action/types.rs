@@ -43,10 +43,25 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
-    ApprovePhase { phase: u32, generation: u64, confirm_initial: bool },
-    RejectPhase { phase: u32, generation: u64, comment: String },
-    UndoRejectPhase { phase: u32, generation: u64, rejection: String },
-    AcceptPhase { phase: u32, publication: String },
+    ApprovePhase {
+        phase: u32,
+        generation: u64,
+        confirm_initial: bool,
+    },
+    RejectPhase {
+        phase: u32,
+        generation: u64,
+        comment: String,
+    },
+    UndoRejectPhase {
+        phase: u32,
+        generation: u64,
+        rejection: String,
+    },
+    AcceptPhase {
+        phase: u32,
+        publication: String,
+    },
     StartPlanning {
         template: String,
         project: String,

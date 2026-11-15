@@ -74,6 +74,7 @@ use crate::teams::{ops::tests::*, store::Store};
 use zerus_team_plan::model::*;
 mod cancel;
 mod core;
+mod publication;
 #[cfg(unix)]
 mod fresh_members;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

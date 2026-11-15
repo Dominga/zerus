@@ -6146,7 +6146,17 @@ successful task, and a missing task after a committed creation claim is not
 reinserted. Unreadable recovery is attempted at most three times before the
 phase stays explicitly uncertain. A stop clears unpublished task keys through
 the ordinary silent key writer and retains a final refusal or unknown outcome.
+Creation and key cleanup have separate unknown-result budgets. A late creation
+answer after Stop cannot answer cleanup, and a known pause before writing can
+resume with the original saved request. An unchanged Auto-approval failure uses
+the existing retry gate instead of appending a refusal on every service pass.
 Created task documents are retained, not deleted to roll back publication.
+
+Dependencies on unpublished draft nodes stay in a companion table tied to the
+actual draft identities. The kernel holds that missing prerequisite; publishing
+it atomically promotes the incoming edges to ordinary dependencies. Draft
+editing preserves referenced IDs and checks cycles through live, archived and
+draft nodes, without creating task identities for drafts.
 
 `phase --phase N` adds `live: {phase, revision, nodes, complete}` for a published
 phase. This is the same reader and poller, with live and archived nodes including

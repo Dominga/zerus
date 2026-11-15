@@ -2,7 +2,11 @@
 //! edits. Keep live nodes and only the archived ancestors they actually name.
 use super::*;
 
-pub(super) fn extend(ctx: &Context<'_>, graph: &mut Vec<Node>) -> Result<()> {
+pub(super) fn extend(
+    ctx: &Context<'_>,
+    graph: &mut Vec<Node>,
+    candidate: &DraftInput,
+) -> Result<()> {
     let mut nodes: BTreeMap<_, _> = graph.drain(..).map(|n| (n.id, n)).collect();
     let mut stmt = ctx
         .db
@@ -32,6 +36,12 @@ pub(super) fn extend(ctx: &Context<'_>, graph: &mut Vec<Node>) -> Result<()> {
         .values()
         .flat_map(|n| n.deps.iter().map(|d| d.node))
         .collect();
+    pending.extend(
+        candidate
+            .nodes
+            .iter()
+            .flat_map(|n| n.deps.iter().map(|d| d.node)),
+    );
     let mut bytes = nodes.values().try_fold(0usize, |size, n| {
         encode(n).map(|s| size.saturating_add(s.len()))
     })?;

@@ -96,14 +96,7 @@ impl Store {
         self.index.connection().execute("UPDATE catalog_queue SET done=0,skipped=0,identity=NULL WHERE id IN(SELECT id FROM (SELECT id,done,skipped,identity FROM catalog_queue WHERE reader_version<? ORDER BY reader_version,id LIMIT 32) WHERE done<>0 OR skipped<>0 OR identity IS NOT NULL)", [metadata_cache::VERSION]).map_err(|e| e.to_string())?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
-        // Preparation captures canonical headers before publishing them. A
-        // second read connection can wait on this same batch's DELETE-journal
-        // page spills, spending its budget on its own writer's lock.
-        let mut reader = if metadata_only {
-            metadata::Reader::default()
-        } else {
-            metadata::Reader::cached(state)
-        };
+        let mut reader = metadata::Reader::cached(state);
         if !metadata_only {
             self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
         }

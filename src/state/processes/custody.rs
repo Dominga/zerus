@@ -234,6 +234,12 @@ impl Custody {
                 return Err(Failure::Identity);
             }
             let status = exit(&info).ok_or(Failure::Wait)?;
+            // The original supervisor clears its existing signal registration
+            // while this root is still waitable, then consumes through its
+            // sealed facade. A passive P_ALL poll must never win that race.
+            if self.until.is_none() && pid == self.root.id() && self.root_exit.is_none() {
+                return Ok(());
+            }
             // Same retained pidfd, no PID adoption or blocking wait.
             let reaped = wait(libc::P_PIDFD, pin.handle.as_raw_fd() as u32, 0)
                 .map_err(|_| Failure::Wait)?

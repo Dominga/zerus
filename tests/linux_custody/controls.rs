@@ -571,6 +571,12 @@ fn original(case: &str, dir: &Path) {
         assert!(Instant::now() < end);
         tick();
     }
+    assert_eq!(
+        owner.poll(),
+        Snapshot::Pending,
+        "passive poll must leave the original wait to its facade"
+    );
+    assert_eq!(owner.root_exit(), None);
     assert_eq!(owner.consume_root().unwrap(), Some(17));
     assert_eq!(owner.consume_root().unwrap(), Some(17));
     assert!(matches!(

@@ -160,6 +160,19 @@ impl Store {
 }
 pub(super) fn version(file: &File) -> anyhow::Result<String> {
     let (id, m) = crate::platform::FileIdentity::with_metadata(file)?;
+    stamp(&id, &m)
+}
+pub(super) fn publication_version(file: &File) -> anyhow::Result<(String, String)> {
+    let (id, m) = crate::platform::FileIdentity::with_metadata(file)?;
+    let stamp = stamp(&id, &m)?;
+    // Rename can change ctime. The private written object's identity, length
+    // and mtime must remain unchanged across its publication, before a full
+    // post-publication stamp is certified. Both come from this one fstat.
+    let stable =
+        serde_json::to_string(&(id.device, id.inode, id.modified, id.modified_nanos, m.len()))?;
+    Ok((stable, stamp))
+}
+fn stamp(id: &crate::platform::FileIdentity, m: &std::fs::Metadata) -> anyhow::Result<String> {
     anyhow::ensure!(m.is_file(), "Display source is not regular");
     #[cfg(unix)]
     let changed = {

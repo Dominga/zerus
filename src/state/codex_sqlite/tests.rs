@@ -888,6 +888,29 @@ fn large_wal_deadline() {
     if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
         return;
     }
+    let directory = large_wal_fixture();
+    let home = directory.path();
+    let start = Instant::now();
+    let error =
+        rollout_paths(home, &[CHILD_ID.into()], start + Duration::from_millis(50)).unwrap_err();
+    let elapsed = start.elapsed();
+    println!(
+        "large_wal_frames_checked={}",
+        WAL_PROGRESS.with(|work| work.get().0)
+    );
+    println!(
+        "large_wal_deadline_elapsed_ms={}",
+        elapsed.as_secs_f64() * 1000.0
+    );
+    assert!(error.contains("deadline"), "{error}");
+    // The 50 ms owner deadline above must expire, but scheduler pauses also
+    // count toward elapsed wall time (155+ ms under local CPU contention).
+    // Keep a coarse watchdog; the deadline error, not throughput, is the contract.
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+}
+
+// Both controls use native SQLite writes to generate the same valid 30 MiB WAL.
+fn large_wal_fixture() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path();
     let database = home.join("state_5.sqlite");
@@ -914,20 +937,41 @@ fn large_wal_deadline() {
     }
     let wal = fs::read(&wal_path).unwrap();
     assert!(wal.len() > 30 * 1024 * 1024 && wal.len() <= MAX_SOURCE as usize);
+    let page = u32::from_be_bytes(wal[8..12].try_into().unwrap()) as usize;
+    println!(
+        "large_wal_bytes={} frames={}",
+        wal.len(),
+        (wal.len() - 32) / (page + 24)
+    );
     drop(db);
     fs::write(&database, main).unwrap();
     fs::write(&wal_path, wal).unwrap();
-    let start = Instant::now();
-    let error =
-        rollout_paths(home, &[CHILD_ID.into()], start + Duration::from_millis(50)).unwrap_err();
-    let elapsed = start.elapsed();
-    println!(
-        "large_wal_deadline_elapsed_ms={}",
-        elapsed.as_secs_f64() * 1000.0
+    directory
+}
+
+#[test]
+fn a_large_wal_stops_at_the_next_expired_validation_checkpoint() {
+    isolated("large_wal_progress_deadline");
+}
+
+#[test]
+#[ignore = "process-isolated private state fixture"]
+fn large_wal_progress_deadline() {
+    if std::env::var("ZERUS_CODEX_SQLITE_FIXTURE").as_deref() != Ok("1") {
+        return;
+    }
+    let directory = large_wal_fixture();
+    WAL_PROGRESS.with(|work| work.set((0, Some(1))));
+    // Raw source copying has a generous real deadline. The test-only hook
+    // expires the local validation deadline after exactly one valid frame.
+    let result = rollout_paths(
+        directory.path(),
+        &[CHILD_ID.into()],
+        Instant::now() + Duration::from_secs(60),
     );
+    let checked = WAL_PROGRESS.with(|work| work.replace((0, None)).0);
+    let error = result.unwrap_err();
     assert!(error.contains("deadline"), "{error}");
-    // The 50 ms owner deadline above must expire, but scheduler pauses also
-    // count toward elapsed wall time (155+ ms under local CPU contention).
-    // Keep a coarse watchdog; the deadline error, not throughput, is the contract.
-    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    println!("wal_frames_checked_before_refusal={checked}");
+    assert_eq!(checked, 1, "WAL validation continued after its deadline");
 }

@@ -2,6 +2,9 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use std::path::Component;
 pub(super) const SEED_BYTES: usize = 256 << 10;
+// V1 could pair a writer's projection with a different writer's file stamp.
+// Never reuse those rows: bounded repair must observe the canonical bytes.
+const SEED_VERSION: u64 = 2;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Key(pub String);
 impl Key {
@@ -223,7 +226,8 @@ impl Seed {
             }
         }
         let digest = storage::label_key(&serde_json::to_string(&out)?);
-        let encoded = serde_json::to_string(&json!({"version":1,"record":out,"digest":digest}))?;
+        let encoded =
+            serde_json::to_string(&json!({"version":SEED_VERSION,"record":out,"digest":digest}))?;
         anyhow::ensure!(
             encoded.len() <= SEED_BYTES,
             "Display seed exceeds its bound"
@@ -238,7 +242,7 @@ impl Seed {
         key.validate()?;
         let value: Value = serde_json::from_str(encoded)?;
         anyhow::ensure!(
-            value["version"] == 1 && key.matches(&value["record"]),
+            value["version"] == SEED_VERSION && key.matches(&value["record"]),
             "Display seed identity changed"
         );
         let digest = storage::label_key(&serde_json::to_string(&value["record"])?);

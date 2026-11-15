@@ -4,6 +4,8 @@
 //! which the mobile clients' tests share.
 use super::super::*;
 use sha2::{Digest, Sha256};
+mod provenance;
+pub(super) use provenance::qualify;
 
 const UNAVAILABLE: &str = "Answer this form in OpenCode";
 const MAX_FIELDS: usize = 32;

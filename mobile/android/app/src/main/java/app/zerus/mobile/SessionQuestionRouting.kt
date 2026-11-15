@@ -34,7 +34,7 @@ object SessionQuestionRouting {
         (raw.opt("cmd") as? String).orEmpty().ifBlank { (raw.opt("agent") as? String).orEmpty() }.ifBlank { target.session.substringBefore('/') }
     /** A qualified session with a parent link; the host validates each blocking question. */
     fun applies(target: Target, raw: JSONObject?): Boolean = raw != null && target.agentId.isBlank() && target.archiveId.isBlank() &&
-        raw.optJSONObject("parent") != null && raw.opt("state") != "archived" && agent(target,raw) in setOf("claude","kimi","dsh")
+        raw.optJSONObject("parent") != null && raw.opt("state") != "archived" && agent(target,raw) in setOf("claude","kimi","dsh","opencode")
     fun parentName(raw: JSONObject?): String =
         (raw?.optJSONObject("parent")?.opt("name") as? String)?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "parent"
     /** What choosing it does: turn sending off, turn it on, or (unknown) nothing yet. */

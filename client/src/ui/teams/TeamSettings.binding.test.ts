@@ -2,18 +2,17 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
-import { teamView } from "./fixtures";
+import scope from "../../../core/src/teams/fixtures/provider-scope.json";
 import providers from "../../../core/src/teams/fixtures/providers.json";
-import status from "../../../core/src/teams/fixtures/cli-status.json";
-import list from "../../../../crates/team-plan/fixtures/cli-list.json";
 import { completeSettings } from "./team-settings";
-const writtenSettings = () => { const value = structuredClone(status.team.settings); if (!completeSettings(value)) throw new Error("Incomplete product fixture"); return value; };
+const writtenSettings = () => { const value = structuredClone(scope.team.settings); if (!completeSettings(value)) throw new Error("Incomplete product fixture"); return value; };
 import type { TeamFailure, TeamOfSession, TeamView, UnresolvedCall } from "../../store/teams";
+const teamView = scope.team as unknown as TeamView;
 
 const f = vi.hoisted(() => ({
   selected: (() => undefined) as () => { key: string; computer: string; launchId: string; sessionId: string; runId: string } | undefined,
   choose: (_row: unknown) => {}, lookup: vi.fn(), close: vi.fn(), open: vi.fn(), run: vi.fn(), check: vi.fn(), dismiss: vi.fn(), clear: vi.fn(), probe: vi.fn(), hidden: vi.fn(), busy: vi.fn((_team?: string) => false),
-  providers: vi.fn(), listed: vi.fn<() => typeof list.rows>(),
+  providers: vi.fn(), listed: vi.fn<() => typeof scope.list.teams>(),
   setBinding: (_value: TeamOfSession) => {}, setTeam: (_value: TeamView | undefined) => {}, setFailure: (_value: TeamFailure | null) => {}, setUnresolved: (_value: UnresolvedCall[]) => {},
 }));
 vi.mock("../../store/ui", async () => {
@@ -41,7 +40,7 @@ import { TeamTab } from "./TeamTab";
 let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; f.choose(undefined); f.setBinding({ state: "unknown" }); f.setTeam(undefined); f.setFailure(null); f.setUnresolved([]); document.body.replaceChildren(); vi.clearAllMocks(); f.busy.mockImplementation(() => false); });
 const select = (id: string) => f.choose({ key: id, computer: "workstation", launchId: `launch-${id}`, sessionId: "not-a-launch-id", runId: `run-${id}` });
-function setup() { f.listed.mockReturnValue(list.rows); const host = document.createElement("div"); document.body.append(host); dispose = render(() => createComponent(TeamTab, {}), host); return host; }
+function setup() { f.listed.mockReturnValue(scope.list.teams); const host = document.createElement("div"); document.body.append(host); dispose = render(() => createComponent(TeamTab, {}), host); return host; }
 
 it.each(["settings", "validation_config"])("sends settings from the actual Team tab and blocks unresolved %s", async (kind) => {
   select("a"); f.setBinding({ state: "lead", team: teamView.bar.id }); const host = setup();
@@ -55,7 +54,7 @@ it.each(["settings", "validation_config"])("sends settings from the actual Team 
   host.querySelector<HTMLButtonElement>("[data-settings-save]")!.click();
   await vi.waitFor(() => expect(f.run).toHaveBeenCalledOnce());
   const call = f.run.mock.calls[0][0];
-  expect(call).toEqual({ team: teamView.bar.id, team_name: "Fixes", expected_revision: 16, request_id: "request-1", action: { kind: "settings", settings: { ...status.team.settings, routing: "lead" } } });
+  expect(call).toEqual({ team: teamView.bar.id, team_name: "Fixes", expected_revision: teamView.revision, request_id: "request-1", action: { kind: "settings", settings: { ...writtenSettings(), routing: "lead" } } });
   const held = kind === "settings" ? call : { ...call, action: { kind, selection: { source_digest: providers.inspection.source_digest, digest: providers.inspection.digest, override_config: null } } };
   f.setUnresolved([{ call: held, detail: "Read the team before sending it again.", state: "uncertain" }]);
   await vi.waitFor(() => expect(host.querySelector("[data-team-settings]")).toBeNull());
@@ -94,8 +93,7 @@ it("uses the displayed team's in-flight lock for Settings and its open dialog", 
 it("reads provider metadata for a real Team view whose home is supplied by the list", async () => {
   select("a"); f.setBinding({ state: "lead", team: teamView.bar.id }); const host = setup();
   await vi.waitFor(() => expect(f.open).toHaveBeenCalled());
-  const revision = providers.inspection.revision;
-  f.setTeam({ ...teamView, revision, bar: { ...teamView.bar, revision }, settings: writtenSettings() });
+  f.setTeam(structuredClone(teamView));
   f.providers.mockResolvedValue(structuredClone(providers.inspection));
   host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!.click();
   await vi.waitFor(() => expect(host.querySelector("[data-provider-source]")?.textContent).toContain("Detected from project metadata"));
@@ -109,7 +107,7 @@ it.each(["id", "project"] as const)("does not use a list row with another %s for
   select("a"); f.setBinding({ state: "lead", team: teamView.bar.id }); const host = setup();
   await vi.waitFor(() => expect(f.open).toHaveBeenCalled());
   f.setTeam({ ...teamView, settings: writtenSettings() });
-  const foreign = structuredClone(list.rows); foreign[0][field] = "foreign";
+  const foreign = structuredClone(scope.list.teams); foreign[0][field] = "foreign";
   f.listed.mockReturnValue(foreign);
   host.querySelector<HTMLButtonElement>("[data-team-settings-open]")!.click();
   await vi.waitFor(() => expect(host.textContent).toContain("The team’s home computer is missing from the loaded team list."));

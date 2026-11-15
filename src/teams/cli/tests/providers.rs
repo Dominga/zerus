@@ -70,6 +70,34 @@ mod cases {
         fixture["inspection"]["checkout"] = json!("/workspace/example-project");
         fixture["inspection"]["source_digest"] = json!("a".repeat(64));
         fixture["inspection"]["digest"] = json!("b".repeat(64));
+        // The dialog's scope comes from our real status/list reads and core projections.
+        let read_scope = |command: &str| {
+            let (reply, exit) = h.cli(&Caller::Person, command, "");
+            assert_eq!(exit, 0, "{reply}");
+            reply
+        };
+        let scope = json!({
+            "team": zerus_client_core::teams::view::team(
+                &read_scope(&format!("status --team {TEAM}")),
+                &read_scope(&format!("queue --team {TEAM}")),
+            ),
+            "list": zerus_client_core::teams::view::list(&read_scope("list")),
+        });
+        assert_eq!(scope["team"]["bar"]["id"], r["inspection"]["team"]);
+        assert_eq!(scope["team"]["revision"], r["inspection"]["revision"]);
+        let scope_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("client/core/src/teams/fixtures/provider-scope.json");
+        if std::env::var_os("ZERUS_UPDATE_PROVIDER_FIXTURE").is_some() {
+            fs::write(
+                &scope_path,
+                format!("{}\n", serde_json::to_string_pretty(&scope).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            scope,
+            serde_json::from_slice::<serde_json::Value>(&fs::read(scope_path).unwrap()).unwrap()
+        );
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("client/core/src/teams/fixtures/providers.json");
         if std::env::var_os("ZERUS_UPDATE_PROVIDER_FIXTURE").is_some() {

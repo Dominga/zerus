@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createComponent, createSignal } from "solid-js";
 import { render } from "solid-js/web";
 import { ProviderSettings } from "./ProviderSettings";
-import { teamView } from "./fixtures";
+import scope from "../../../core/src/teams/fixtures/provider-scope.json";
 import payload from "../../../core/src/teams/fixtures/providers.json";
 import type { ProviderInspection, ProviderRead } from "../../store/teamProviders";
 import type { TeamCall, TeamOutcome, TeamView } from "../../store/teams";
@@ -11,7 +11,7 @@ let dispose: (() => void) | undefined;
 afterEach(() => { dispose?.(); dispose = undefined; document.body.replaceChildren(); });
 const tick = async () => { await new Promise((resolve) => setTimeout(resolve, 0)); };
 const inspection = () => structuredClone(payload.inspection) as ProviderInspection;
-const view = (): TeamView => ({ ...structuredClone(teamView), revision: inspection().revision, bar: { ...teamView.bar, id: inspection().team, project: inspection().project, revision: inspection().revision } });
+const view = (): TeamView => structuredClone(scope.team) as unknown as TeamView;
 function setup(port = vi.fn(async (_: ProviderRead) => inspection()), outcome: TeamOutcome = { outcome: "done", receipt: {}, request_id: "example" }, home = inspection().home) {
   const host = document.createElement("div"); document.body.append(host);
   const [shown, show] = createSignal(view());

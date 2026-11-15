@@ -385,7 +385,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             }
             if (editable) OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), label = { Text("Prompt") }, minLines = 3, maxLines = 12)
             else SelectionContainer { Text(task.text, style = MaterialTheme.typography.bodyMedium) }
-            val sessionLabel = (target as? TaskTarget.Session)?.session?.session?.let(TasksPresentation::shortName) ?: "Any session"
+            val sessionLabel = (target as? TaskTarget.Session)?.session?.let { TasksPresentation.shortName(model.taskCurrentSession(it) ?: it.session) } ?: "Any session"
             if (editable) OutlinedButton(onClick = { choosing = true }, Modifier.fillMaxWidth()) {
                 Text("Session: $sessionLabel", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Icon(Icons.Default.ArrowDropDown, null)

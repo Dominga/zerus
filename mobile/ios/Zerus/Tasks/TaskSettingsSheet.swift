@@ -75,7 +75,7 @@ struct TaskSettingsSheet: View {
                                                send: tasks.sendRoute, cancel: tasks.cancelRoute, current: tasks.taskCurrentSession).first?.actions ?? [])
             .filter { $0.action != .edit }
         let sessionLabel: String = switch chosenTarget {
-        case .session(let session): TasksPresentation.shortName(session.session)
+        case .session(let session): TasksPresentation.shortName(tasks.taskCurrentSession(session) ?? session.session)
         case .anySession: "Any session"
         }
         return ScrollView {

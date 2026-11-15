@@ -112,6 +112,11 @@ pub(super) fn write(
     if r.project.0 != reference.project {
         return Err(rule("REF is not this node's project."));
     }
+    // Protocol migration precedes the writer admission and creates no attempt
+    // or native input. Re-read the exact team decision below after it settles.
+    crate::swarm::fence::catch_up_writer(
+        config, &crate::swarm::fence::Ssh(config), &reference.project, &reference.uuid, deadline,
+    ).map_err(fail)?;
     let tasks = super::super::store_until(config, &reference.project, deadline)?;
     let mut admitted = tasks.admit_until(deadline).ok_or_else(|| fail(BUSY))?;
     teams

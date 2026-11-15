@@ -793,7 +793,7 @@ pub(crate) fn prove(
 /// no task acknowledgement, certificate, attempt or native offer.
 pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str,deadline:Instant)->Result<()> {
     ensure!(ids::is_uuid(uuid),"the cutover candidate is not a canonical task UUID");
-    {
+    let needs_floor = {
         let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
             anyhow::bail!("the candidate task store is busy");
         };
@@ -804,8 +804,17 @@ pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str
             let mut admitted=store.admit_until(deadline).ok_or_else(||anyhow::anyhow!("the candidate admission is busy"))?;
             let task=admitted.load_complete(uuid)?;
             if task.cutover_seal()?.is_some() {admitted.cutover_ready(&task)?;return Ok(());}
-            ensure!(task.floor_record().is_some(),"the task has no provable historical first floor; no prepare was created");
             task.validate_cutover_history()?;
+            // History validation above keeps existing execution/root evidence
+            // fail closed. Only an unmanaged task needs its first floor.
+            !task.execution_managed()
+        } else { false }
+    };
+    if needs_floor {
+        match prepare_floor(config, net, project, uuid, deadline, None)? {
+            Floor::Managed | Floor::Written => (),
+            Floor::Legacy(closed) | Floor::Refused(closed) =>
+                anyhow::bail!("the task's first-floor migration is pending ({})", closed.reason),
         }
     }
     let reserved=WithLocalReserve::new(net,deadline);
@@ -1528,6 +1537,46 @@ fn floor_matching(
     Ok(floor)
 }
 
+/// The common pre-reservation root preparation. A returning clean prefix
+/// first looks for an admitted seal; it must never mint another first floor.
+fn prepare_floor(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    expected: Option<start_mode::Mode>,
+) -> Result<Floor> {
+    let mut initial = local(config,project,uuid,deadline)?;
+    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_none()) {
+        // Keep the person's hold and unreadable local evidence ahead of any
+        // read-only catch-up. A returning clean prefix never mints F2 first.
+        let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
+            return Ok(Floor::Refused(Closed{node:None,reason:"busy"}));
+        };
+        match store.project() {
+            Ok(project) if project.cutover_hold().is_some_and(|hold|hold.on)=>return Ok(Floor::Refused(Closed{node:None,reason:"held"})),
+            Err(_)=>return Ok(Floor::Refused(Closed{node:None,reason:"hold_unreadable"})),
+            _=>{},
+        }
+        drop(store);
+        if reachable::catch_up_existing(config,net,project,uuid,deadline)? {
+            initial=local(config,project,uuid,deadline)?;
+        }
+    }
+    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_some()) {
+        reachable::floor_born(config,project,uuid,deadline)?;
+    }
+    let needs_historical_mode_check = initial.as_ref().is_ok_and(|task|task.cutover_seal().ok().flatten().is_none());
+    if !needs_historical_mode_check {
+        Ok(Floor::Managed)
+    } else if expected.is_some() {
+        floor_matching(config, project, uuid, deadline, SCAN_ENTRIES, expected)
+    } else {
+        floor_within(config, project, uuid, deadline)
+    }
+}
+
 /// Admits ONE reservation of the task's next attempt (C3 activation, A1;
 /// dormant until the attempt writer calls it), all within ONE `deadline`
 /// that is never renewed: the floor, the certificate, the fresh proof,
@@ -1602,34 +1651,7 @@ fn admit_matching<R>(
         Err(error) if entered.get() => return Ok(uncertain(error)),
         Err(error) => return Err(error),
     }
-    let mut initial = local(config,project,uuid,deadline)?;
-    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_none()) {
-        // Keep the person's hold and unreadable local evidence ahead of any
-        // read-only catch-up. A returning clean prefix never mints F2 first.
-        let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
-            return Ok(Admission::Refused(Closed{node:None,reason:"busy"}));
-        };
-        match store.project() {
-            Ok(project) if project.cutover_hold().is_some_and(|hold|hold.on)=>return Ok(Admission::Refused(Closed{node:None,reason:"held"})),
-            Err(_)=>return Ok(Admission::Refused(Closed{node:None,reason:"hold_unreadable"})),
-            _=>{},
-        }
-        drop(store);
-        if reachable::catch_up_existing(config,net,project,uuid,deadline)? {
-            initial=local(config,project,uuid,deadline)?;
-        }
-    }
-    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_some()) {
-        reachable::floor_born(config,project,uuid,deadline)?;
-    }
-    let needs_historical_mode_check = initial.as_ref().is_ok_and(|task|task.cutover_seal().ok().flatten().is_none());
-    let floored = if !needs_historical_mode_check {
-        Floor::Managed
-    } else if expected.is_some() {
-        floor_matching(config, project, uuid, deadline, SCAN_ENTRIES, expected)?
-    } else {
-        floor_within(config, project, uuid, deadline)?
-    };
+    let floored = prepare_floor(config, net, project, uuid, deadline, expected)?;
     match floored {
         Floor::Managed | Floor::Written => {}
         Floor::Legacy(closed) => return Ok(Admission::Refused(closed)),
@@ -1771,6 +1793,7 @@ mod tests {
     use super::*;
     use crate::swarm::store::Peer;
     use anyhow::ensure;
+    mod legacy_writes;
 
     fn fixture() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();

@@ -5664,6 +5664,14 @@ as accepted current task writes. See
 `docs/superpowers/specs/2026-11-14-reachable-task-writer-cutover.md` for the exact
 root, native custody, importer/writer census and qualification boundaries.
 
+Ordinary edits and team cancellation also prepare this same historical-root
+migration before their writer admission. An older unsealed task with no floor
+is included in the bounded background pass; it need not be started first.
+Returning clean prefixes adopt the existing seal before any first-floor write,
+and extra old-rule writes still require review. A pending team cancellation
+recovers on its next due backoff pass once migration can finish; the person
+need not press Retry. A 60-second service pass does not bypass that backoff.
+
 The check grants no dispatch authority or attempt. Current cutover preparation
 can persist protocol custody/seal metadata; it never offers native input.
 

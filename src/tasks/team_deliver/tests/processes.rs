@@ -1183,6 +1183,7 @@ mod attempt_tests;
 
 mod removal_tests;
 pub(crate) use removal_tests::{removed_stage_cancel, RealCancel};
+pub(crate) use attempt_tests::legacy_cancel::with_legacy_cancel;
 
 /// What keeps a hand-out from its reservation in [`blocked_handout`].
 #[derive(Clone, Copy, Debug)]

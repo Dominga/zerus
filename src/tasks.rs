@@ -52,7 +52,7 @@ const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not recor
 
 // The Teams actor's measurement of a removed reviewer's stage (zerus-63rru.77).
 #[cfg(all(test, unix))]
-pub(crate) use team_deliver::{removed_stage_cancel, RealCancel};
+pub(crate) use team_deliver::{removed_stage_cancel, with_legacy_cancel, RealCancel};
 
 /// Whether a failed send may have pasted its prompt: it was sent but not
 /// recorded, or its delivery is uncertain (the paste began, Enter or the
@@ -1124,8 +1124,6 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
 
 fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
     let team = teams::target(config, action, args)?;
-    // A send's or handoff's attempt has one budget from here (C3 A3).
-    let deadline = std::time::Instant::now() + attempts::BUDGET;
     let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
@@ -1134,6 +1132,8 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
+    // The immutable command input is read before its one writer budget.
+    let deadline = std::time::Instant::now() + attempts::BUDGET;
     // A send or handoff reads the catalog and waits for the project within
     // its one budget, from here (#1519 review, zerus-9gzdp).
     let attempted = matches!(action, "send" | "handoff");
@@ -1150,7 +1150,7 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     }
     let r = reference_by(config, args, &who, projects.as_deref().map(|p| (p, deadline)))?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
-    let store = match wait {
+    let mut store = match wait {
         None if attempted => store_until(config, project_id, deadline)?,
         None => store(config, project_id)?,
         Some(wait) => {
@@ -1165,6 +1165,16 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     };
     let mut task = find(&store, &r.task)?;
+    if (!attempted || team.is_some()) && action != "start" && task.cutover_seal().map_err(fail)?.is_none() {
+        let uuid = task.uuid().to_owned();
+        drop(store);
+        // The same root migration as Start, before any ordinary edit. No
+        // project/catalog lock spans the network; the task is read afresh.
+        let migration_deadline = wait.map_or(deadline, |wait| deadline.min(std::time::Instant::now() + wait));
+        crate::swarm::fence::catch_up_writer(config, &crate::swarm::fence::Ssh(config), project_id, &uuid, migration_deadline).map_err(fail)?;
+        store = store_until(config, project_id, migration_deadline)?;
+        task = store.load(&uuid).map_err(fail)?;
+    }
     if let Some(actor) = teams::actor_for_marked_task(config, &machines, args, matches!(action, "send" | "handoff" | "cancel"), &task)? { who = actor; }
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
     // that happened is never reworded. A command another computer forwards

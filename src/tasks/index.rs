@@ -735,7 +735,7 @@ impl<'a> Index<'a> {
             if files.split('|').nth(4).is_some_and(|stamp|stamp!=MISSING) {return Some(uuid.clone());}
             if error.is_some() {return None;}
             let value:Value=serde_json::from_str(row.as_deref()?).ok()?;
-            (value["schema"].as_i64()==Some(zerus_replica::execution::EXECUTION_TASK_SCHEMA)).then(||uuid.clone())
+            value["schema"].as_i64().is_some_and(|schema| (1..zerus_replica::TASK_SCHEMA).contains(&schema)).then(||uuid.clone())
         });
         let next=candidate.as_ref().or_else(||rows.last().map(|(uuid,_,_,_)|uuid));
         if let Some(next)=next {

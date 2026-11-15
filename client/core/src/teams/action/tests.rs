@@ -1373,7 +1373,8 @@ fn the_action_kinds_are_the_shared_list() {
             let mut value = serde_json::to_value(create(None, Integration::Branch).action).unwrap();
             value["kind"] = "start_planning".into();
             value
-        }).unwrap(),
+        })
+        .unwrap(),
         TeamAction::SubmitDraftPhase {
             phase: 1,
             draft: zerus_team_plan::draft::DraftInput {

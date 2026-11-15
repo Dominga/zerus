@@ -36,9 +36,9 @@
 //! when every entry is unresolved.
 mod drafts;
 pub mod input;
+pub mod intents;
 #[cfg(test)]
 mod planning;
-pub mod intents;
 pub mod types;
 pub mod wire;
 

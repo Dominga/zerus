@@ -334,7 +334,8 @@ class TaskActionsTest {
     @Test fun locallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() {
         for (project in listOf(false, true)) world { computer, connection, _, sync ->
             val task = added(computer.store, "Selected requirement")
-            computer.modifyExchange = { answer -> answer.getJSONArray("updates").put(JSONObject()
+            val injected = java.util.concurrent.atomic.AtomicBoolean()
+            computer.modifyExchange = { answer -> if (injected.compareAndSet(false, true)) answer.getJSONArray("updates").put(JSONObject()
                 .put("task", if (project) JSONObject.NULL else task.uuid)
                 .put("bytes", java.util.Base64.getEncoder().encodeToString("invalid-private-task-snapshot".toByteArray()))) }
             computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }

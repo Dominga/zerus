@@ -337,8 +337,11 @@ final class TaskActionsTests: XCTestCase {
     func testLocallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() async throws {
         for project in [false, true] {
             let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+            let injected = Mutex(false)
             computer.update {
                 $0.modifyExchange = { answer in
+                    let first = injected.withLock { value in if value { return false }; value = true; return true }
+                    guard first else { return answer }
                     let bad: JSON = ["task": project ? .null : .string(task.uuid), "bytes": .string(Data("invalid-private-task-snapshot".utf8).base64EncodedString())]
                     return answer.putting("updates", .array((answer["updates"]?.array ?? []) + [bad]))
                 }

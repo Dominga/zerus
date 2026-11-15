@@ -115,12 +115,11 @@ impl Store {
             let owned = self.begin_step()?;
             let row = self.consume_row(
                 state,
-                (id, path, kind),
+                (id, path, kind, metadata_only),
                 budget,
                 cancel,
                 &mut progress,
                 &mut reader,
-                metadata_only,
             );
             let ended = self.end_step(owned);
             row?;
@@ -144,12 +143,11 @@ impl Store {
     fn consume_row(
         &mut self,
         state: &Path,
-        (id, path, kind): (i64, PathBuf, String),
+        (id, path, kind, metadata_only): (i64, PathBuf, String, bool),
         budget: &Budget,
         cancel: &AtomicBool,
         progress: &mut CatchupProgress,
         reader: &mut metadata::Reader,
-        metadata_only: bool,
     ) -> Result<()> {
         let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
         if metadata_only && matches!(&record, Ok(metadata::Record::OverBudget)) {

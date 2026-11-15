@@ -208,6 +208,10 @@ pub(super) fn image_of(pid: u32) -> Option<FileIdentity> {
         vnode: libc::vnode_info_path,
     }
     const _: () = assert!(std::mem::size_of::<Region>() == 1272);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_dev) == 96);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_ino) == 104);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_mtime) == 136);
+    const _: () = assert!(std::mem::offset_of!(Region, vnode.vip_vi.vi_stat.vst_mtimensec) == 144);
     let mut expected = [0u8; 4096];
     let n = unsafe {
         libc::proc_pidpath(
@@ -247,10 +251,10 @@ pub(super) fn image_of(pid: u32) -> Option<FileIdentity> {
         if path == expected {
             let stat = region.vnode.vip_vi.vi_stat;
             return Some(FileIdentity {
-                device: stat.vst_dev as u64,
+                device: stat.vst_dev as i32 as u64,
                 inode: stat.vst_ino,
                 modified: stat.vst_mtime,
-                modified_nanos: stat.vst_mtimensec as i64,
+                modified_nanos: stat.vst_mtimensec,
             });
         }
         let next = region.info[10].checked_add(region.info[11])?;

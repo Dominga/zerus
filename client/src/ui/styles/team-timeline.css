@@ -1,0 +1,6 @@
+.team-timeline { max-width: 1100px; }
+.team-timeline-events { list-style: none; padding: 0 0 0 12px; margin: 12px 0; }
+.team-timeline-events > li { position: relative; border-left: 2px solid var(--z-color-divider); padding: 0 0 16px 18px; overflow-wrap: anywhere; }
+.team-timeline-events > li::before { content: ""; position: absolute; width: 8px; height: 8px; border-radius: 50%; left: -5px; top: 5px; background: var(--z-color-muted); }
+.team-timeline-events header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.team-timeline-events time { color: var(--z-color-muted); }

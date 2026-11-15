@@ -176,21 +176,40 @@ impl<'a> WithLocalReserve<'a> {
 }
 impl Net for WithLocalReserve<'_> {
     fn remote_deadline(&self, deadline: Instant) -> Instant {
-        self.inner.remote_deadline(deadline).min(self.remote).min(deadline)
+        self.inner
+            .remote_deadline(deadline)
+            .min(self.remote)
+            .min(deadline)
     }
-    fn call(&self,swarm:&str,route:Route<'_>,command:&str,input:Option<&Value>,deadline:Instant)->Result<Value> {
-        let deadline=self.remote_deadline(deadline);
-        let expired=|| std::io::Error::new(std::io::ErrorKind::TimedOut,"the optional peer budget is reserved for local settlement");
-        if left(deadline).is_zero() {return Err(expired().into());}
-        let reply=self.inner.call(swarm,route,command,input,deadline)?;
-        if left(deadline).is_zero() {return Err(expired().into());}
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        let deadline = self.remote_deadline(deadline);
+        let expired = || {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the optional peer budget is reserved for local settlement",
+            )
+        };
+        if left(deadline).is_zero() {
+            return Err(expired().into());
+        }
+        let reply = self.inner.call(swarm, route, command, input, deadline)?;
+        if left(deadline).is_zero() {
+            return Err(expired().into());
+        }
         Ok(reply)
     }
 }
 /// One fair probe pool, bounded by the same remote cutoff as later phases.
 fn probe_pool_end(net: &dyn Net, deadline: Instant) -> Instant {
-    Instant::now() + (left(net.remote_deadline(deadline).min(deadline)) / 3)
-        .min(Duration::from_secs(3))
+    Instant::now()
+        + (left(net.remote_deadline(deadline).min(deadline)) / 3).min(Duration::from_secs(3))
 }
 
 fn probe_expired(error:&anyhow::Error)->bool {
@@ -416,7 +435,12 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     let root = config.state.join("replica");
     let Some(store) = LockedStore::load_until(config, deadline)? else {
         return Ok(Universe {
-            me: Me { node: String::new(), store: None, root: root.display().to_string(), membership: None },
+            me: Me {
+                node: String::new(),
+                store: None,
+                root: root.display().to_string(),
+                membership: None,
+            },
             nodes: BTreeMap::new(),
             stopped: Some("busy"),
             view: String::new(),
@@ -442,7 +466,9 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     drop(store);
     let me = Me {
         node: me,
-        store: zerus_replica::ProjectStore::store_id_until(&root, deadline).ok().flatten(),
+        store: zerus_replica::ProjectStore::store_id_until(&root, deadline)
+            .ok()
+            .flatten(),
         root: root.display().to_string(),
         membership,
     };
@@ -460,7 +486,9 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     // Every candidate, from every source, counts against one bound as it is
     // added: the nodes queued or seen and the writers known. Past it the
     // universe stops closed and no more work is queued (review-n on #1452).
-    let over = |seen: &BTreeSet<String>, known: &BTreeSet<String>| seen.union(known).count() > MAX_NODES + 1;
+    let over = |seen: &BTreeSet<String>, known: &BTreeSet<String>| {
+        seen.union(known).count() > MAX_NODES + 1
+    };
     if over(&seen, &known) {
         stopped = Some("too_many_nodes");
         queue.clear();
@@ -468,13 +496,23 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     // Share one bounded discovery pool rather than letting every absent
     // route spend a fresh two seconds. Fair shares leave a later healthy
     // route time even when earlier probes actually wait until their bounds.
-    let probe_end=probe_pool_end(net, deadline);
+    let probe_end = probe_pool_end(net, deadline);
     while let Some((alias, route, stores)) = queue.pop_front() {
         let node = route[route.len() - 1].clone();
-        let share=left(probe_end)/u32::try_from(queue.len()+1).unwrap_or(u32::MAX);
-        let probe_deadline = deadline.min(probe_end).min(Instant::now()+share.min(Duration::from_secs(2)));
-        let (found, peers, writers) =
-            observe(net, &swarm, Route { alias: &alias, nodes: &route, stores: &stores }, probe_deadline);
+        let share = left(probe_end) / u32::try_from(queue.len() + 1).unwrap_or(u32::MAX);
+        let probe_deadline = deadline
+            .min(probe_end)
+            .min(Instant::now() + share.min(Duration::from_secs(2)));
+        let (found, peers, writers) = observe(
+            net,
+            &swarm,
+            Route {
+                alias: &alias,
+                nodes: &route,
+                stores: &stores,
+            },
+            probe_deadline,
+        );
         for writer in writers {
             if writer != me.node && known.insert(writer) && over(&seen, &known) {
                 stopped = Some("too_many_nodes");
@@ -540,13 +578,23 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             closed: Some("unroutable"),
         });
     }
-    if let Ok(records)=super::replica_members::read_strict(config) {
-        for node in nodes.values_mut().filter(|node|node.closed.is_some()) {
-            node.not_cut_over_store=records.values().find(|record|record.node==node.node)
-                .and_then(|record|record.store.as_ref()).filter(|store|ids::is_uuid(store)).cloned();
+    if let Ok(records) = super::replica_members::read_strict(config) {
+        for node in nodes.values_mut().filter(|node| node.closed.is_some()) {
+            node.not_cut_over_store = records
+                .values()
+                .find(|record| record.node == node.node)
+                .and_then(|record| record.store.as_ref())
+                .filter(|store| ids::is_uuid(store))
+                .cloned();
         }
     }
-    Ok(Universe { me, nodes, stopped, view, swarm })
+    Ok(Universe {
+        me,
+        nodes,
+        stopped,
+        view,
+        swarm,
+    })
 }
 
 /// A fresh hello to the node at the end of `route`, and the peers it lists.
@@ -805,39 +853,62 @@ pub(crate) fn prove(
 /// Protocol-only background migration. The index contributes no authority;
 /// canonical full-history evidence is re-read before any prepare. It creates
 /// no task acknowledgement, certificate, attempt or native offer.
-pub(crate) fn catch_up_writer(config:&Config,net:&dyn Net,project:&str,uuid:&str,deadline:Instant)->Result<()> {
-    ensure!(ids::is_uuid(uuid),"the cutover candidate is not a canonical task UUID");
+pub(crate) fn catch_up_writer(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<()> {
+    ensure!(
+        ids::is_uuid(uuid),
+        "the cutover candidate is not a canonical task UUID"
+    );
     // Install once, before read-only source lookup or first-floor preparation.
     // No later phase may renew or consume local settlement's reservation.
-    let reserved=WithLocalReserve::new(net,deadline);
-    let net:&dyn Net=&reserved;
+    let reserved = WithLocalReserve::new(net, deadline);
+    let net: &dyn Net = &reserved;
     let needs_floor = {
-        let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
+        let Some(store) =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+        else {
             anyhow::bail!("the candidate task store is busy");
         };
         store.settle_cutover(uuid)?;
         // A retained native prepare is resumed by the exact-original lane,
         // even when a pin-before-canonical cut makes the ordinary read fail.
         if store.pending_cutover_capture(uuid)?.is_none() {
-            let mut admitted=store.admit_until(deadline).ok_or_else(||anyhow::anyhow!("the candidate admission is busy"))?;
-            let task=admitted.load_complete(uuid)?;
-            if task.cutover_seal()?.is_some() {admitted.cutover_ready(&task)?;return Ok(());}
+            let mut admitted = store
+                .admit_until(deadline)
+                .ok_or_else(|| anyhow::anyhow!("the candidate admission is busy"))?;
+            let task = admitted.load_complete(uuid)?;
+            if task.cutover_seal()?.is_some() {
+                admitted.cutover_ready(&task)?;
+                return Ok(());
+            }
             task.validate_cutover_history()?;
             // History validation above keeps existing execution/root evidence
             // fail closed. Only an unmanaged task needs its first floor.
             !task.execution_managed()
-        } else { false }
+        } else {
+            false
+        }
     };
     if needs_floor {
         match prepare_floor(config, net, project, uuid, deadline, None)? {
             Floor::Managed | Floor::Written => (),
-            Floor::Legacy(closed) | Floor::Refused(closed) =>
-                anyhow::bail!("the task's first-floor migration is pending ({})", closed.reason),
+            Floor::Legacy(closed) | Floor::Refused(closed) => anyhow::bail!(
+                "the task's first-floor migration is pending ({})",
+                closed.reason
+            ),
         }
     }
-    let first=universe_with(config,net,deadline)?;
-    ensure!(first.closed().is_none(),"the local cutover identity or discovery is unavailable");
-    reachable::upgrade(config,net,&first,project,uuid,deadline)?;
+    let first = universe_with(config, net, deadline)?;
+    ensure!(
+        first.closed().is_none(),
+        "the local cutover identity or discovery is unavailable"
+    );
+    reachable::upgrade(config, net, &first, project, uuid, deadline)?;
     Ok(())
 }
 
@@ -1564,27 +1635,48 @@ fn prepare_floor(
     deadline: Instant,
     expected: Option<start_mode::Mode>,
 ) -> Result<Floor> {
-    let mut initial = local(config,project,uuid,deadline)?;
-    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_none()) {
+    let mut initial = local(config, project, uuid, deadline)?;
+    if initial.as_ref().is_ok_and(|task| {
+        task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_none()
+    }) {
         // Keep the person's hold and unreadable local evidence ahead of any
         // read-only catch-up. A returning clean prefix never mints F2 first.
-        let Some(store)=ProjectStore::open_within(&config.state.join("replica"),project,left(deadline))? else {
-            return Ok(Floor::Refused(Closed{node:None,reason:"busy"}));
+        let Some(store) =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+        else {
+            return Ok(Floor::Refused(Closed {
+                node: None,
+                reason: "busy",
+            }));
         };
         match store.project() {
-            Ok(project) if project.cutover_hold().is_some_and(|hold|hold.on)=>return Ok(Floor::Refused(Closed{node:None,reason:"held"})),
-            Err(_)=>return Ok(Floor::Refused(Closed{node:None,reason:"hold_unreadable"})),
-            _=>{},
+            Ok(project) if project.cutover_hold().is_some_and(|hold| hold.on) => {
+                return Ok(Floor::Refused(Closed {
+                    node: None,
+                    reason: "held",
+                }))
+            }
+            Err(_) => {
+                return Ok(Floor::Refused(Closed {
+                    node: None,
+                    reason: "hold_unreadable",
+                }))
+            }
+            _ => {}
         }
         drop(store);
-        if reachable::catch_up_existing(config,net,project,uuid,deadline)? {
-            initial=local(config,project,uuid,deadline)?;
+        if reachable::catch_up_existing(config, net, project, uuid, deadline)? {
+            initial = local(config, project, uuid, deadline)?;
         }
     }
-    if initial.as_ref().is_ok_and(|task|task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_some()) {
-        reachable::floor_born(config,project,uuid,deadline)?;
+    if initial.as_ref().is_ok_and(|task| {
+        task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_some()
+    }) {
+        reachable::floor_born(config, project, uuid, deadline)?;
     }
-    let needs_historical_mode_check = initial.as_ref().is_ok_and(|task|task.cutover_seal().ok().flatten().is_none());
+    let needs_historical_mode_check = initial
+        .as_ref()
+        .is_ok_and(|task| task.cutover_seal().ok().flatten().is_none());
     if !needs_historical_mode_check {
         Ok(Floor::Managed)
     } else if expected.is_some() {
@@ -1647,8 +1739,8 @@ fn admit_matching<R>(
     expected: Option<start_mode::Mode>,
     reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
 ) -> Result<Admission<R>> {
-    let reserved=WithLocalReserve::new(net,deadline);
-    let net:&dyn Net=&reserved;
+    let reserved = WithLocalReserve::new(net, deadline);
+    let net: &dyn Net = &reserved;
     let entered = std::cell::Cell::new(false);
     let mut reserve = Some(reserve);
     let mut run = |admitted: &mut Admitted<'_>, task: &mut TaskDoc| {

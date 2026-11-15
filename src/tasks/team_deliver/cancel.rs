@@ -115,11 +115,18 @@ pub(super) fn write(
     // Protocol migration precedes the writer admission and creates no attempt
     // or native input. Re-read the exact team decision below after it settles.
     match crate::swarm::fence::prepare_write(
-        config, &crate::swarm::fence::Ssh(config), &reference.project, &reference.uuid, deadline,
-    ).map_err(fail)? {
+        config,
+        &crate::swarm::fence::Ssh(config),
+        &reference.project,
+        &reference.uuid,
+        deadline,
+    )
+    .map_err(fail)?
+    {
         crate::swarm::fence::Admission::Reserved { .. } => (),
-        crate::swarm::fence::Admission::Legacy(_) | crate::swarm::fence::Admission::Refused(_) =>
-            return Err(cutting_over()),
+        crate::swarm::fence::Admission::Legacy(_) | crate::swarm::fence::Admission::Refused(_) => {
+            return Err(cutting_over())
+        }
         crate::swarm::fence::Admission::Uncertain(reason) => return Err(fail(reason)),
     }
     let tasks = super::super::store_until(config, &reference.project, deadline)?;

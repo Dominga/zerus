@@ -722,25 +722,53 @@ impl<'a> Index<'a> {
     /// including damaged rows, and advances even when none is a candidate.
     /// The native worker must re-read and prove the actual document/root.
     pub(super) fn cutover_candidate(&mut self) -> Outcome<Option<String>> {
-        let after=self.meta("cutover_cursor")?.filter(|id|ids::is_uuid(id)).unwrap_or_default();
-        let rows:Vec<(String,Option<String>,Option<String>,String)>={
-            let mut query=self.db.prepare("SELECT uuid,row,error,files FROM tasks WHERE uuid>?1 ORDER BY uuid LIMIT 32")?;
-            let rows=query.query_map([after],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+        let after = self
+            .meta("cutover_cursor")?
+            .filter(|id| ids::is_uuid(id))
+            .unwrap_or_default();
+        let rows: Vec<(String, Option<String>, Option<String>, String)> = {
+            let mut query = self.db.prepare(
+                "SELECT uuid,row,error,files FROM tasks WHERE uuid>?1 ORDER BY uuid LIMIT 32",
+            )?;
+            let rows = query.query_map([after], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
             rows.collect::<rusqlite::Result<_>>()?
         };
-        let candidate=rows.iter().find_map(|(uuid,row,error,files)| {
-            if !ids::is_uuid(uuid) {return None;}
+        let candidate = rows.iter().find_map(|(uuid, row, error, files)| {
+            if !ids::is_uuid(uuid) {
+                return None;
+            }
             // A pin-before-save or confirmed-save-before-cleanup cut can
             // leave a damaged/ready row with an exact pending original.
-            if files.split('|').nth(4).is_some_and(|stamp|stamp!=MISSING) {return Some(uuid.clone());}
-            if error.is_some() {return None;}
-            let value:Value=serde_json::from_str(row.as_deref()?).ok()?;
-            value["schema"].as_i64().is_some_and(|schema| (1..zerus_replica::TASK_SCHEMA).contains(&schema)).then(||uuid.clone())
+            if files
+                .split('|')
+                .nth(4)
+                .is_some_and(|stamp| stamp != MISSING)
+            {
+                return Some(uuid.clone());
+            }
+            if error.is_some() {
+                return None;
+            }
+            let value: Value = serde_json::from_str(row.as_deref()?).ok()?;
+            value["schema"]
+                .as_i64()
+                .is_some_and(|schema| (1..zerus_replica::TASK_SCHEMA).contains(&schema))
+                .then(|| uuid.clone())
         });
-        let next=candidate.as_ref().or_else(||rows.last().map(|(uuid,_,_,_)|uuid));
-        if let Some(next)=next {
-            self.db.execute("INSERT OR REPLACE INTO meta VALUES('cutover_cursor',?1)",[next])?;
-        } else {self.db.execute("DELETE FROM meta WHERE key='cutover_cursor'",[])?;}
+        let next = candidate
+            .as_ref()
+            .or_else(|| rows.last().map(|(uuid, _, _, _)| uuid));
+        if let Some(next) = next {
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta VALUES('cutover_cursor',?1)",
+                [next],
+            )?;
+        } else {
+            self.db
+                .execute("DELETE FROM meta WHERE key='cutover_cursor'", [])?;
+        }
         Ok(candidate)
     }
 

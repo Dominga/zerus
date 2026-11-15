@@ -254,7 +254,9 @@ pub(super) fn catch_up_existing(
     if first.closed().is_some() {
         return Ok(false);
     }
-    let readers: Vec<_> = first.nodes.values()
+    let readers: Vec<_> = first
+        .nodes
+        .values()
         .filter(|node| node.closed.is_none() && !node.no_replica)
         .collect();
     let probe_end = probe_pool_end(net, deadline);
@@ -264,9 +266,18 @@ pub(super) fn catch_up_existing(
         // later in native-ID order must still be asked for its original seal.
         let share = left(probe_end) / u32::try_from(readers.len() - index).unwrap_or(u32::MAX);
         let probe_deadline = deadline.min(probe_end).min(Instant::now() + share);
-        if ask(net, &first, node, project, uuid, Request::Export {
-            seal: String::new(),
-        }, probe_deadline).is_ok_and(|answer| {
+        if ask(
+            net,
+            &first,
+            node,
+            project,
+            uuid,
+            Request::Export {
+                seal: String::new(),
+            },
+            probe_deadline,
+        )
+        .is_ok_and(|answer| {
             answer["kind"] == "admitted"
                 && answer["seal"].as_str().is_some_and(|seal| seal.len() == 64)
         }) {

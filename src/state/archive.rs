@@ -133,6 +133,7 @@ pub(super) fn remove_synced(path: &Path) -> Result<()> {
 
 /// Native SessionStart may confirm a conversation during an original launch.
 /// That confirmation cannot release the same run's pending owner reservation.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn retirement_fenced(record:&Value,current:&Value) -> bool {
     current["run_id"]==record["run_id"] && (supervisor::owned_pending(current)
         || (current["conversation_id"]==record["conversation_id"] && terminating::pending(current)))

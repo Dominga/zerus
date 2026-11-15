@@ -24,6 +24,20 @@ const SESSION_MARKERS = Object.freeze(['HGS_SESSION', 'HGS_RUN_ID', 'HGS_SESSION
 const IDENTITY_BYTES = 4096;
 const NATIVE_SESSION = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+// Only an ordinary forever-waiting request of this exact owned root may
+// grant parent routing. Timed waits and typed approval/plan intents stay manual.
+export function blockingQuestion(request, agent) {
+  const wait = request.wait;
+  const forever = wait === undefined || (wait !== null && typeof wait === 'object' && !Array.isArray(wait)
+    && typeof wait.callId === 'string' && wait.callId.length > 0
+    && (wait.timed === undefined || wait.timed === false));
+  return Boolean(agent && request.agent === agent && forever
+    && Array.isArray(request.questions) && request.questions.length > 0
+    && request.questions.every(item => item !== null && typeof item === 'object' && !Array.isArray(item)
+      && typeof item.id === 'string' && item.id.length > 0
+      && typeof item.question === 'string' && item.question.length > 0 && item.intent === undefined));
+}
+
 export function callEnvironment(identity) {
   const env = { HGS_AGENT: 'dsh' };
   for (const key of SESSION_MARKERS) env[key] = undefined;
@@ -511,7 +525,7 @@ export function apply(ctx, config) {
     return agent;
   };
   const publicQuestions = sessionId => [...questions.values()].filter(q => q.sessionId === sessionId)
-    .map(({ id, items, approval }) => ({ id, questions: items, approval: Boolean(approval) }));
+    .map(({ id, items, approval, blocking }) => ({ id, questions: items, approval: Boolean(approval), blocking: blocking === true }));
   // A live request is the only authority for answering. Disconnecting HGS does
   // not answer, dismiss, or approve it. Native cancellation releases the wait.
   ctx.on('user-questions/request', (request, next) => {
@@ -522,7 +536,8 @@ export function apply(ctx, config) {
       const abort = () => { questions.delete(id); reject(request.signal.reason ?? new Error('Question cancelled')); };
       if (request.signal?.aborted) { abort(); return; }
       const settle = answer => { questions.delete(id); request.signal?.removeEventListener('abort', abort); resolve(answer); };
-      questions.set(id, { id, sessionId, items: request.questions, settle });
+      questions.set(id, { id, sessionId, items: request.questions, settle,
+        blocking: blockingQuestion(request, owned.get(sessionId)?.agent) });
       request.signal?.addEventListener('abort', abort, { once: true });
       // Timed questions must claim the native wait, not invent a separate timer.
       if (request.wait?.timed) {

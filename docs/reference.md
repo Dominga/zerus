@@ -1076,7 +1076,8 @@ answers, selects or approves anything, never builds a UI permit and never
 changes who is alerted: the child stays quiet exactly as above, and every
 person-only request still notifies. The service watches its own computer's
 rows on every catalog event, whatever the notification settings. A row is an
-edge when it is a running Claude child waiting for input (`phase: input`)
+edge when it is a running Claude, Kimi or DeepSeek child waiting for input
+(`phase: input`)
 whose parent is `live`, not forwarded, and whose host reports
 `human_request: false`; a new `attention_signature` is a new edge, and a
 question already pending at startup counts once. After about 3 seconds the
@@ -1084,13 +1085,30 @@ service reads the child with one bounded `hgs inspect NAME --after
 9223372036854775807 --skip-processes` and its `hgs reference`, at most one
 read per child and two in all, each with a 5-second timeout, from a
 deduplicated queue of at most 64 edges; it reads again immediately before
-sending. Only Claude's own AskUserQuestion card routes: source `hook`, the
-main agent, not optional, no `answer_delivery`, `can_answer: true` and a full
-identity. Claude Code's own prompts (`claude_native_question`), every
-synthetic native card, approvals, trust and sign-in never route. Codex asks
-blocking questions only through native prompts and its async questions are
-optional, so a Codex child has nothing to route in v1; Kimi, DeepSeek and
-OpenCode questions are a follow-up (zerus-sa9qn.34).
+sending. Qualified ordinary AskUserQuestion cards route: Claude's `hook`,
+Kimi's `kimi_wire`, and DeepSeek's `dsh_native` ordinary requests,
+paired with that child's provider. They must name the main
+agent, be blocking and unanswered, carry `can_answer: true` and a full identity;
+Kimi also requires its qualified `kimi_tui` answer transport and positive
+`blocking` evidence from the exact native tool call, turn and questions. A
+background call or missing/changed tool-call history never establishes that
+proof. Its single-choice,
+multiple-choice, multi-part and Other-text answers retain the existing native
+request, terminal identity and original answer receipt guards. Routing delivers
+the question; the parent explicitly calls `hgs answer` under its own permissions.
+OpenCode forms and permissions remain person-only. Public form metadata does not
+prove a native question tool is waiting, and duplicate successful answers do not
+yet recover their original receipt. OpenCode is excluded from parent routing and
+its per-child switch until both contracts are qualified.
+Claude Code's own prompts (`claude_native_question`), every synthetic native
+card, approvals (including Kimi plan and goal approvals), cache choices, trust
+and sign-in never route, even if answerable. Codex async questions are optional,
+so a Codex child has nothing to route. DeepSeek additionally requires its
+`native_dsh` transport and positive `blocking` evidence from the exact owned
+root's ordinary forever-waiting request. Timed waits, typed approval or plan
+intents and older resident bridges without this proof remain unrouted. Its
+existing durable answer UUID journal, host generation and consume-once request
+checks still govern every answer (zerus-fb9ky).
 
 The parent's own current row on the same computer, matched by the link's
 session ID, must be running a terminal agent (Claude, Codex or Kimi); the send
@@ -1177,7 +1195,7 @@ The person has two switches, both on by default (zerus-sa9qn.32):
   by the background service (Store schema 37) and changed only through the
   person's native frontend request (`question_routes`), never by a command
   an agent can run. It is shown only where the service routes (Linux).
-- **Send questions to PARENT** in a Claude child's Session actions is kept on
+- **Send questions to PARENT** in a qualified child's Session actions is kept on
   the child's computer beside its notification preference
   (`question-routing.json`, keyed by the child's durable session ID, so a
   rename or a new conversation keeps it) and shared with every desktop and
@@ -2010,6 +2028,20 @@ view includes archives. Results open the recorded message; **Back to latest
 activity** returns to the live timeline. **Limited history searched**, **Some
 history unavailable** and excerpt labels describe incomplete coverage. Internal
 reasoning and system instructions are excluded.
+
+The unindexed `hgs search --query TEXT` scan and the indexed search's fallback
+bound discovery before loading histories: at most 2,000 directory entries,
+500 record reads and 4 MiB of raw record bytes, with a 500 ms discovery deadline.
+Large shell-job payloads count against that byte budget but are discarded while
+decoding search metadata. Directory enumeration rotates across current bindings,
+ID-layout sessions, archives and DeepSeek bindings instead of collecting an
+entire inventory. Results prefer recent records within the admitted subset;
+they do not imply the globally newest matches when discovery is incomplete.
+The reply then has `truncated: true` and `discovery.complete: false`, so the UI
+keeps **Limited history searched**. `--indexed` retains its separate paged index
+coverage and cursor contract. Discovery bytes also reduce the existing total
+history-read budget. This display-only scan never replaces a complete canonical
+inventory used for lifecycle, cleanup, caller proof or other authority decisions.
 
 **New reply** stays unread until its latest result is visible in an active window
 or an attached Terminal at the bottom. Background windows and old search results

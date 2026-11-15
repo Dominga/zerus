@@ -389,8 +389,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 Icon(Icons.Default.ArrowDropDown, null)
             } else Text("Session: ${TasksPresentation.sessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
             if (TasksPresentation.note(task).isNotBlank()) Text(TasksPresentation.note(task), style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
-            SavedExecutionSection(SavedExecutionSectionState(available = false, notices = SavedExecutionText.notices(
-                conflict = false, unknown = false, unexplained = false, legacy = false, stale = model.taskExecutionStale)))
+            SavedExecutionSection(SavedExecutionPresentation.section(task, key.id, model.taskExecutionStale, ::time))
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 actions.forEach { state ->
                     OutlinedButton(onClick = {

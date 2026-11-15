@@ -106,8 +106,9 @@ struct TaskSettingsSheet: View {
                 }
                 let note = TasksPresentation.note(task)
                 if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(Theme.muted) }
-                SavedExecutionSection(state: SavedExecutionSectionState(available: false, notices:
-                    SavedExecutionText.notices(conflict: false, unknown: false, unexplained: false, legacy: false, stale: tasks.taskExecutionStale)))
+                SavedExecutionSection(state: SavedExecutionPresentation.section(task, projectId: tasks.tasksKey?.id, stale: tasks.taskExecutionStale) {
+                    Date(timeIntervalSince1970: TimeInterval($0) / 1000).formatted(.dateTime.day().month(.abbreviated).hour().minute())
+                })
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(actions, id: \.action) { state in
                         Button {

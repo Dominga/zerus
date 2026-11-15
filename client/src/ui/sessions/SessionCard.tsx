@@ -2,6 +2,7 @@ import { TeamStrip } from "./TeamStrip";
 import type { TeamSummary } from "../../store/teams";
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount } from "solid-js";
 import { steadyTitle } from "../lib/steady-title";
+import { FavoriteMark } from "./FavoriteMark";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -415,6 +416,7 @@ export function SessionCard(props: {
             the crossed bell right after it (owner, 2026-11-08). */}
         <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
         <span class="sc-title ell" style={titleReserve(s().title, 72)} title={s().name}>{s().title}</span>
+        <FavoriteMark session={s()} />
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
@@ -624,6 +626,7 @@ export function CompactCard(props: { session: Session; agentTeamRole?: string; a
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <Show when={s().parent?.state === "live"}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
+      <FavoriteMark session={s()} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <Show when={props.agentTeamName}>{(name) => <span class="sc-team-role">{tr("Team: %1", name())}</span>}</Show>
         <Show when={props.agentTeamRole}>{(role) => <span class="sc-team-role">{role()}</span>}</Show>

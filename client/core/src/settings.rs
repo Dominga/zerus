@@ -192,6 +192,7 @@ pub const KEYS: &[Key] = &[
     // Parents whose child sessions are hidden, by machine UUID and session
     // ID, so the choice survives a relaunch (zerus-sa9qn.15).
     client("sessions/collapsedTeams", Kind::Text("")),
+    client("sessions/favorites", Kind::Text("")),
     key("workspace/animateActivity", Kind::Flag(true)),
     key("workspace/showCompletedSubagents", Kind::Flag(false)),
     key("workspace/reduceMotion", Kind::Flag(false)),

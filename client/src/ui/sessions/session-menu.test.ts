@@ -80,7 +80,7 @@ describe("the owner's compact session row menu", () => {
   it("a live row starts with Mark then Mute and keeps its terminal entry", () => {
     const live = toSession("", "run:run-live", { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" });
     expect(labels(sessionMenu(live))).toEqual([
-      "Mark needs attention", "Mute", "---", "Compact session row", "---",
+      "Mark needs attention", "Mute", "---", "Add to favorites", "Compact session row", "---",
       "Open terminal", "Copy connect command", "Copy session ID", "---",
       "Clear session…", "Rename…", "Move to project…", "---", "Terminate session…",
     ]);

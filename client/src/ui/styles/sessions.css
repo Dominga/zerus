@@ -14,6 +14,7 @@
 @keyframes locate-session-a { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
 @keyframes locate-session-b { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
 @layer components {
+  .sc-favorite { display: inline-flex; flex: none; color: var(--z-color-accent); }
   .sessions-pane { width: var(--pane-w); flex: none; position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--z-color-pane); border-right: 1px solid var(--z-color-divider); }
   .layout-right .sessions-pane { order: 3; border-right: 0; border-left: 1px solid var(--z-color-divider); }
 

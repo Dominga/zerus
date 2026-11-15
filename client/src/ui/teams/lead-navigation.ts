@@ -1,5 +1,5 @@
 import { batch, createEffect, createSignal, onCleanup } from "solid-js";
-import { detailTab, page, selected, setDetailTab, setPage, setSelectedKey } from "../../store/ui";
+import { page, selected, setDetailTab, setPage, setSelectedKey } from "../../store/ui";
 import { teams, type TeamSession, type TeamSummary } from "../../store/teams";
 import type { Session } from "../sessions/types";
 import { rowIsSession } from "./session-binding";
@@ -24,11 +24,11 @@ export function openTeamLead(team: TeamSummary, row: Session): boolean {
   return true;
 }
 
-/** App owns the intent's lifetime, including a tab that has not lazy-loaded. */
+/** Keep one exact selection binding across its tabs; App owns its lifetime. */
 export function watchTeamNavigation() {
   createEffect(() => {
     if (!navigation()) return;
-    if (teams.available() !== true || page() !== "sessions" || detailTab() !== "team" || !navigationTeamFor(selected())) setNavigation(undefined);
+    if (teams.available() !== true || page() !== "sessions" || !navigationTeamFor(selected())) setNavigation(undefined);
   });
   onCleanup(() => setNavigation(undefined));
 }

@@ -2,7 +2,7 @@
 //! Keep a launch message out of the resume recipe and use ordinary guarded
 //! input once, in the lifetime of the supervisor that created this run.
 use super::*;
-use std::process::{Child, ExitStatus};
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 pub(super) struct Prompt {
@@ -192,8 +192,8 @@ fn poll_interval(elapsed: Duration) -> Duration {
 /// This loop never survives or restarts its supervisor, and it never retries a
 /// submit call, including definite refusals. Readiness polling sends no keys.
 /// Long manual trust/setup waits neither hold the state lock nor poll rapidly.
-pub(super) fn wait(
-    child: &mut Child,
+pub(super) fn wait<C: supervisor::ChildStatus>(
+    child: &mut C,
     name: &str,
     run: &str,
     prompt: Option<&mut Prompt>,

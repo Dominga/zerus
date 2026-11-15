@@ -112,3 +112,24 @@ describe("screens wiring", () => {
     expect(got).toEqual([2]);
   });
 });
+
+it("loads project names when Teams is opened first and follows the existing screen hub", async () => {
+  let fire: (screen: "projects" | "accounts") => void = () => {};
+  mocked.onScreensChanged.mockImplementation((listener) => { fire = listener; return () => {}; });
+  mocked.projectsView.mockClear(); mocked.screenVisible.mockClear();
+  const [page, setPage] = createSignal<Page>("teams");
+  const stop = startScreens(page, { hidden: () => false, onChange: () => () => {} });
+  try {
+    await settle();
+    expect(mocked.screenVisible.mock.calls).toEqual([["projects", true]]);
+    expect(mocked.projectsView).toHaveBeenCalledTimes(1);
+    fire("projects"); await settle();
+    expect(mocked.projectsView).toHaveBeenCalledTimes(2);
+    setPage("projects"); await settle();
+    expect(mocked.projectsView).toHaveBeenCalledTimes(2);
+    expect(mocked.screenVisible.mock.calls).toEqual([["projects", true]]);
+    setPage("sessions"); await settle();
+    expect(mocked.screenVisible.mock.calls.at(-1)).toEqual(["projects", false]);
+    fire("projects"); await settle(); expect(mocked.projectsView).toHaveBeenCalledTimes(2);
+  } finally { stop(); }
+});

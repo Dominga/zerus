@@ -254,6 +254,7 @@ pub(super) fn admission(
         || team.owner != plan.person
         || member.role != plan.role
         || member.agent != plan.agent
+        || member.launch.as_ref().map_or(0, |l|l.generation) != plan.member_generation.unwrap_or(0)
         || if bound {
             member.state != MemberState::Active || !session
         } else {

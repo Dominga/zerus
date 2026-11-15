@@ -13,6 +13,7 @@ mod integration;
 mod journal;
 pub(crate) mod lead_queue;
 mod members;
+mod editing;
 mod pipeline;
 mod queue;
 #[cfg(test)]

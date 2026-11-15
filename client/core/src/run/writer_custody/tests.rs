@@ -46,9 +46,11 @@ fn original_echo_releases_source_only_after_wait_eof_and_all_joins() {
     let _serial = TESTS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    until(physically_idle);
     let source = Arc::new(());
     let weak = Arc::downgrade(&source);
     let mut original = admission(source, Duration::from_secs(5)).attach(child("exec /bin/cat"));
+    assert!(!physically_idle());
     assert!(original.poll().is_none());
     original
         .send(b"original input".to_vec(), |_, _| true)
@@ -58,6 +60,7 @@ fn original_echo_releases_source_only_after_wait_eof_and_all_joins() {
     assert_eq!(report.stdout, b"original input");
     assert!(report.stderr.is_empty() && report.failure.is_none());
     assert!(weak.upgrade().is_none());
+    assert!(physically_idle());
     assert!(original.poll().is_none());
 }
 

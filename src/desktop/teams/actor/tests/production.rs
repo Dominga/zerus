@@ -118,6 +118,7 @@ fn owned(h: &Harness) -> Owned {
 }
 fn member(o: &Owned) -> Member {
     Member {
+        launch: None,
         id: "m1".into(),
         role: "developer".into(),
         agent: "codex".into(),

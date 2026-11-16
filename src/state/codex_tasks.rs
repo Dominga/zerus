@@ -2,6 +2,7 @@
 //! Native MCP creation is not a main-conversation transition.
 use super::*;
 mod recovery;
+pub(super) use recovery::original_main_receipt;
 pub(super) use recovery::recover_main;
 
 const LIMIT: usize = 256;

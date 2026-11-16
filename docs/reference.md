@@ -9045,6 +9045,19 @@ creation of the wrongly bound task. It saves the previous record privately and
 retains all original delivery receipts. A completion, inspection or output text
 claim alone cannot repair the binding or resend input.
 
+If an ordinary native transition has already restored that original main,
+inspection can confirm a retained historical receipt without repairing or
+rewriting it. The same held history must prove the original run's first main
+start, a completed native creation of the receipt's child before submission,
+and the exact submitted user text after a new native turn starts. The original
+process must still hold that file. A different fresh prompt cannot confirm the
+old receipt. Acceptance retains both the original receipt context and the
+current main context; it never offers the message again. Codex acceptance keeps
+its 64 KiB header, 16 MiB total tail and 16,384-row bounds. An individual Codex
+tool-output row may use the remaining aggregate tail instead of the former
+1 MiB row ceiling; malformed, clipped, changed or unseen evidence still refuses.
+The Kimi per-row bound is unchanged.
+
 An inspection indexes the Codex question transcript and recovers earlier
 submitted answers from this session's question receipts within one shared
 one-second budget, saving its progress so the next inspection resumes. Its

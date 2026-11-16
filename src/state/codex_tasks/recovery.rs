@@ -117,6 +117,88 @@ fn creation(file: &mut File, child: &str, created: f64) -> Option<(u64, Vec<u8>)
     None
 }
 
+/// An ordinary native transition may already have restored the main binding.
+/// This only admits a historical receipt candidate to exact-input checking;
+/// it repairs no binding, mutates no receipt and grants no input authority.
+pub(in crate::state) fn original_main_receipt(
+    record: &Value,
+    path: &Path,
+    file: &File,
+    meta: &Value,
+    rows: &[Value],
+    child: &str,
+) -> bool {
+    let prove = || -> Option<()> {
+        let parent = string(record, "conversation_id");
+        if record["agent"] != "codex"
+            || child == parent
+            || !uuid::Uuid::parse_str(parent)
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == parent)
+            || !uuid::Uuid::parse_str(child).is_ok_and(|id| !id.is_nil() && id.to_string() == child)
+            || !first_start(record, parent)
+        {
+            return None;
+        }
+        let account = crate::platform::canonical(string(record, "agent_home")).ok()?;
+        let payload = &meta["payload"];
+        let created = chrono::DateTime::parse_from_rfc3339(string(payload, "timestamp"))
+            .ok()?
+            .timestamp_millis() as f64
+            / 1000.0;
+        let launched = record["created"].as_f64()?;
+        let pending = record["input_pending_at"].as_f64()?;
+        if !path.is_absolute()
+            || !path.starts_with(account.join("sessions"))
+            || meta["type"] != "session_meta"
+            || payload["id"] != parent
+            || payload["source"] != "cli"
+            || payload.get("forked_from_id").is_some_and(|v| !v.is_null())
+            || payload
+                .get("parent_thread_id")
+                .is_some_and(|v| !v.is_null())
+            || !(launched - 1.0..=launched + 5.0).contains(&created)
+            || !pending.is_finite()
+            || pending < created
+            || pending > now()
+        {
+            return None;
+        }
+        let pid = u32::try_from(record["pid"].as_u64()?).ok()?;
+        let process = crate::platform::process_identity(pid)?;
+        let identity = crate::platform::FileIdentity::with_metadata(file).ok()?.0;
+        if !crate::platform::holds_open(pid, path).ok()?
+            || !process_alive(record)
+            || !rows.iter().any(|row| {
+                let item = &row["payload"]["item"];
+                if row["type"] != "event_msg"
+                    || row["payload"]["type"] != "item_completed"
+                    || item["type"] != "McpToolCall"
+                    || item["server"] != "codex_tui"
+                    || item["tool"] != "create_thread"
+                    || item["status"] != "completed"
+                {
+                    return false;
+                }
+                let at = chrono::DateTime::parse_from_rfc3339(string(row, "timestamp"))
+                    .ok()
+                    .map(|at| at.timestamp_millis() as f64 / 1000.0);
+                at.is_some_and(|at| (created..=pending).contains(&at))
+                    && super::created(&json!({"tool_response":item["result"]})).as_deref()
+                        == Some(child)
+            })
+            || crate::platform::process_identity(pid)? != process
+            || crate::platform::file_identity(path).map(|id| (id.device, id.inode))
+                != Some((identity.device, identity.inode))
+        {
+            return None;
+        }
+        // The caller additionally rechecks the complete held source stamp
+        // after the exact user/turn proof, before writing acceptance only.
+        Some(())
+    };
+    prove().is_some()
+}
+
 pub(in crate::state) fn recover_main(record: &mut Value, event: &Value) -> Result<bool> {
     if record["agent"] != "codex"
         || event["hook_event_name"] != "UserPromptSubmit"

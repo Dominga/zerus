@@ -1880,7 +1880,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
     keep_warm::observe(&mut record, &mut event, now());
-    if codex_tasks::observe(&mut record, &event) {
+    if external_agents::main_codex_hook(&record) && codex_tasks::observe(&mut record, &event) {
         // A newly created task can emit its own SessionStart immediately.
         // Do not let a busy activity journal lose the main/task distinction.
         write(&mut record)?;

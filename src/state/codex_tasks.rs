@@ -13,13 +13,19 @@ fn call(event: &Value) -> Option<&str> {
 }
 
 fn creating(event: &Value) -> bool {
-    ["mcp__codex_tui__create_thread", "mcp__codex_tui__fork_thread"]
-        .contains(&string(event, "tool_name"))
+    [
+        "mcp__codex_tui__create_thread",
+        "mcp__codex_tui__fork_thread",
+    ]
+    .contains(&string(event, "tool_name"))
 }
 
 fn addressing(event: &Value) -> bool {
-    ["mcp__codex_tui__send_message_to_thread", "mcp__codex_tui__read_thread"]
-        .contains(&string(event, "tool_name"))
+    [
+        "mcp__codex_tui__send_message_to_thread",
+        "mcp__codex_tui__read_thread",
+    ]
+    .contains(&string(event, "tool_name"))
 }
 
 fn created(event: &Value) -> Option<String> {
@@ -74,8 +80,11 @@ pub(super) fn observe(record: &mut Value, event: &Value) -> bool {
         let thread = string(&event["tool_input"], "threadId");
         if !uuid::Uuid::parse_str(thread).is_ok_and(|id| !id.is_nil() && id.to_string() == thread) {
             state["unresolved"] = json!(true);
-        } else if thread != string(event,"session_id") {
-            if state["threads"].as_object().is_some_and(|rows| rows.len() < LIMIT || rows.contains_key(thread)) {
+        } else if thread != string(event, "session_id") {
+            if state["threads"]
+                .as_object()
+                .is_some_and(|rows| rows.len() < LIMIT || rows.contains_key(thread))
+            {
                 state["threads"][thread] = json!(true);
             } else {
                 state["unresolved"] = json!(true);
@@ -84,14 +93,21 @@ pub(super) fn observe(record: &mut Value, event: &Value) -> bool {
         return true;
     }
     if starting {
-        if state["pending"].as_object().is_none_or(|rows| rows.len() >= LIMIT) {
+        if state["pending"]
+            .as_object()
+            .is_none_or(|rows| rows.len() >= LIMIT)
+        {
             state["unresolved"] = json!(true);
         } else {
             state["pending"][id] = json!(now());
         }
     } else {
-        if let Some(thread) = created(event).filter(|thread| thread != string(event,"session_id")) {
-            if state["threads"].as_object().is_none_or(|rows| rows.len() >= LIMIT && !rows.contains_key(&thread)) {
+        if let Some(thread) = created(event).filter(|thread| thread != string(event, "session_id"))
+        {
+            if state["threads"]
+                .as_object()
+                .is_none_or(|rows| rows.len() >= LIMIT && !rows.contains_key(&thread))
+            {
                 state["unresolved"] = json!(true);
             } else {
                 state["threads"][&thread] = json!(true);
@@ -120,7 +136,9 @@ pub(super) fn unresolved(record: &Value) -> bool {
     state["parent"] == record["conversation_id"]
         && state["run"] == record["run_id"]
         && (state["unresolved"] == true
-            || state["pending"].as_object().is_some_and(|rows| !rows.is_empty()))
+            || state["pending"]
+                .as_object()
+                .is_some_and(|rows| !rows.is_empty()))
 }
 
 pub(super) fn multiple(record: &Value) -> bool {
@@ -129,7 +147,9 @@ pub(super) fn multiple(record: &Value) -> bool {
         && state["parent"] == record["conversation_id"]
         && state["run"] == record["run_id"]
         && (unresolved(record)
-            || state["threads"].as_object().is_some_and(|rows| !rows.is_empty()))
+            || state["threads"]
+                .as_object()
+                .is_some_and(|rows| !rows.is_empty()))
 }
 
 #[cfg(test)]
@@ -169,5 +189,43 @@ mod tests {
         event["tool_use_id"] = json!("one");
         observe(&mut record, &event);
         assert!(!unresolved(&record));
+    }
+
+    #[test]
+    fn addressing_a_task_is_membership_only_and_cannot_cross_runs() {
+        let child = uuid::Uuid::new_v4().to_string();
+        let mut record = json!({"agent":"codex","conversation_id":"parent","run_id":"run-1"});
+        let event = json!({"session_id":"parent","hook_event_name":"PreToolUse",
+            "tool_name":"mcp__codex_tui__read_thread","tool_use_id":"read",
+            "tool_input":{"threadId":child}});
+        assert!(observe(&mut record, &event));
+        assert!(known(&record, &child));
+        assert!(multiple(&record));
+        assert!(
+            record.get("subagents").is_none(),
+            "a read is not current-work evidence"
+        );
+        record["run_id"] = json!("run-2");
+        assert!(!known(&record, &child));
+        assert!(!multiple(&record));
+    }
+
+    #[test]
+    fn repeated_native_result_at_capacity_keeps_the_exact_known_task() {
+        let child = uuid::Uuid::new_v4().to_string();
+        let mut threads = serde_json::Map::new();
+        threads.insert(child.clone(), json!(true));
+        for _ in 1..LIMIT {
+            threads.insert(uuid::Uuid::new_v4().to_string(), json!(true));
+        }
+        let mut record = json!({"agent":"codex","conversation_id":"parent","run_id":"run-1",
+            "codex_native_tasks":{"parent":"parent","run":"run-1","pending":{},"threads":threads}});
+        let event = json!({"session_id":"parent","hook_event_name":"PostToolUse",
+            "tool_name":"mcp__codex_tui__create_thread","tool_use_id":"known",
+            "tool_response":{"isError":false,"content":[{"type":"text","text":json!({"threadId":child}).to_string()}]}});
+        assert!(observe(&mut record, &event));
+        assert!(known(&record, &child));
+        assert!(!unresolved(&record));
+        assert_eq!(record[FIELD]["threads"].as_object().unwrap().len(), LIMIT);
     }
 }

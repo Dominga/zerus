@@ -1126,6 +1126,9 @@ fn checked_send_gate(record: &Value) -> std::result::Result<(), Gate> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) fn checked_send_terminal(record: &Value) -> Result<()> {
+    if codex_tasks::multiple(record) {
+        return Err("Codex task settings cannot verify the selected native conversation".into());
+    }
     terminal_check(record, true, true)
 }
 

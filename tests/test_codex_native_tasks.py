@@ -25,9 +25,26 @@ class NativeTaskBinding(unittest.TestCase):
     send = recovery.CodexClearRecovery.send
     hook = recovery.CodexClearRecovery.hook
     inspect = recovery.CodexClearRecovery.inspect
-    poisoned = recovery.CodexClearRecovery.poisoned
     write_header = recovery.CodexClearRecovery.write_header
     emit = recovery.CodexClearRecovery.emit
+
+    def poisoned(self, outside=False):
+        if not getattr(self, 'deferred_main_fixture', False):
+            return recovery.CodexClearRecovery.poisoned(self, outside=outside)
+        self.new_main = str(uuid.uuid4())
+        self.new_path = self.root/'account/sessions'/('rollout-'+self.new_main+'.jsonl')
+        original = recovery.clear.RESUMED_CODEX
+        marker = 'int main(int argc, char **argv) {'
+        assert original.count(marker) == 1
+        recovery.clear.RESUMED_CODEX = original.replace(marker, marker+
+            '\n    if (open('+json.dumps(str(self.new_path))+', O_CREAT | O_RDONLY, 0600) < 0) return 124;', 1)
+        try:
+            recovery.CodexClearRecovery.poisoned(self, outside=outside)
+        finally:
+            recovery.clear.RESUMED_CODEX = original
+        self.new_path.write_text(json.dumps(dict(type='session_meta',payload=dict(
+            id=self.new_main,source='cli',cli_version='0.169.0',cwd=str(self.root),
+            timestamp=datetime.now(timezone.utc).isoformat())))+'\n')
 
     def prepare_task(self):
         self.poisoned()
@@ -82,6 +99,27 @@ class NativeTaskBinding(unittest.TestCase):
                                      tool_name='Bash', tool_use_id='child-work'))
         self.assertEqual(self.record['conversation_id'], self.conversation_id)
         self.assertEqual(self.record['subagents']['external:codex:' + self.successor]['state'], 'working')
+
+    def test_first_delayed_child_start_cannot_replace_a_genuine_new_main(self):
+        self.deferred_main_fixture = True
+        self.prepare_task()
+        original_pid = self.record['pid']
+        self.record = self.creation('PreToolUse')
+        self.record = self.creation('PostToolUse',dict(isError=False,content=[dict(
+            type='text',text=json.dumps(dict(threadId=self.successor)))]))
+        self.assertTrue(self.record['codex_native_tasks']['threads'][self.successor])
+        self.assertFalse(self.record.get('subagents'), 'no first child start has occurred')
+        self.record = self.emit(dict(hook_event_name='SessionStart',source='clear',
+            session_id=self.new_main,transcript_path=str(self.new_path),cwd=str(self.root)))
+        self.assertEqual(self.record['conversation_id'], self.new_main)
+        self.assertEqual(self.record['transcript'], str(self.new_path))
+        self.assertFalse(self.record.get('subagents'), 'retention invents no work')
+        self.record = self.emit(dict(hook_event_name='SessionStart',source='startup',
+            session_id=self.successor,transcript_path=str(self.transcript),cwd=str(self.root)))
+        self.assertEqual(self.record['conversation_id'], self.new_main)
+        self.assertEqual(self.record['transcript'], str(self.new_path))
+        self.assertEqual(self.record['pid'], original_pid)
+        self.assertEqual(self.record['subagents']['external:codex:'+self.successor]['conversation_id'], self.successor)
 
     def legacy_binding(self):
         self.prepare_task()

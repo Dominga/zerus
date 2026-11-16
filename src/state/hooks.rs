@@ -1812,13 +1812,13 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
         }
         if sid != string(&record, "conversation_id") {
             clear_context::observe_start(&mut record, &event);
+            codex_tasks::main_changed(&mut record, sid);
             for key in [
                 "clear_context_request",
                 "compact_context_request",
                 "prompt",
                 "last_message",
                 "subagents",
-                "codex_native_tasks",
                 "subagent_retirements",
                 "subagents_ended_pruned",
                 "active_tools",

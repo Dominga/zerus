@@ -9028,7 +9028,8 @@ through `pending_questions`; answers use the exact unchanged request.
 Codex can open independent interactive tasks in the same native process.
 Its own MCP create/fork results and addressed thread IDs keep those tasks
 separate from the tracked main conversation; their hooks cannot replace its
-Activity binding. For such a process, an ordinary send uses the running
+Activity binding. Known task membership survives a main-context change in the
+same run and expires with a new run. For such a process, an ordinary send uses the running
 Codex version's exact-thread native queue, without `--resume`, after the
 existing identity and empty-composer checks. The original request is reserved
 before the one offer. A `codex_queue` receipt includes the exact native queued

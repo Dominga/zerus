@@ -167,6 +167,16 @@ pub(super) fn recovered_pending(record: &Value) -> bool {
         && repair["pending_at"] == record["input_pending_at"]
 }
 
+/// A main /new does not end other native tasks in this same supervised run.
+/// Keep their negative routing evidence without carrying it into a new run.
+pub(super) fn main_changed(record: &mut Value, next: &str) {
+    if record[FIELD].is_object() && record[FIELD]["run"] == record["run_id"] {
+        record[FIELD]["parent"] = json!(next);
+    } else {
+        record.as_object_mut().unwrap().remove(FIELD);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +252,24 @@ mod tests {
         assert!(known(&record, &child));
         assert!(!unresolved(&record));
         assert_eq!(record[FIELD]["threads"].as_object().unwrap().len(), LIMIT);
+    }
+
+    #[test]
+    fn main_change_retains_known_membership_but_a_new_run_does_not() {
+        let child = uuid::Uuid::new_v4().to_string();
+        let mut record = json!({"agent":"codex","conversation_id":"parent","run_id":"run-1",
+            "codex_native_tasks":{"parent":"parent","run":"run-1","pending":{},"threads":{child.clone():true}}});
+        main_changed(&mut record, "new-main");
+        record["conversation_id"] = json!("new-main");
+        assert!(known(&record, &child));
+        assert!(multiple(&record));
+        assert!(
+            record.get("subagents").is_none(),
+            "membership does not invent work"
+        );
+        record["run_id"] = json!("run-2");
+        assert!(!known(&record, &child));
+        main_changed(&mut record, "next-run-main");
+        assert!(record.get(FIELD).is_none());
     }
 }

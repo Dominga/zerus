@@ -871,6 +871,10 @@ class LiveListingIndex(test_pause.Harness):
         # Recorded ordinary Claude frame, emitted by our genuine fixture process.
         idle=os.environ.get('ZERUS_LISTING_IDLE')=='1'
         frame=(Path(__file__).parent/'fixtures'/('claude-approval-denied.txt' if idle else 'claude-approval-running.txt')).read_text()
+        if idle:
+            # The recorded idle pane is120 columns; emit its complete rules
+            # at this private80-column terminal width, never a wrapped panel.
+            frame='\n'.join('─'*40 if line and set(line)=={'─'} else line.lstrip() if line.strip().startswith('● high') else line for line in frame.splitlines())+'\n'
         source=self.bin/'claude';script=source.read_text()
         self.assertIn('\nfor line in sys.stdin:',script)
         source.write_text(script.replace('\nfor line in sys.stdin:',f'\nprint({frame!r},flush=True)\nfor line in sys.stdin:',1))

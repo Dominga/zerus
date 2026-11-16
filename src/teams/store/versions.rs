@@ -14,9 +14,9 @@ allocations! {
     RETIRED_PREVIEW = 1;
     CORE_LEGACY = 2;
     CORE_PLANNING = 3;
-    /// Published by zerus-63rru.31 / PR #2451; store::SCHEMA_VERSION uses this native layout.
+    /// Published by zerus-63rru.31 / PR #2451; ordinary opens migrate to this layout.
     CORE_NATIVE_PERSON = 4;
-    /// TODO(zerus-63rru.161 publication): implement, register and qualify this migration.
+    /// Published by zerus-63rru.161 slice 3 only with durable approval inputs.
     CORE_PUBLICATION = 5;
     /// TODO(zerus-63rru.161 rework): implement, register and qualify this migration.
     CORE_REWORK = 6;
@@ -33,7 +33,7 @@ allocations! {
 
 // TODO(reserved PRs above): promote only with the real older-store migration
 // and its writer tests. Update these aliases and the controls below in that PR.
-pub(crate) const CORE_CURRENT: u32 = CORE_NATIVE_PERSON;
+pub(crate) const CORE_CURRENT: u32 = CORE_PUBLICATION;
 pub(crate) const TIMER_CURRENT: u32 = TIMER_KEY_REFUSAL_ORDER;
 
 #[cfg(test)]
@@ -51,7 +51,7 @@ mod tests {
         TIMER_HOLD_OWNERS,
         TIMER_KEY_REFUSAL_ORDER,
     ];
-    const RESERVED_CORE: &[u32] = &[CORE_PUBLICATION, CORE_REWORK, CORE_NATIVE_FLOOR];
+    const RESERVED_CORE: &[u32] = &[CORE_REWORK, CORE_NATIVE_FLOOR];
 
     #[test]
     fn teams_store_version_registry_wiring() {
@@ -118,7 +118,7 @@ mod tests {
                 0x8000_000c
             ]
         );
-        assert_eq!(CORE_CURRENT, CORE_NATIVE_PERSON);
+        assert_eq!(CORE_CURRENT, CORE_PUBLICATION);
         assert_eq!(super::super::LEGACY_QUEUE_LAYOUT, CORE_LEGACY);
         assert_eq!(super::super::LEGACY_PLANNING_LAYOUT, CORE_PLANNING);
         assert_eq!(TIMER_CURRENT, TIMER_KEY_REFUSAL_ORDER);
@@ -162,7 +162,7 @@ mod tests {
             };
             let mut nonce = None;
             if from != UNINITIALIZED {
-                assert_eq!(core(&h), CORE_CURRENT);
+                assert_eq!(core(&h), CORE_NATIVE_PERSON);
                 if from == CORE_PLANNING {
                     h.run_for(TEAM_B, &person(), planning(TEAM_B)).unwrap();
                 }
@@ -182,13 +182,13 @@ mod tests {
                 db.pragma_update(None, "user_version", from).unwrap();
                 assert_eq!(core(&h), from);
                 h.store = Store::open(h.temp.path()).unwrap();
-                assert_eq!(core(&h), CORE_CURRENT, "upgrade from {from}");
+                assert_eq!(core(&h), CORE_NATIVE_PERSON, "upgrade from {from}");
             }
             let team = "00000000-0000-4000-8000-00000000cafe";
             h.run_for(team, &person(), planning(team)).unwrap();
-            assert_eq!(core(&h), CORE_CURRENT, "from {from}");
+            assert_eq!(core(&h), CORE_NATIVE_PERSON, "from {from}");
             h.store = Store::open(h.temp.path()).unwrap();
-            assert_eq!(core(&h), CORE_CURRENT, "reopen from {from}");
+            assert_eq!(core(&h), CORE_NATIVE_PERSON, "reopen from {from}");
             if let Some(nonce) = nonce {
                 let actual = h
                     .store
@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            CORE_CURRENT
+            CORE_NATIVE_PERSON
         );
     }
 
@@ -312,7 +312,7 @@ mod tests {
                 assert_eq!(marker(), TIMER_CURRENT | flag);
                 assert_eq!(
                     core(&h),
-                    CORE_CURRENT,
+                    CORE_NATIVE_PERSON,
                     "extension never changes the native core mark"
                 );
                 timers::observe_migrations();

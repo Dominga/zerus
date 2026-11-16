@@ -85,6 +85,24 @@ sentinel and the original guarded doorbell; it never becomes a fake task row.
 their own authority and listed decisions; task-backed and integration decisions
 retain their existing active-team rules. No saved launch Plan shape changes.
 
+The native Person-evidence migration from .31 owns core layout 4. Ordinary
+opens preserve that native allocation and its validated nonce and receipts;
+publication alone raises the private execution floor to 5 in its operation
+transaction. Layout 6 is reserved for rework in slice 4 and remains refused
+by slice 3. Layout 7 is reserved for .31 slice 2 native Person controls and
+also remains refused. Legacy queue 2 and planning 3 remain migration inputs. These core
+allocations live in the sole `src/teams/store/versions.rs` registry, with the
+allocation uniqueness control; `layout.rs` keeps only aliases and behavior helpers.
+Timer layouts 8 through 12 and raw pinned mark 2147483660 are separate.
+The supported ceiling is not the ordinary-open migration target.
+
+Execution floors are monotonic, so activation must preserve their cumulative
+semantics: an engine writing native floor 7 must already understand rework 6.
+Raising 6 cannot fence an older engine that has already written 7. The Teams
+coordinator confirmed separate S4/rework6 and its review ahead of final native7
+integration. Keep publication5, then rework6, then native7; no downgrade or
+alternate floor.
+
 ## Operations and authority
 
 These names are proposed additions, not commands that exist today. Each takes
@@ -120,7 +138,10 @@ writer pattern (`actor/tasks.rs`, `actor/native/tasks.rs`,
 `tasks/team_deliver/stage.rs`), **not** the stage-only command unchanged:
 
 1. Save the reviewed snapshot, stable per-node creation UUIDs and their
-   original requests before any child. Keep the phase closed to hand-outs.
+   original requests before any child. The approval request UUID identifies
+   the publication; a versioned domain-separated SHA-256 UUIDv8 names each
+   node's task. Recovery still reads the saved request and never reconstructs
+   it from current state. Keep the phase closed to hand-outs.
 2. A service-only planned-task writer checks the exact publication under the
    caller's task-store admission and Teams lock, then uses `new_named_task`,
    `Target::Any`, To do, the lead attribution and the ordinary team key/save.
@@ -141,6 +162,30 @@ phases of an activated team. Rejection/undo is
 available only before publication is reserved. A mid-publication failure keeps
 the snapshot frozen and reports progress; it is not silently rolled back by
 deleting already-created tasks.
+
+A published task can depend on a node that is still in another draft. Keep
+that edge in a companion table whose foreign keys name the confirmed source
+and the actual draft prerequisite. Publish the prerequisite by promoting its
+incoming edges to ordinary dependencies in the same transaction, before
+removing its draft rows. Draft edits preserve referenced IDs and validate
+cycles through live, archived and draft nodes. The hand-out kernel still
+treats the unpublished prerequisite as missing; no task identity is invented
+for it.
+
+Creation answers and Stop cleanup answers are distinct facts with separate
+three-read unknown budgets. A late creation answer after Stop cannot close
+cleanup. A known pause before a document write can resume with the saved
+request; an active command refusal ends creation. Auto-approval failures use
+the existing bounded retry gate, and changed settings or draft generations
+trigger a fresh policy check.
+
+Project cutover holds defer creation and Stop cleanup through the same task-store
+admission, preserving the original request for a later pass.
+
+Completion keeps the pipeline's own lifecycle facts: an archived uncreated
+stage is ended only with its positive superseded record and no task binding.
+Archive alone proves nothing. Holds prevent new work; a hold left on an
+already accepted or cancelled task does not prevent phase acceptance.
 
 ## Projection and WhiteWh UI mapping
 
@@ -195,11 +240,18 @@ Each row is independently reviewable. The chosen sequence is slices 1 through
 |---|---|---|---|
 | 1. Drafts and phase reads | `SubmitDraftPhase`, `EditDraftPhase` for person/lead; paged phase reads. New storage/validation modules, no task effects. | Replay/changed-ID content, stale revision, exact lead/member refusal, invalid/cyclic/cross-phase hard deps, missing criteria, role/assignee/pipeline, overlap, row/byte caps; draft edits create no replica tasks or launches. Writer-produced phase-read fixtures through real core projection. | Read draft phase headers and Layers; edit a draft title, tasks and criteria. Approval controls remain explicitly unavailable until slice 3. |
 | 2. Planned startup | `StartPlanning` person-only; service lead launch. | Real creation and launch writers prove one lead, zero member worktrees/branch while Planning; repeated intent, pause/stop and launch refusal/unknown retain existing protections. | New team's **Start planning** and goal; planning state in the phase pane. Ordinary queue creation stays usable. |
-| 3. Approval and review | `ApprovePhase`, `RejectPhase`, `UndoRejectPhase`; service publication facts and Auto path, as above. | Real named-task writer, crash before/after every reserve/save/bind, lost reply, duplicate recovery, reject/undo/rework races, stale approvals, project limits/cutover; no partial hand-out and no duplicate task UUID. Initial approval releases members only after publication. | Review diff/counts/criteria and member confirmation, Approve, Reject with comment, Undo, publication progress and Waiting for you links. |
-| 4. Acceptance and rework | `ReconcilePhase`, `AcceptPhase`, `SendBackPhase`; service/person/delegated lead roles as above. | Archived accepted nodes, unfinished stages/merge, Crit, cancellation, empty queue, repeated passes, lost reply and hard/soft authority matrix. Send-back alone never releases an acceptance gate. | Awaiting acceptance header, Accept phase, Send back with comment; corrections visible separately from already accepted work. |
+| 3. Approval, publication and a complete minimal gate | `ApprovePhase`, `RejectPhase`, `UndoRejectPhase`; service publication facts and Auto path, plus service-only `ReconcilePhase` and person-only `AcceptPhase`. | Real named-task writer, crash before/after every reserve/save/bind, lost reply, duplicate recovery, reject/undo/rework races, stale approvals, project limits/cutover; no partial hand-out and no duplicate task UUID. Initial approval releases members only after publication. Completion uses live and archived nodes and publication facts; fresh hand-out admission uses the same kernel gate; acceptance rechecks under the lock. | Review diff/counts/criteria and member confirmation, Approve, Reject with comment, Undo, publication progress, Waiting for you links and a plain Accept phase button. The existing phase read also carries an explicitly complete bounded live-and-archive snapshot. |
+| 4. Full acceptance and rework | `SendBackPhase`, delegated lead soft acceptance and the full authority/rework matrix. | Archived accepted nodes, unfinished stages/merge, Crit, cancellation, empty queue, repeated passes, lost reply and hard/soft authority matrix. Send-back alone never releases an acceptance gate. | Awaiting acceptance header, Accept phase, Send back with comment; corrections visible separately from already accepted work. |
 | 5. Phase controls | Barrier, pause/resume, move and acceptance-policy ops with the authorities above. | Kernel + real hand-out admission after reorder/pause/barrier races; no hand-out after pause wins; started work untouched; lead cannot remove person's pause or hard gate; stable IDs and stale moves. | Header More menu, pause owner/reason, real blocked explanation, Move earlier/later and gate choice. |
 | 6. Logged approved-plan edits — **DEFERRED** | Person/lead propose bounded unstarted edits; person/authorized lead commits within goal, reversible until start. Any task-document edit goes through its product writer and recorded effect. | Writer-produced before/after generations, task edits, start/reservation versus edit/undo races, lost reply and supersession. No SQLite-only task rewrite or edit of work already started. | Extend draft editor to explicit change review/undo for eligible approved work. Keep busy/started fields read-only. |
 | 7. Dynamic mode and intake — **DEFERRED** | Person-only `SetIntakePhase` changes one authoritative intake target; `SetPhaseMode` shares that transaction. Lead may propose a card, never switch it. Requires a separately approved mapping of `kind`, identity and queue routing. | Two phases can never be open intake simultaneously; all CLI/GUI/remote intake writers use the same target, replay/reorder/concurrent switches/old readers and empty-Free-phase lifetime covered. | Standard/Free control with confirmation and truthful capability/blocked reason. Until this slice, planned phases are Standard and phase 0 is the Free queue. |
+
+Coordinator decision, 2026-11-15: publication ships with the minimal completion
+and acceptance gate, so an activated multi-phase team has a way through it.
+The service records Approved to AwaitingAcceptance from complete live/archive
+facts once per episode; hand-out admission recomputes that gate through the
+same kernel. The person's Accept phase rechecks completion under the lock.
+Slice 4 adds send-back, delegated soft acceptance and the full rework UI.
 
 For each implementation slice, run the scoped root/store/actor and team-plan
 tests; client/core and touched-screen Vitest coverage; catalog/coverage and

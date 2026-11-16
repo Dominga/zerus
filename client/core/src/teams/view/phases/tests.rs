@@ -24,6 +24,9 @@ fn decoded(read: &TeamRead, value: Value) -> Result<Value, crate::teams::read::T
     )
 }
 fn ready() -> (TeamsModel, Instant) {
+    ready_from(&context())
+}
+fn ready_from(source: &Value) -> (TeamsModel, Instant) {
     let now = Instant::now();
     let mut m = TeamsModel::default();
     m.follow(
@@ -33,7 +36,6 @@ fn ready() -> (TeamsModel, Instant) {
         },
         now,
     );
-    let source = context();
     for key in ["status", "queue"] {
         let read = m.next(now).unwrap();
         m.apply(&read, decoded(&read, source[key].clone()), now);
@@ -41,10 +43,9 @@ fn ready() -> (TeamsModel, Instant) {
     assert!(m.next(now).is_none());
     (m, now)
 }
-fn view() -> crate::teams::view::TeamView {
-    let (mut m, now) = ready();
+fn view_from(source: &Value) -> crate::teams::view::TeamView {
+    let (mut m, now) = ready_from(source);
     m.follow_phases(TEAM, Some(1), true, now).unwrap();
-    let source = context();
     let mut latest = None;
     for key in ["phases", "draft"] {
         let read = m.next(now).unwrap();
@@ -58,7 +59,10 @@ fn view() -> crate::teams::view::TeamView {
     latest.unwrap()
 }
 fn wire() -> Value {
-    let v = view();
+    wire_from(&context())
+}
+fn wire_from(source: &Value) -> Value {
+    let v = view_from(source);
     let mut c = crate::Coalescer::new();
     c.push(crate::Change::teams(
         crate::ComputerId("phase-fixture".into()),
@@ -240,3 +244,5 @@ fn review_probe_empty_complete_draft_is_unavailable() {
     };
     assert!(decoded(&read, source).is_err());
 }
+
+mod publication;

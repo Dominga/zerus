@@ -20,6 +20,7 @@ vi.mock("../../store/ui", async () => {
   const [row, choose] = createSignal<ReturnType<typeof f.selected>>(); f.selected = row; f.choose = choose as typeof f.choose;
   return { selected: row, page: () => "sessions", detailTab: () => "team", setPage: vi.fn(), setMenu: vi.fn(), menu: () => undefined };
 });
+vi.mock("../../store/taskNavigation", () => ({ openTask: vi.fn() }));
 vi.mock("../../store/catalog", () => ({ agentKind: (agent: string) => agent }));
 vi.mock("../../store/machines", () => ({ machineCards: { workstation: { machine_id: "machine-1" } } }));
 vi.mock("../../store/teams", async () => {

@@ -23,7 +23,7 @@ export interface WaitingDecision {
 export const KNOWN_KINDS = [
   "note", "integration", "pipeline_acceptance", "launch_blocked", "launch_uncertain", "launch_capacity",
   "standing_confirmation", "team_actor_blocked", "report_waiting", "silent_lead", "late_session",
-  "rejected_merge",
+  "rejected_merge", "phase_review", "phase_acceptance",
 ] as const;
 
 /** The card's kind in words, keyed by the exact kind the store sends. A kind
@@ -31,6 +31,8 @@ export const KNOWN_KINDS = [
  * kind's text. */
 export function waitingKindLabel(item: Pick<WaitingItem, "kind">): string {
   switch (item.kind) {
+    case "phase_review": return tr("Phase review");
+    case "phase_acceptance": return tr("Phase acceptance");
     case "note": return tr("Note");
     case "integration": return tr("Integration");
     case "pipeline_acceptance": return tr("Work acceptance");
@@ -110,6 +112,8 @@ export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters
   const written = parameters.state === "valid" ? parameters.values.get("member") : undefined;
   const member = written !== undefined && !written.startsWith("@") ? written : undefined;
   switch (item.kind) {
+    case "phase_review": return tr("A planned phase needs your approval or a rejection comment.");
+    case "phase_acceptance": return tr("A completed planned phase waits for your acceptance.");
     case "note": return tr("A note that the lead, the service or you left for the person.");
     case "integration": return tr("The lead accepted a result; merging it into the integration branch waits for your approval.");
     case "pipeline_acceptance": return tr("A task's pipeline finished and asks you to accept its work.");
@@ -138,6 +142,8 @@ export function waitingKindSentence(item: Pick<WaitingItem, "kind" | "parameters
  * the table gets a neutral icon of its own. */
 export function waitingKindIcon(kind: string): string {
   switch (kind) {
+    case "phase_review": return "layers";
+    case "phase_acceptance": return "check-check";
     case "note": return "message-square";
     case "integration": return "git-merge";
     case "pipeline_acceptance": return "check";

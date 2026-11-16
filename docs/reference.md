@@ -6092,6 +6092,10 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `phases`, `phase --phase N` | yes | yes | | none |
 | `submit-draft-phase` | yes | yes | | `phase`, `draft` |
 | `edit-draft-phase` | yes | yes | | `phase`, `generation`, `draft` |
+| `approve-phase` | yes | | | `phase`, `generation`, `confirm_initial` for initial roster/folder confirmation |
+| `reject-phase` | yes | | | `phase`, `generation`, nonblank `comment` |
+| `undo-reject-phase` | yes | | | `phase`, `generation`, current `rejection` UUID |
+| `accept-phase` | yes | | | `phase`, current `publication` UUID; no task receipt |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
@@ -6159,8 +6163,8 @@ Pause stops new planning launches, standing confirmations and doorbells; it
 does not stop the lead's current native turn. Resume returns to Planning, never
 Running, and a lead cannot remove the person's pause. Stop ends the team.
 Launch refusals and unknown outcomes retain their ordinary notices and listed
-decisions, without granting task or integration authority. Approval and
-publication are unavailable in this slice.
+decisions, without granting task or integration authority. Initial approval
+and publication use the planned-phase operations below.
 
 **Private Teams store version allocations.** Reserve every new core layout,
 timer extension layout or writer-fence number in
@@ -6171,11 +6175,13 @@ independently in a feature branch. Keep historical allocations permanently.
 
 Core marks are 0 for an uninitialized database, 1 for the refused pre-release
 layout, 2 for legacy queue storage and 3 for planning. Core 4 is the published
-native Person evidence layout (.31, PR #2451). Core 5 is reserved for publication (.161),
-6 for rework (.161), and 7 for the native S2 floor (.31). Those reservations
-implement no migration and remain refused by this build. Their TODOs belong
-to those PRs: enabling a slot must update the current mark, its real migration and the
-older-store controls together, in the registry as well as its writers.
+native Person evidence layout (.31, PR #2451). Core 5 is publication (.161.3),
+raised only when approval saves its original requests. Core 6 remains reserved
+for rework (.161.4), and 7 for the cumulative native S2 floor (.31). Those two
+reservations implement no migration and remain refused by this build. Enabling
+a slot must update the supported ceiling, its real migration and older-store
+controls together, in the registry as well as its writers. Ordinary opens keep
+native target 4; the supported publication ceiling 5 is not an open migration.
 
 Published timer layouts occupy 8 through 12. The base-pin writer fence uses
 bit 31 in `timers_extension.version`, retaining the ordinary layout in the
@@ -6193,8 +6199,15 @@ native metadata is refused instead of repaired. Older engines refuse a store
 marked 4, so all Teams commands and the desktop service on that computer need
 the native-Person-capable engine thereafter.
 
-**Planned drafts.** The Team tab's Layers view reads bounded draft phases;
-approval is shown unavailable until publication is implemented. `phases`
+Starting another planning team never lowers an existing floor. An older
+native-4 engine refuses publication stores, including retained handles and
+final native effect admission. All Teams commands and the desktop service on
+that computer must support the stored core floor. Publication5 precedes the
+separate rework6 slice, which precedes final native7 integration; no downgrade
+or alternate floor is used.
+
+**Planned drafts and publication.** The Team tab's Layers view reads bounded
+draft phases and the live-and-archived nodes of published phases. `phases`
 pages at most 200 summaries and supplies `next_phase`, `next_node`, the
 pinned role/pipeline routes and their revision. `phase --phase N` reads one
 complete draft with its generation, revision and editability. An unavailable
@@ -6220,6 +6233,52 @@ no task documents, live bindings,
 member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.
+
+The person approves an exact draft generation. For initial Planning, the
+confirmation also shows and authorizes the current roster and working-folder
+mode. The engine saves the reviewed input and each named-task request before
+calling its task writer; partial creation keeps the phase closed. Once every
+creation is confirmed, the phase becomes Approved. Initial member launch is
+released only after all reserved initial publications settle. Auto approval is
+the person's policy for later phases, never authority for the lead to approve
+itself or activate the initial plan.
+
+Reject requires a comment; undo names that exact current rejection. Editing a
+rejected draft creates a new generation and keeps one bounded previous draft
+for comparison. Waiting for you cards link the exact phase and generation.
+A reserved publication freezes draft editing. Unknown creation never becomes a
+successful task, and a missing task after a committed creation claim is not
+reinserted. Unreadable recovery is attempted at most three times before the
+phase stays explicitly uncertain. A stop clears unpublished task keys through
+the ordinary silent key writer and retains a final refusal or unknown outcome.
+Creation and key cleanup have separate unknown-result budgets. A late creation
+answer after Stop cannot answer cleanup, and a known pause before writing can
+resume with the original saved request. An unchanged Auto-approval failure uses
+the existing retry gate instead of appending a refusal on every service pass.
+Created task documents are retained, not deleted to roll back publication.
+
+Dependencies on unpublished draft nodes stay in a companion table tied to the
+actual draft identities. The kernel holds that missing prerequisite; publishing
+it atomically promotes the incoming edges to ordinary dependencies. Draft
+editing preserves referenced IDs and checks cycles through live, archived and
+draft nodes, without creating task identities for drafts.
+
+`phase --phase N` adds `live: {phase, revision, nodes, complete}` for a published
+phase. This is the same reader and poller, with live and archived nodes including
+stages, no state filtering, and at most 4,096 nodes. Its 7 MiB node payload
+reserves the rest of the 8 MiB command budget for the frozen draft, previous
+generation and metadata. Incomplete or unreadable scopes do not supply live
+metrics. Layers and metrics use the shared core graph and metric projections.
+
+Completion is a service-only fact from publication, live/archive, decision and
+outstanding-effect records, never from an empty queue. Hand-out admission
+rechecks this through the same scheduler kernel, so a completed earlier phase
+already blocks later work before the AwaitingAcceptance fact is recorded.
+The person's `accept-phase` rechecks completion under the lock and moves the
+phase to Done. Send back, delegated lead acceptance and the full rework UI are
+a later slice. Phase 0 remains the only intake queue. Approved-plan structural
+edits, including generic dependency/route edits, are deferred to logged plan
+changes; draft nodes remain editable.
 
 `set-deps` replaces dependencies only before the dependent task has started,
 without changing its route, holder or pipeline. The store refuses a started,

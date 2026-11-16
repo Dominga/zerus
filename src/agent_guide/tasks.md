@@ -26,18 +26,16 @@ Own session/project; REF: T-xxxxxx or PROJECT/T-xxxxxx; stdin text; --json: task
   hgs task cancel-attempt REF --attempt UUID [--reason TEXT]   person only
 
 Add queues; --start/start records work, no resend. Only person accepts Done.
-Acknowledge once as prompted. Controls inactive: start now; after queue activation,
-begin-attempt replaces managed start.
-Report: original command/pinned UUID, never get/start's latest attempt ID.
+Acknowledge once as prompted. Inactive: start; activated: begin-attempt replaces managed start.
+Report with pinned command/UUID; never get/start's latest ID.
 --progress updates. Legacy start prints report command without UUID.
 History-only: saved, not moved; no retry. No pinned command: ask person to accept/resend.
 Agents cannot cancel dispatched tasks: report/handoff. Only submitted handoff
-transfers ownership, never messages.
-Unknown delivery: recover, never replay. If unresolved, ask person to abandon
-that exact attempt.
+transfers ownership.
+Unknown delivery: recover, never replay. Unresolved: ask person to abandon that exact attempt.
 
-Plans launch none. Use Start dialog or ask parent for a child; bind live ID
-to receipt. Parent reports; children never use parent identity.
+Plans launch none. Ask parent/Start dialog; bind live ID to receipt.
+Parent reports; children never use parent identity.
 Unknown launch: review, no retry. No task Pause.
 
 Edit: To do/Backlog. Same UUID keeps edits; changed input refuses.

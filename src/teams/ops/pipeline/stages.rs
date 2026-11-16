@@ -152,6 +152,8 @@ fn metadata(
     stage.title = format!("{label}: {}", n.title);
     stage.role = role.into();
     stage.assignee = None;
+    // The parent's implementation estimate is no estimate of this review.
+    stage.estimate_minutes = 0;
     let quoted_report = report
         .split('\n')
         .map(|line| format!("> {line}"))

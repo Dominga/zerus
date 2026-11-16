@@ -25,6 +25,7 @@ import { LanesView } from "./LanesView";
 import { TeamTaskCard } from "./TeamTaskCard";
 import { TeamAdvanceBase } from "./TeamAdvanceBase";
 import { PhasePane } from "./PhasePane";
+import { phaseFocus } from "../../store/team-phases";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
@@ -86,6 +87,7 @@ export function TeamWorkspace(props: {
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
   createEffect(on(teamId, () => setAdvance(false), { defer: true }));
   createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers" || planMode() === "lanes") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
+  createEffect(() => { if (phaseFocus()?.team === teamId()) { setSelectedNode(null); setPlanMode("layers"); } });
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
   // Waiting for you's Open task: the node it names, or the card a stage of that

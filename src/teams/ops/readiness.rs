@@ -30,13 +30,21 @@ pub(super) fn load(db: &Connection, team: &str) -> Result<Readiness> {
     let mut statement = db
         .prepare("SELECT data FROM phases WHERE team=?1 ORDER BY n LIMIT 201")
         .map_err(storage)?;
-    let phases = statement
+    let mut phases = statement
         .query_map([team], |r| store::sql_json::<Phase>(r, 0))
         .map_err(storage)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(storage)?;
     if phases.len() > 200 {
         return Err(over("Too many phases for one readiness decision."));
+    }
+    for phase in &mut phases {
+        if phase.kind == PhaseKind::Plan
+            && phase.state == PhaseState::Approved
+            && publication::complete(db, team, phase.n)?
+        {
+            phase.state = PhaseState::AwaitingAcceptance;
+        }
     }
     Ok(Readiness { phases, nodes })
 }

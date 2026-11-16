@@ -42,6 +42,11 @@ pub struct PhaseDraft {
     pub nodes: Vec<DraftNode>,
     pub complete: bool,
     pub editable: bool,
+    pub accept_available: bool,
+    pub publication: Option<publication::Publication>,
+    pub rejection: Option<publication::Rejection>,
+    pub previous: Option<publication::PreviousDraft>,
+    pub live: Option<phase_snapshot::PhaseNodeSnapshot>,
 }
 
 pub(crate) fn count(db: &Connection, team: &str) -> Result<u32> {
@@ -117,22 +122,56 @@ impl Store {
                 r.get(0)
             })
             .map_err(storage)?;
-        let nodes = nodes(&tx, team, phase)?;
-        let editable = generation.is_some()
+        let mut nodes = nodes(&tx, team, phase)?;
+        let publication = publication::publication(&tx, team, phase)?;
+        if publication.is_some() {
+            let bytes: usize = tx.query_row("SELECT length(CAST(snapshot AS BLOB)) FROM phase_publications WHERE team=?1 AND phase=?2",params![team,phase],|r|r.get(0)).map_err(storage)?;
+            if bytes > 262_144 {
+                return Err(Problem::new(
+                    code::OVER_CAP,
+                    "The saved publication exceeds its draft bound.",
+                ));
+            }
+            nodes = tx
+                .query_row(
+                    "SELECT snapshot FROM phase_publications WHERE team=?1 AND phase=?2",
+                    params![team, phase],
+                    |r| sql_json(r, 0),
+                )
+                .map_err(storage)?;
+        }
+        let rejection = publication::rejection(&tx, team, phase)?;
+        let live = if publication.as_ref().is_some_and(|p| p.state == "published") {
+            Some(phase_snapshot::load(&tx, team, phase, header.revision)?)
+        } else {
+            None
+        };
+        let editable = publication.is_none()
+            && generation.is_some()
             && record.kind == PhaseKind::Plan
-            && record.state == PhaseState::Draft
+            && matches!(record.state, PhaseState::Draft | PhaseState::Rejected)
             && matches!(
                 header.status,
                 TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused
             );
+        let accept_available = record.state == PhaseState::AwaitingAcceptance
+            && matches!(header.status, TeamStatus::Running | TeamStatus::Paused)
+            && crate::teams::ops::publication::complete(&tx, team, phase)?;
+        let previous = publication::previous(&tx, team, phase)?;
+        let complete = generation.is_some() && !nodes.is_empty();
         let answer = PhaseDraft {
             phase: record,
             revision: header.revision,
             generation,
             next_node,
             nodes,
-            complete: generation.is_some(),
+            complete,
             editable,
+            accept_available,
+            publication,
+            rejection,
+            previous,
+            live,
         };
         tx.commit().map_err(storage)?;
         Ok(answer)

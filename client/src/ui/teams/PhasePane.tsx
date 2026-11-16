@@ -2,11 +2,13 @@ import { For, Show, createEffect, createMemo, createSignal, onCleanup, onMount }
 import { invoke } from "@tauri-apps/api/core";
 import { tr } from "../../i18n";
 import { newRequestId, teams, type TeamOutcome, type TeamView } from "../../store/teams";
-import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow } from "../../store/team-phases";
+import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow, takePhaseFocus } from "../../store/team-phases";
 import { PhaseDraftEditor, type DraftSnapshot } from "./PhaseDraftEditor";
 import { phaseHeader } from "./phaseHeader";
 import { PlanningNotice } from "./PlanningStart";
 import { PhaseMetrics } from "./PhaseMetrics";
+import { PhaseActions } from "./PhaseActions";
+import { PhaseLiveLayers } from "./PhaseLiveLayers";
 import "../styles/team-phases.css";
 
 /** Layers groups the core's layer numbers. It computes no dependency order. */
@@ -45,7 +47,7 @@ export function PhasePane(props: {
   const failed = () => follower.error() || pane()?.list_failure?.message || pane()?.draft_failure?.message || pageError();
   const draft = () => pane()?.draft?.phase.n === selected() ? pane()?.draft : null;
   const choose = (phase: number) => { setSelected(phase); follower.select(phase); };
-  onMount(() => follower.select(null));
+  onMount(() => { const focus = takePhaseFocus(team.id); if (focus !== null) choose(focus); else follower.select(null); });
   onCleanup(() => follower.close());
   createEffect(() => {
     if (selected() !== null) return;
@@ -96,11 +98,11 @@ export function PhasePane(props: {
           <Show when={phaseHeader(d().phase).barrier}><span class="dim">{phaseHeader(d().phase).barrier}</span></Show>
           <Show when={phaseHeader(d().phase).paused}><span class="dim">{phaseHeader(d().phase).paused}</span></Show>
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>
-          <button type="button" class="btn small" disabled title={phaseHeader(d().phase).approvalUnavailable} data-phase-approve>{tr("Approve phase")}</button>
+
         </header>
-        <p class="dim">{phaseHeader(d().phase).approvalUnavailable}</p>
+        <PhaseActions draft={d()} view={props.view} busy={props.busy} available={!!metadata().approval_available} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         <Show when={d().unknown_fields}><p class="notice" role="status">{tr("This draft has fields this window cannot edit.")}</p></Show>
-        <Show when={d().complete} fallback={<p class="dim">{tr("This phase has no editable draft. Open the Board to see its tasks.")}</p>}><PhaseLayers draft={d()} /></Show>
+        <Show when={d().complete} fallback={<p class="dim">{tr("This phase has no editable draft. Open the Board to see its tasks.")}</p>}><Show when={d().live} fallback={<PhaseLayers draft={d()} />}>{(live) => <PhaseLiveLayers team={team.id} draft={d()} live={live()} />}</Show></Show>
       </>}</Show>
     </>}</Show>
     <Show when={editor()}>{(snapshot) => <PhaseDraftEditor snapshot={snapshot()} routes={routes()} members={props.view.members} close={() => setEditor(null)} submit={submit} />}</Show>

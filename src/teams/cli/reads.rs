@@ -53,7 +53,7 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
         // source it came from, so its delegations are not shown a second time.
         settings.remove("delegations");
     }
-    let members = store.member_rows(&team, crate::teams::store::MAX_PAGE, None)?;
+    let members = store.complete_member_rows(&team)?;
     let running = crate::desktop::teams::presence(config);
     // A stopped or archived team takes no cards: its service conditions and
     // refused cancels are shown here. A live team's cancels refused have the
@@ -68,7 +68,7 @@ pub(super) fn status(config: &Config, caller: &Caller, args: &[String]) -> Resul
         "ok": true,
         "actor": actor::view(&identity.actor),
         "team": view,
-        "members": super::board::members(&row,members.rows, &store.member_edit_work(&team)?)?,
+        "members": super::board::members(&row,members, &store.member_edit_work(&team)?)?,
         "member_roles": row.bundle.roles.iter().map(|r|json!({"id":r.id,"name":r.name,"agent":r.agent,"model":r.model,"effort":r.effort,"account":r.account})).collect::<Vec<_>>(),
         "counts": counts(&store, &team)?,
         "service_running": running,
@@ -301,6 +301,9 @@ pub(super) fn waiting(config: &Config, caller: &Caller, args: &[String]) -> Resu
             let mut row = serde_json::to_value(&waiting.card).map_err(storage)?;
             if let Some(object) = row.as_object_mut() {
                 object.insert("team".into(), json!(waiting.team));
+                if let Some(reference) = store.phase_card_ref(&waiting.team, waiting.card.seq)? {
+                    object.insert("phase_reference".into(), json!(reference));
+                }
             }
             Ok(row)
         })

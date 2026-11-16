@@ -1,0 +1,3208 @@
+{
+  "accepted": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 15,
+        "status": "running"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": false,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              },
+              {
+                "admitted": true,
+                "deps": [
+                  {
+                    "node": 1
+                  }
+                ],
+                "estimate_minutes": 30,
+                "id": 2,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "k",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+                },
+                "title": "Task 2",
+                "writes": [
+                  "src/part2.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 15
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "done",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": {
+            "blocked": 0,
+            "created": 2,
+            "generation": 2,
+            "id": "00000000-0000-4000-8000-00000000938b",
+            "reason": null,
+            "state": "published",
+            "total": 2
+          },
+          "rejection": null,
+          "revision": 15,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 15,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "done",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 15,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [],
+      "next": null
+    }
+  },
+  "awaiting": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 1,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 14,
+        "status": "running"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": true,
+          "complete": true,
+          "editable": false,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              },
+              {
+                "admitted": true,
+                "deps": [
+                  {
+                    "node": 1
+                  }
+                ],
+                "estimate_minutes": 30,
+                "id": 2,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "k",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+                },
+                "title": "Task 2",
+                "writes": [
+                  "src/part2.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 14
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "awaiting_acceptance",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": {
+            "blocked": 0,
+            "created": 2,
+            "generation": 2,
+            "id": "00000000-0000-4000-8000-00000000938b",
+            "reason": null,
+            "state": "published",
+            "total": 2
+          },
+          "rejection": null,
+          "revision": 14,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 14,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "awaiting_acceptance",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 14,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [
+        {
+          "by": "local",
+          "card": 3,
+          "created_ms": 1700000000000,
+          "decisions": [
+            "acknowledged"
+          ],
+          "id": "00000000-0000-4000-8000-00000000beef:3",
+          "kind": "phase_acceptance",
+          "node": null,
+          "parameters": [],
+          "phase_reference": {
+            "generation": 2,
+            "phase": 1,
+            "purpose": "accept"
+          },
+          "state": "open",
+          "team": "00000000-0000-4000-8000-00000000beef",
+          "text": "Phase 1 (Foundation) is complete and awaits your acceptance. Open the planned phase to review its result."
+        }
+      ],
+      "next": null
+    }
+  },
+  "draft": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 1,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 4,
+        "status": "planning"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": true,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": null,
+          "rejection": null,
+          "revision": 4,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 4,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "planning": {
+        "goal": "Deliver the reviewed foundation.",
+        "known": true,
+        "paused": false
+      },
+      "revision": 4,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [
+        {
+          "by": "local",
+          "card": 1,
+          "created_ms": 1700000000000,
+          "decisions": [
+            "acknowledged"
+          ],
+          "id": "00000000-0000-4000-8000-00000000beef:1",
+          "kind": "phase_review",
+          "node": null,
+          "parameters": [],
+          "phase_reference": {
+            "generation": 1,
+            "phase": 1,
+            "purpose": "review"
+          },
+          "state": "open",
+          "team": "00000000-0000-4000-8000-00000000beef",
+          "text": "Phase 1 (Foundation) has a draft ready for your review. Open the planned phase to approve or reject it."
+        }
+      ],
+      "next": null
+    }
+  },
+  "partial": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 8,
+        "status": "planning"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": false,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 2,
+            "id": "00000000-0000-4000-8000-00000000938b",
+            "reason": null,
+            "state": "reserved",
+            "total": 2
+          },
+          "rejection": null,
+          "revision": 8,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 8,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "planning": {
+        "goal": "Deliver the reviewed foundation.",
+        "known": true,
+        "paused": false
+      },
+      "revision": 8,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [],
+      "next": null
+    }
+  },
+  "published": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 2,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 11,
+        "status": "running"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [
+            {
+              "admitted": true,
+              "assignee": "",
+              "decided_by": "",
+              "deps_editable": true,
+              "held": false,
+              "holder": null,
+              "implementer": "",
+              "integrated": false,
+              "kind": "task",
+              "node": 1,
+              "pending_decision": null,
+              "pending_replaceable": false,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "V",
+              "role": "developer",
+              "round": 1,
+              "rounds": 3,
+              "stages": [],
+              "state": "pending",
+              "task": {
+                "project": "example-project",
+                "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+              },
+              "title": "Task 1"
+            },
+            {
+              "admitted": true,
+              "assignee": "",
+              "decided_by": "",
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "deps_editable": true,
+              "held": false,
+              "holder": null,
+              "implementer": "",
+              "integrated": false,
+              "kind": "task",
+              "layer": 1,
+              "node": 2,
+              "pending_decision": null,
+              "pending_replaceable": false,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "k",
+              "role": "developer",
+              "round": 1,
+              "rounds": 3,
+              "stages": [],
+              "state": "pending",
+              "task": {
+                "project": "example-project",
+                "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+              },
+              "title": "Task 2"
+            }
+          ],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": false,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "pending",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              },
+              {
+                "admitted": true,
+                "deps": [
+                  {
+                    "node": 1
+                  }
+                ],
+                "estimate_minutes": 30,
+                "id": 2,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "k",
+                "role": "developer",
+                "round": 1,
+                "state": "pending",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+                },
+                "title": "Task 2",
+                "writes": [
+                  "src/part2.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 11
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "approved",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": {
+            "blocked": 0,
+            "created": 2,
+            "generation": 2,
+            "id": "00000000-0000-4000-8000-00000000938b",
+            "reason": null,
+            "state": "published",
+            "total": 2
+          },
+          "rejection": null,
+          "revision": 11,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 11,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "approved",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 11,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [],
+      "next": null
+    }
+  },
+  "publishing": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 8,
+        "status": "planning"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": false,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": {
+            "blocked": 0,
+            "created": 0,
+            "generation": 2,
+            "id": "00000000-0000-4000-8000-00000000938b",
+            "reason": null,
+            "state": "reserved",
+            "total": 2
+          },
+          "rejection": null,
+          "revision": 8,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 8,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "planning": {
+        "goal": "Deliver the reviewed foundation.",
+        "known": true,
+        "paused": false
+      },
+      "revision": 8,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [],
+      "next": null
+    }
+  },
+  "rejected": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 1,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 5,
+        "status": "planning"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": true,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "rejected",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": null,
+          "rejection": {
+            "comment": "Make the regression test explicit.",
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-000000009388"
+          },
+          "revision": 5,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 5,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "rejected",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "planning": {
+        "goal": "Deliver the reviewed foundation.",
+        "known": true,
+        "paused": false
+      },
+      "revision": 5,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [],
+      "next": null
+    }
+  },
+  "revised": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 1,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "Deliver the reviewed foundation.",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 7,
+        "status": "planning"
+      },
+      "edit_goal": "Deliver the reviewed foundation.",
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "account": "example-planning-account",
+            "mode": "named"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "editable": true,
+          "generation": 2,
+          "graph": {
+            "complete": true,
+            "edges": [
+              {
+                "external": false,
+                "from": 1,
+                "kind": "hard",
+                "to": 2
+              }
+            ],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              },
+              {
+                "id": 2,
+                "layer": 1,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 60,
+            "external_dependencies": 0,
+            "known_estimates": 2,
+            "total_nodes": 2,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 3,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass",
+                "The regression is covered through the real writer"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [
+                {
+                  "node": 1
+                }
+              ],
+              "estimate_minutes": 30,
+              "id": 2,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": {
+            "draft": {
+              "barrier": false,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 1,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 1",
+                  "writes": [
+                    "src/part1.rs"
+                  ]
+                },
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [
+                    {
+                      "node": 1
+                    }
+                  ],
+                  "estimate_minutes": 30,
+                  "id": 2,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 2",
+                  "writes": [
+                    "src/part2.rs"
+                  ]
+                }
+              ],
+              "title": "Foundation"
+            },
+            "generation": 1
+          },
+          "publication": null,
+          "rejection": null,
+          "revision": 7,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 3,
+          "next_phase": 2,
+          "revision": 7,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "planning": {
+        "goal": "Deliver the reviewed foundation.",
+        "known": true,
+        "paused": false
+      },
+      "revision": 7,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "lead",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    },
+    "waiting": {
+      "items": [
+        {
+          "by": "local",
+          "card": 2,
+          "created_ms": 1700000000000,
+          "decisions": [
+            "acknowledged"
+          ],
+          "id": "00000000-0000-4000-8000-00000000beef:2",
+          "kind": "phase_review",
+          "node": null,
+          "parameters": [],
+          "phase_reference": {
+            "generation": 2,
+            "phase": 1,
+            "purpose": "review"
+          },
+          "state": "open",
+          "team": "00000000-0000-4000-8000-00000000beef",
+          "text": "Phase 1 (Foundation) has a draft ready for your review. Open the planned phase to approve or reject it."
+        }
+      ],
+      "next": null
+    }
+  }
+}

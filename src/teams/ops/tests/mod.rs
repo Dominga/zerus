@@ -13,6 +13,7 @@ mod integration;
 mod members;
 mod observations;
 mod person_gesture;
+mod person_gesture_context;
 mod pipeline;
 mod queue;
 mod readiness;

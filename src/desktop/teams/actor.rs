@@ -30,6 +30,7 @@ mod reports;
 mod retry;
 mod schedule;
 mod tasks;
+mod publication;
 mod project_limit;
 mod terminal;
 #[cfg(test)]
@@ -109,6 +110,13 @@ impl Runtime {
             return Ok(());
         }
         self.non_deliveries(store, &team, now)?;
+        let planning_pass = team.status == TeamStatus::Planning;
+        if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+            self.publications(store, ports, &team, now)?;
+        }
+        let Some(team) = store.team(id)? else {
+            return Ok(());
+        };
         if team.status == TeamStatus::Planning {
             // Planning has no task/reopen/stage/integration work. Its durable
             // goal uses the existing lead inbox and witnessed doorbell route.
@@ -133,6 +141,9 @@ impl Runtime {
         if ports.stopped() {
             return Ok(());
         }
+        if !planning_pass {
+            self.publications(store, ports, &team, now)?;
+        }
         self.stage_tasks(store, ports, &team, now)?;
         if store
             .team(id)?
@@ -153,6 +164,7 @@ impl Runtime {
             // A paused team hands nothing out, so it needs no member now.
             self.unreadable_members(store, &team, &schedule::Needs::default(), now)?;
         }
+        self.phase_completion(store, &team, now)?;
         self.cleanup_metadata(store, &team, now)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {

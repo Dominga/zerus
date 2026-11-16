@@ -5,6 +5,7 @@ mod cancel;
 mod hosted;
 pub(super) mod completion;
 pub(super) mod stage;
+pub(super) mod planned;
 use crate::swarm::fence::{Admission, Closed};
 use crate::teams::{store::Store, tasks::context};
 use rusqlite::{params, OptionalExtension};

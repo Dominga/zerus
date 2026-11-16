@@ -1,6 +1,7 @@
 import { For, Show } from "solid-js";
 import { tr } from "../../i18n";
 import { Icon } from "../lib/icons";
+import { openPhase } from "../../store/team-phases";
 import { TeamChip } from "./TeamChips";
 import type { WaitingItem, WaitingView } from "../../store/teams";
 import { waitingAge, waitingDecisions, waitingKindIcon, waitingKindLabel, waitingKindSentence, waitingNote } from "./decisions";
@@ -47,6 +48,7 @@ export function WaitingCard(props: {
               onClick={() => props.onDecide(props.item, choice.decision)}>{choice.text}</button>
           )}
         </For>
+        <Show when={props.item.phase_reference}>{(reference) => <button type="button" class="btn small" disabled={props.busy} data-open-phase onClick={() => { openPhase(props.item.team,reference().phase); props.onOpenTeam(props.item); }}>{tr("Open phase")}</button>}</Show>
         <Show when={props.item.node !== null}>
           <button type="button" class="btn small" disabled={props.busy} data-open-task
             onClick={() => props.onOpenTask?.(props.item)}>{tr("Open task")}</button>

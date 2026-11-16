@@ -1,4 +1,4 @@
-//! Both guide pages are executed. Every `hgs team` example in them runs
+//! The team guide pages are executed. Every `hgs team` example in them runs
 //! against a live temporary team with the caller the page is written for, so a
 //! stale command or an incomplete envelope fails the suite.
 use super::harness::*;
@@ -8,7 +8,9 @@ use std::cell::Cell;
 
 const MEMBER_PAGE: &str = include_str!("../../../agent_guide/team.md");
 const LEAD_PAGE: &str = include_str!("../../../agent_guide/team-lead.md");
+const PLANNING_PAGE: &str = include_str!("../../../agent_guide/team-planning.md");
 const M2_SESSION: &str = "launch_id:00000000-0000-4000-8000-000000000032";
+mod planning;
 
 #[derive(Debug)]
 struct Example {
@@ -225,7 +227,11 @@ fn every_example_of_both_pages_runs() {
 
 #[test]
 fn the_pages_keep_their_bounds_and_name_the_new_commands() {
-    for (name, page) in [("team", MEMBER_PAGE), ("team-lead", LEAD_PAGE)] {
+    for (name, page) in [
+        ("team", MEMBER_PAGE),
+        ("team-lead", LEAD_PAGE),
+        ("team-planning", PLANNING_PAGE),
+    ] {
         assert!(page.len() <= 2400, "{name} has {} bytes", page.len());
         assert!(page.is_ascii(), "{name}");
         assert!(page.ends_with('\n'));

@@ -31,14 +31,14 @@ async function pane(over?: (v: TeamView) => void) {
 }
 
 it("shows core layers and the original draft details without creating tasks or offering approval", async () => {
-  const { h, submit } = await pane();
+  const { h, submit } = await pane((v) => { delete v.plan!.list!.approval_available; });
   expect(h.querySelectorAll("[data-phase-node]")).toHaveLength(2);
   expect(h.textContent).toContain("Layer 2");
   button(h, "Build the foundation").click();
   expect(h.textContent).toContain("Implement the shared part.");
   expect(h.textContent).toContain("The foundation tests pass");
   expect(h.querySelector<HTMLButtonElement>("[data-phase-approve]")!.disabled).toBe(true);
-  expect(h.textContent).toContain("Phase approval is not available yet.");
+  expect(h.textContent).toContain("Phase approval is not available on this computer.");
   expect(submit).not.toHaveBeenCalled();
 });
 

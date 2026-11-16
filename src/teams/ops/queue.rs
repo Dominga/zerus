@@ -186,6 +186,9 @@ pub(super) fn admit(ctx: &mut Context<'_>) -> Result<()> {
     };
     ctx.active()?;
     let n = ctx.live_node(*node)?;
+    if n.source == NodeSource::Planned {
+        return Err(invalid("Approved plan changes require a logged plan edit."));
+    }
     if n.admitted {
         return Err(invalid("Task is already admitted."));
     }
@@ -213,6 +216,9 @@ pub(super) fn route(ctx: &mut Context<'_>) -> Result<()> {
     ctx.active()?;
     ctx.undecided(*node)?;
     let mut n = ctx.live_node(*node)?;
+    if n.source == NodeSource::Planned {
+        return Err(invalid("Approved plan changes require a logged plan edit."));
+    }
     // Route places a task for the lead; a stage's role is its pipeline's
     // and its member is chosen by the hand-out (zerus-63rru.84). Whatever
     // its state, the stage's own paths are Reassign and the person's
@@ -272,12 +278,8 @@ fn validate_deps(ctx: &Context<'_>, node: u32, deps: &[Dep]) -> Result<()> {
         {
             return Err(invalid("Missing, repeated or self dependency."));
         }
-        let cycle:bool=ctx.db.query_row("WITH RECURSIVE ancestors(id) AS (SELECT dependency FROM dependencies WHERE team=?1 AND node=?2 UNION SELECT d.dependency FROM dependencies d JOIN ancestors a ON d.node=a.id WHERE d.team=?1) SELECT EXISTS(SELECT 1 FROM ancestors WHERE id=?3)",params![ctx.team.id,d.node,node],|r|r.get(0)).map_err(storage)?;
-        if cycle {
-            return Err(Problem::new(code::DEPENDENCY_CYCLE, "Dependency cycle."));
-        }
     }
-    Ok(())
+    dependency_graph::check(ctx, node, deps)
 }
 /// An explicit hold belongs to who set it, the person or the lead: no
 /// decision, settlement, outcome or hand-back clears it, and the node still

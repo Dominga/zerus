@@ -73,6 +73,14 @@ pub(in crate::desktop::teams) trait Ports {
     ) -> Result<()> {
         Ok(())
     }
+    fn planned_task(
+        &mut self,
+        _team: &Team,
+        _request: &crate::teams::store::publication::PlannedTaskRequest,
+        _clear: bool,
+    ) -> Result<TaskReply> {
+        Err(unavailable())
+    }
     fn stage(
         &mut self,
         _team: &Team,

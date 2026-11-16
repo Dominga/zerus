@@ -18,6 +18,7 @@ pub mod graph;
 pub mod member;
 pub mod model;
 pub mod overlap;
+pub mod phase_control;
 pub mod pipeline;
 pub mod problem;
 pub mod ready;

@@ -4,6 +4,7 @@ import { createComponent } from "solid-js";
 import { render } from "solid-js/web";
 import { PhaseEstimates } from "./PhaseEstimates";
 import type { PhaseEstimatesView } from "../../store/phase-estimates";
+import produced from "./fixtures/phase-estimates.json";
 
 let stop: (() => void) | undefined;
 afterEach(() => { stop?.(); document.body.replaceChildren(); });
@@ -20,6 +21,26 @@ const stale = (): PhaseEstimatesView => ({
     revision: 3, basis: "unapproved_preview", version: { phase: 1, draft_generation: 2, publication: null } },
   cohort_complete: true, unknown: null,
   rows: [{ node: 1, title: "Stale estimate control", kind: "task", task: null, estimate_minutes: 30, unknown: null }],
+});
+
+it("renders product-written publication estimates per unit without summing an elapsed time", () => {
+  const host = mount(produced.published as PhaseEstimatesView);
+  expect([...host.querySelectorAll("[data-estimate-minutes]")].map(node => node.textContent)).toEqual(["30 min", "30 min"]);
+  expect(host.textContent).toContain("Approved publication estimates");
+  expect(host.textContent).not.toContain("60 min");
+  expect(host.querySelector("button,input,textarea")).toBeNull();
+});
+
+it("labels the product-written draft as an unapproved preview without an actual comparison", () => {
+  const host = mount(produced.draft as PhaseEstimatesView);
+  expect(host.textContent).toContain("Unapproved draft preview");
+  expect(host.textContent).toContain("This preview is not approved and has no actual comparison.");
+});
+
+it("keeps the product-written partial publication numeric values unavailable", () => {
+  const host = mount(produced.partial as PhaseEstimatesView);
+  expect(host.querySelector("[data-estimate-minutes]")).toBeNull();
+  expect(host.textContent).toContain("Unknown");
 });
 
 it("an older core with no projection cannot fabricate a zero estimate", () => {

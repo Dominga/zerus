@@ -19,6 +19,7 @@ export interface EstimateRow {
   estimate_minutes: number | null; unknown: EstimateUnknown | null;
 }
 export interface PhaseEstimatesView {
+  /** Estimate membership only; never observation/attempt coverage. */
   scope: EstimateScope | null; cohort_complete: boolean;
   unknown: EstimateUnknown | null; rows: EstimateRow[];
 }

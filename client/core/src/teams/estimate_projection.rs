@@ -75,6 +75,8 @@ pub struct EstimateRow {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PhaseEstimates {
     pub scope: Option<EstimateScope>,
+    /// Completeness of the estimate publication's membership only. It never
+    /// certifies an observation page, attempt/binding cohort or worked time.
     pub cohort_complete: bool,
     pub unknown: Option<EstimateUnknown>,
     pub rows: Vec<EstimateRow>,
@@ -124,16 +126,17 @@ pub fn project(
     if requested.is_some_and(|wanted| *wanted != version) {
         return PhaseEstimates::unavailable(U::HistoryUnavailable);
     }
-    let published = matches!(
-        source.phase.state,
-        PhaseState::Approved | PhaseState::AwaitingAcceptance | PhaseState::Done
-    );
-    if published != source.publication.is_some()
+    // Approval reserves the immutable publication before task creation settles
+    // and before the outer phase label changes. The publication is the proof,
+    // not an inferred ordinal progression of phase labels.
+    let frozen_publication = source.publication.is_some();
+    if (!frozen_publication
+        && !matches!(source.phase.state, PhaseState::Draft | PhaseState::Rejected))
         || source
             .publication
             .as_ref()
             .is_some_and(|p| p.generation != generation || !super::action::canonical_uuid(&p.id))
-        || (!published && source.live.is_some())
+        || (!frozen_publication && source.live.is_some())
     {
         return PhaseEstimates::unavailable(U::ConflictingMembership);
     }
@@ -156,13 +159,11 @@ pub fn project(
         Some(U::UnknownFields)
     } else if !source.complete || source.nodes.is_empty() {
         Some(U::IncompleteDraft)
-    } else if !source.graph.complete {
-        Some(U::IncompleteGraph)
     } else {
         None
     };
     let mut tasks = BTreeMap::new();
-    if published {
+    if frozen_publication {
         let publication = source.publication.as_ref().unwrap();
         if publication.state != "published"
             || publication.total as usize != ids.len()
@@ -207,6 +208,9 @@ pub fn project(
             unknown.get_or_insert(U::IncompleteLive);
         }
     }
+    if !source.graph.complete {
+        unknown.get_or_insert(U::IncompleteGraph);
+    }
     let mut rows: Vec<_> = source
         .nodes
         .iter()
@@ -244,7 +248,7 @@ pub fn project(
             home: context.home.clone(),
             revision: source.revision,
             version,
-            basis: if published {
+            basis: if frozen_publication {
                 EstimateBasis::FrozenPublication
             } else {
                 EstimateBasis::UnapprovedPreview

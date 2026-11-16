@@ -61,6 +61,20 @@ fn approved_values_never_follow_later_live_estimate_changes() {
 }
 
 #[test]
+fn a_reserved_publication_is_frozen_before_the_outer_phase_label_advances() {
+    for name in ["publishing", "partial"] {
+        let (context, draft) = source(name);
+        assert_eq!(draft.phase.state, PhaseState::Draft);
+        assert!(draft.publication.is_some());
+        let view = project(&context, &draft, None);
+        assert_eq!(view.scope.unwrap().basis, EstimateBasis::FrozenPublication);
+        assert_eq!(view.unknown, Some(EstimateUnknown::UnsettledPublication));
+        assert!(!view.cohort_complete);
+        assert!(view.rows.iter().all(|row| row.estimate_minutes.is_none()));
+    }
+}
+
+#[test]
 fn an_unreturned_generation_or_publication_is_unavailable_not_retargeted() {
     let (context, draft) = source("published");
     let version = project(&context, &draft, None).scope.unwrap().version;

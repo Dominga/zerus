@@ -170,7 +170,10 @@ fn finite_sequence_lookahead_precedes_window_filter_even_for_a_long_unit_stream(
         .progress_handler(0, None::<fn() -> bool>);
     let used = work.load(Ordering::Relaxed);
     eprintln!("finite sequence window read: SQLite instructions approximately {used}");
-    assert!(used <= VM_BUDGET + 100, "bounded indexed lookahead exceeded its VM budget");
+    assert!(
+        used <= VM_BUDGET + 100,
+        "bounded indexed lookahead exceeded its VM budget"
+    );
     let page = result.unwrap();
     assert_eq!(page.rows.len(), 1);
     assert!(page.more && page.truncated);

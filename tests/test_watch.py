@@ -201,6 +201,87 @@ class WatchStream(unittest.TestCase):
         stream.quiet(lambda f: f['t'] == 'delta', 6)
         self.assertEqual(stream.close(), 0)
 
+    def test_internal_recovery_fields_stay_selected_only_across_catalog_updates(self):
+        keys = ('recovery_user_text', 'recovery_user_at', 'recovery_success_at',
+                'recovery_cancel_at', 'keep_warm_prompt_at')
+        self.record.update(dict(zip(keys, ['Exact recovery evidence\nКириллица', 1, 2, 3, 4])))
+        self.write_record()
+        stream, _, snapshot, _ = self.start()
+        row = next(item['row'] for item in snapshot['items'] if item['key'] == self.key())
+        self.assertFalse(set(keys) & row.keys())
+        self.record.update(prompt='Public change', recovery_user_text='Later exact recovery input')
+        self.write_record()
+        original = self.record_path.read_bytes()
+        delta = stream.next(lambda frame: frame['t'] == 'delta' and any(
+            item['key'] == self.key() and item['row'].get('prompt') == 'Public change'
+            for item in frame['upsert']), timeout=8)
+        row = next(item['row'] for item in delta['upsert'] if item['key'] == self.key())
+        self.assertFalse(set(keys) & row.keys())
+        selected = subprocess.run([str(HGS), 'inspect', self.name, '--skip-processes'],
+                                  env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(selected.returncode, 0, selected.stderr)
+        selected = json.loads(selected.stdout)
+        self.assertEqual({key: selected[key] for key in keys},
+                         {key: self.record[key] for key in keys})
+        self.assertEqual(stream.close(), 0)
+        self.assertEqual(self.record_path.read_bytes(), original)
+
+    def test_live_model_choices_stay_in_selected_details_across_catalog_updates(self):
+        # Compare the watch with the small canonical compatibility listing;
+        # indexed readiness has its own control, not a startup race here.
+        directory = self.state/'listing-metadata'
+        directory.mkdir(exist_ok=True)
+        disabled = directory/'disabled'
+        disabled.write_text('1\n')
+        disabled.chmod(0o600)
+        home = self.root/'.codex'
+        home.mkdir(exist_ok=True)
+        cache = home/'models_cache.json'
+        models = [dict(slug='fixture-a', display_name='Fixture A',
+                       supported_reasoning_levels=[dict(effort='high')]),
+                  dict(slug='fixture-b', display_name='Fixture B',
+                       supported_reasoning_levels=[dict(effort='low'), dict(effort='high')])]
+        cache.write_text(json.dumps(dict(models=models)))
+        self.record.update(model='fixture-a', effort='high')
+        self.write_record()
+
+        def details():
+            result = subprocess.run([str(HGS), 'inspect', self.name, '--skip-processes'],
+                                    env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(result.stdout)
+
+        def choices(raw):
+            return [dict(id=row['slug'], label=row['display_name'],
+                         effort_options=[value['effort'] for value in row['supported_reasoning_levels']])
+                    for row in raw]
+
+        selected = details()
+        self.assertEqual(selected['model_options'], choices(models))
+        stream, _, snapshot, _ = self.start()
+        row = next(item['row'] for item in snapshot['items'] if item['key'] == self.key())
+        self.assertNotIn('model_options', row)
+        self.assertEqual(steady(row), steady(self.listed_row()))
+        models.append(dict(slug='fixture-c', display_name='Fixture C',
+                           supported_reasoning_levels=[dict(effort='high')]))
+        cache.write_text(json.dumps(dict(models=models)))
+        self.record['prompt'] = 'Model catalog changed'
+        self.write_record()
+        original = self.record_path.read_bytes()
+        delta = stream.next(lambda frame: frame['t'] == 'delta' and any(
+            item['key'] == self.key() and item['row'].get('prompt') == 'Model catalog changed'
+            for item in frame['upsert']), timeout=8)
+        row = next(item['row'] for item in delta['upsert'] if item['key'] == self.key())
+        self.assertNotIn('model_options', row)
+        self.assertEqual(steady(row), steady(self.listed_row()))
+        current = details()
+        self.assertEqual(current['model_options'], choices(models))
+        for key in ('model', 'effort', 'effort_options', 'settings_change_supported',
+                    'settings_change_reason', 'settings_apply_when', 'allowed_actions', 'reply_id'):
+            self.assertEqual(current.get(key), selected.get(key), key)
+        self.assertEqual(stream.close(), 0)
+        self.assertEqual(self.record_path.read_bytes(), original)
+
     def listed_row(self):
         return next(row for row in self.listing()['sessions'] if row['name'] == self.name)
 

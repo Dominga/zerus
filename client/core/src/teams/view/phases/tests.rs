@@ -247,4 +247,5 @@ fn review_probe_empty_complete_draft_is_unavailable() {
 
 mod publication;
 
+mod controls;
 mod rework;

@@ -6102,6 +6102,11 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `approve-phase-corrections` | yes | | | `phase`, base `publication`, `rework`, `generation`; Auto is service-only |
 | `reject-phase-corrections` | yes | | | Same plus nonblank `comment` |
 | `undo-phase-correction-rejection` | yes | | | Same plus exact `rejection` UUID |
+| `set-phase-barrier` | yes | yes | | Exact tagged `scope`, `barrier` |
+| `pause-phase` | yes | yes | | Exact `scope`, current `pause` UUID or explicit null, bounded nonblank `reason` |
+| `resume-phase` | yes | own exact lead pause only | | Exact `scope`, current `pause` UUID; null only for an unattributed legacy pause (Person) |
+| `move-phase` | yes | yes | | Exact `scope`, exact tagged `relative_to`, `placement: before/after`; both and all crossed phases positively unstarted |
+| `set-phase-acceptance` | yes | | | Exact `scope`, `acceptance: person/lead`; positively unstarted only |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |

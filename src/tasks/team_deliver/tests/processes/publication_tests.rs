@@ -3,6 +3,7 @@
 use super::*;
 use ops::Operation;
 mod completion;
+mod controls;
 mod recovery;
 mod rework;
 

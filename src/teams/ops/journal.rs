@@ -32,6 +32,26 @@ pub(super) fn references(request: &Request) -> Result<Vec<String>, Problem> {
     {
         refs.push(format!("task:{task}"));
     }
+    for field in ["scope", "relative_to"] {
+        if let Some(scope) = value.get(field) {
+            if let Some(phase) = scope.get("phase").and_then(|v| v.as_u64()) {
+                refs.push(format!("phase:{phase}"));
+            }
+            if let Some(id) = scope.get("publication").and_then(|v| v.as_str()) {
+                refs.push(format!("publication:{id}"));
+            }
+            if let Some(id) = scope
+                .get("rework")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                refs.push(format!("rework:{id}"));
+            }
+        }
+    }
+    if let Some(pause) = value.get("pause").and_then(|v| v.as_str()) {
+        refs.push(format!("pause:{pause}"));
+    }
     Ok(refs)
 }
 

@@ -25,6 +25,7 @@ export interface PhaseRework {
   draft: PhaseDraft | null;
 }
 export interface PhaseDraft {
+  controls?: import("./phase-controls").PhaseControls | null;
   rework_available?: boolean; rework?: PhaseRework | null;
   metrics?: import("./phase-metrics").PhaseMetricsView;
   phase: PhaseRecord; revision: number; generation: number | null; next_node: number;

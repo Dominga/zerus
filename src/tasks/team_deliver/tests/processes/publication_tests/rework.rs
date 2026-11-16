@@ -3,6 +3,7 @@
 use super::completion::ended;
 use super::*;
 use zerus_team_plan::{Acceptance, Integration, PhaseState};
+mod controls;
 
 fn waiting(
     policy: Acceptance,

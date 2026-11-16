@@ -1,7 +1,8 @@
 # M2 S5: phase control contract
 
-Status: interface/source preparation on admitted S4 `32e88ec9c94f36c9de4f03aa128bafeaa9cc85df`.
-This commit adds shared identity types, not operations or an activated layout.
+Status: implementation preparation on admitted S4 `32e88ec9c94f36c9de4f03aa128bafeaa9cc85df`.
+The initial interface pin `443f5e6a3` added shared identity types only; current
+implementation and local controls remain unadmitted pending native7 integration.
 The governing slice is section 5 of
 [the M2 note](2026-11-15-teams-phases-m2.md). Engineering task:
 `zerus-63rru.161.5`. Final integration follows actual admitted native S2/core7.
@@ -27,6 +28,8 @@ A completed historical rework is not the current episode. Every identity is
 compared with current storage under custody, including explicit absence. A
 missing current row, partial scope, invalid UUID, zero identity or unknown kind
 never adopts a newer publication, generation, relative target or pause.
+Generations are positive exact JSON integers (at most `2^53-1`); open proposal
+generation exceeds its BASE, and episode/BASE/NEW UUIDs are distinct.
 
 | Rust operation / typed TeamAction | CLI command | Additional fields | Authority |
 | --- | --- | --- | --- |
@@ -114,7 +117,8 @@ title, task membership, accepted tasks/commits, publication or integration histo
 
 There is one store predicate shared by control reads and writers. It is not
 derived from the visible queue, an empty queue, a holder, an effect's current
-state or only the newest publication. All reads use a single snapshot/custody:
+state or only the newest publication. Indexed Teams history and fresh task
+documents must agree under retained custody:
 
 * Phase/draft/publication/rework identities must be coherent and bounded. Draft
   or Rejected has a complete nonempty current draft and no publication/runtime
@@ -125,6 +129,32 @@ state or only the newest publication. All reads use a single snapshot/custody:
   unobserved/missing/conflicting task state is unknown, never proof of unstarted.
   Generation must be 1, actual observed stage Todo/Backlog, no attempt/current or
   last attempt identity, no cancellation, integration receipt or started stage.
+* The supported Person task-send writer can reserve and save an attempt before
+  the next service observation. A cached Todo/attempt0 row therefore cannot
+  establish that a published task is still unstarted. The selected, relative
+  and crossed phase scopes first select exact task IDs through the indexed
+  live/archive membership, within one short Teams read snapshot. That snapshot
+  is released **before** existing-only project custody is acquired. No missing
+  project, directory or task is created, repaired or discovered through a
+  catalog scan. All tasks must belong to the exact stored project/home/team;
+  the finite cohort is capped at 4096 nodes across the selection.
+* The private project lock is retained through the final Teams read or writer
+  commit. Complete task documents are loaded within a five-second total
+  budget (checked before and after each synchronous read), with a 300-ms
+  project-lock wait. Optional control proof caps each retained file at 16 MiB
+  and the whole selected cohort at 64 MiB before invoking the ordinary Loro
+  reader. Exceeding this bound makes only the control proof unavailable; normal
+  task readers retain their existing unlimited-history contract. The existing
+  replica/store identity, project marker, directory and lock objects are bound
+  across acquisition and final custody; missing identities are never created. Missing, damaged, newer, partial,
+  differently bound or busy documents are unavailable. Every document must
+  still be writable Todo/Backlog, with no retained attempt, execution or
+  unexplained execution entry, and its revision must match the Teams
+  observation. The final Teams snapshot rechecks the same team home/project,
+  revision, tagged phase scopes and exact node/task membership. No second
+  ProjectStore may be opened under a caller's existing project custody.
+  Native S5 enrollment must bind this same resource set before consent and
+  recheck it under writer custody after actual core7 admission.
 * Per-node indexed existence probes include effects in **all** states and
   generations, reports, decisions (including settled history), integration
   facts, task observations, pipeline runs, stage tasks, verdicts and retained
@@ -135,7 +165,33 @@ state or only the newest publication. All reads use a single snapshot/custody:
   point/prefix existence tests retain history without loading it. Existing
   draft graph byte/row/work bounds apply to order/barrier revalidation.
 
+Receipt detection before external acquisition only avoids opening resources
+for a known request. Actor/content checks, native original verification and
+replay-before-stale remain in the common writer. It never returns a Person
+receipt before that writer. A winning Person reservation refuses a later
+Move/acceptance change; a winning retained project lease excludes reservations
+until the phase-control commit or rollback. Current documents supplement,
+rather than erase, all earlier indexed attempts/effects/decisions.
+
 ## Storage, legacy custody and native compatibility
+
+The no-new-floor design remains **unproved** during source preparation. A real
+private-child control found another required prerequisite: an ordinary child
+spawned before PausePhase could reserve and deliver after the pause committed,
+because its final `permit_for_reservation` checked the effect and task marker
+but not phase readiness. The native7 candidate still had those identical
+production bytes when inspected. This is a supported execution race, not an
+injected companion disagreement. The S5 source rechecks the existing ordinary
+hand-out kernel under the final task/Teams reservation locks; in-hands reopen
+remains separate. The coordinator's source/landing decision of 2026-11-16 puts
+this minimal existing-kernel recheck into native S2 **before actual7 admission**,
+owned and independently qualified by that author. It adds no S5 variant,
+companion or registry number. Final S5 takes that actual admitted source; the
+local proposed guard remains earlier-source evidence, not a competing final
+implementation. Genuine old7 compatibility still requires its real final
+images and both writer orders. No new mark is allocated or compatibility
+result inferred from an unadmitted candidate. Retained first-failure evidence is in
+`artifacts/test-results/wp161-s5/final-pause-reservation-red.log`.
 
 The intended layout is an additive `phase_pause_episodes` companion: immutable
 episode identity/owner/reason/time, a closed flag, and a unique partial current
@@ -167,6 +223,15 @@ these writes. The new companion must be preserved byte-for-byte by real older
 opens/writes, not merely ignored in a fabricated connection test.
 
 This source audit is not a claim that candidate7 is admitted or qualified.
+Coordinator clarification (2026-11-16): old7 compatibility covers states real
+supported writers, migrations and crash/rollback/replay paths can produce. An
+injected active episode with `paused=false` is a separate new-engine fault
+control. Old7 cannot detect a companion it does not read; no such detection is
+claimed. New readiness/final ordinary admission validates companion shape,
+current owner and bit consistency. A textual layout tag validates this current
+format only; it is not an old-engine execution fence. No new registry number
+is allocated solely for injected corruption. A genuine supported old-writer
+counterexample requires reporting before any allocation.
 Final S5 must re-audit the **actual admitted7** sources, use its genuine image
 for fresh/cached/writer/admission orders, and bind new pause/relative/control
 facts in its native original lane. Any contrary legacy writer or new required
@@ -189,8 +254,8 @@ earlier, later: {target:null|PhaseControlScope,availability:{allowed,reason}}
 Reasons are at most 2048 UTF-8 bytes and owner encoding at most 4096. The shared
 types define the exact read shape; `allowed` describes factual prerequisites,
 never Actor authority. Unknown-owner legacy pause has `episode:null`. A missing
-neighbor has `target:null` and a disabled explanation. The selected read obtains neighboring
-headers itself within the existing <=200-phase cap; it does not infer neighbors
+neighbor has `target:null` and a disabled explanation. The selected read obtains
+neighboring headers itself within the existing <=200-phase cap; it does not infer neighbors
 from a partial visible page. No history selector, new poller, authority or cache
 is introduced. Current BASE/proposal/NEW selection and whole-phase live history
 remain S4's; missing historical versions stay unavailable.
@@ -198,7 +263,16 @@ remain S4's; missing historical versions stay unavailable.
 Core validates identities, flags, bounds and forbidden characters before
 enabling controls. Missing capability on an older hgs, malformed/partial/stale
 read, unknown control version or conflicting scope disables S5 controls. The
-unchanged serialized Phase and frozen requests/snapshots remain readable by
+control writer proves complete frozen membership and every retained earlier
+publication. An open correction may exclude only its exact reserved NEW from
+that structural completeness test, never its BASE or earlier task/stage
+history. This does not mark `live.complete` true or enable acceptance. Outside
+that explicit pending-NEW case, an incomplete/missing published live frame
+derives disabled control flags in Core while retaining the shared partial
+Layers display and validated owner/reason. Malformed control fields still
+refuse; no invalid value or historical identity is replaced.
+
+The unchanged serialized Phase and frozen requests/snapshots remain readable by
 old engines. Real old Core reads of the additive reply must be tested: unknown
 fields may make actions read-only; no discard-and-enable fallback is allowed.
 

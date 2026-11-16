@@ -57,6 +57,11 @@ impl TeamAction {
     /// The operation: `hgs team <op> --json`.
     pub fn op(&self) -> &'static str {
         match self {
+            Self::SetPhaseBarrier { .. } => "set-phase-barrier",
+            Self::PausePhase { .. } => "pause-phase",
+            Self::ResumePhase { .. } => "resume-phase",
+            Self::MovePhase { .. } => "move-phase",
+            Self::SetPhaseAcceptance { .. } => "set-phase-acceptance",
             Self::SendBackPhase { .. } => "send-back-phase",
             Self::SubmitPhaseCorrections { .. } => "submit-phase-corrections",
             Self::EditPhaseCorrections { .. } => "edit-phase-corrections",
@@ -109,6 +114,21 @@ impl TeamAction {
     /// The fields the operation sends besides the envelope's.
     pub fn input(&self) -> Map<String, Value> {
         let value = match self {
+            Self::SetPhaseBarrier { scope, barrier } => json!({"scope":scope,"barrier":barrier}),
+            Self::PausePhase {
+                scope,
+                pause,
+                reason,
+            } => json!({"scope":scope,"pause":pause,"reason":reason}),
+            Self::ResumePhase { scope, pause } => json!({"scope":scope,"pause":pause}),
+            Self::MovePhase {
+                scope,
+                relative_to,
+                placement,
+            } => json!({"scope":scope,"relative_to":relative_to,"placement":placement}),
+            Self::SetPhaseAcceptance { scope, acceptance } => {
+                json!({"scope":scope,"acceptance":acceptance})
+            }
             Self::SendBackPhase { .. }
             | Self::SubmitPhaseCorrections { .. }
             | Self::EditPhaseCorrections { .. }
@@ -253,6 +273,11 @@ impl TeamAction {
     /// Checks what the call sends before anything runs.
     pub fn check(&self) -> Result<(), String> {
         match self {
+            Self::SetPhaseBarrier { .. }
+            | Self::PausePhase { .. }
+            | Self::ResumePhase { .. }
+            | Self::MovePhase { .. }
+            | Self::SetPhaseAcceptance { .. } => super::phase_controls::check(self),
             Self::SendBackPhase { .. }
             | Self::SubmitPhaseCorrections { .. }
             | Self::EditPhaseCorrections { .. }

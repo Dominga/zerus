@@ -38,6 +38,7 @@ pub(super) fn load(db: &Connection, team: &str) -> Result<Readiness> {
     if phases.len() > 200 {
         return Err(over("Too many phases for one readiness decision."));
     }
+    store::phase_controls::validate_pauses(db, team, &phases)?;
     for phase in &mut phases {
         if phase.kind == PhaseKind::Plan
             && phase.state == PhaseState::Approved

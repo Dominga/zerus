@@ -94,6 +94,7 @@ fn apply_inputs(
     store.refresh()?;
     prepare_first(store, actor, request)?;
     let state = store.state().to_owned();
+    let task_custody = phase_controls::prepare(store, request);
     let tx = store
         .db
         .as_mut()
@@ -130,6 +131,7 @@ fn apply_inputs(
         team: &team,
         op: &request.operation,
         request_id: &request.request_id,
+        task_custody: task_custody.as_ref(),
         now,
         reply: Reply {
             ok: true,
@@ -287,6 +289,11 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 }
 fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
+        Operation::SetPhaseBarrier { .. }
+        | Operation::PausePhase { .. }
+        | Operation::ResumePhase { .. }
+        | Operation::MovePhase { .. }
+        | Operation::SetPhaseAcceptance { .. } => phase_controls::write(ctx),
         Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::ReconcilePhaseReview { .. } => phase_review::review(ctx),
         Operation::SendBackPhase { .. } => rework::send_back(ctx),

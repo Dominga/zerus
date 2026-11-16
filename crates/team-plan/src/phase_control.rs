@@ -79,6 +79,36 @@ pub enum PauseOwner {
     },
 }
 
+impl PauseOwner {
+    /// Validate stored attribution; this does not verify a caller or binding.
+    pub fn valid(&self) -> bool {
+        let text = |s: &str, max: usize| {
+            !s.trim().is_empty() && s.len() <= max && crate::forbidden_char(s).is_none()
+        };
+        match self {
+            Self::Person { person } => text(person, 200),
+            Self::Lead {
+                person,
+                member,
+                session,
+            } => {
+                let identity = session
+                    .session_id
+                    .strip_prefix("launch_id:")
+                    .is_some_and(canonical_uuid)
+                    || session
+                        .session_id
+                        .strip_prefix("run_id:")
+                        .is_some_and(|s| text(s, 256));
+                text(person, 200)
+                    && text(member, 200)
+                    && canonical_uuid(&session.machine)
+                    && identity
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Availability {
@@ -99,4 +129,45 @@ impl PhaseControlScope {
             Self::Draft { phase, .. } | Self::Published { phase, .. } => *phase,
         }
     }
+
+    /// Shape only. Current-row identity and Actor admission remain writer facts.
+    pub fn valid(&self) -> bool {
+        const MAX_EXACT_JSON_INTEGER: u64 = (1 << 53) - 1;
+        let generation = |g: u64| g > 0 && g <= MAX_EXACT_JSON_INTEGER;
+        match self {
+            Self::Draft {
+                phase,
+                generation: g,
+            } => *phase > 0 && generation(*g),
+            Self::Published {
+                phase,
+                generation: g,
+                publication,
+                rework,
+            } => {
+                *phase > 0
+                    && generation(*g)
+                    && canonical_uuid(publication)
+                    && rework.as_ref().is_none_or(|r| {
+                        canonical_uuid(&r.id)
+                            && r.id != *publication
+                            && r.generation.is_none_or(|v| generation(v) && v > *g)
+                            && r.approval.as_ref().is_none_or(|id| {
+                                r.generation.is_some()
+                                    && canonical_uuid(id)
+                                    && id != publication
+                                    && *id != r.id
+                            })
+                    })
+            }
+        }
+    }
+}
+
+fn canonical_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
 }

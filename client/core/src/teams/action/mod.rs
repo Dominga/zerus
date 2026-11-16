@@ -38,6 +38,7 @@ mod drafts;
 pub mod editing;
 pub mod input;
 pub mod intents;
+mod phase_controls;
 mod phases;
 #[cfg(test)]
 mod planning;

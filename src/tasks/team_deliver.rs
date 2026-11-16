@@ -997,6 +997,21 @@ fn permit_for_reservation(
     task: &TaskDoc,
 ) -> Result<Permit> {
     let fresh = permit(store, body, here)?;
+    if fresh.kind == "handout" {
+        // Spawn admission precedes the child's project/task lock. A phase
+        // pause or barrier may win between them. Recheck the same kernel
+        // under the Teams writer retained through the reservation save.
+        crate::teams::ops::handout_admissible(
+            store
+                .db
+                .as_ref()
+                .ok_or_else(|| fail("Team store disappeared."))?,
+            &fresh.team,
+            body.node,
+            &body.member,
+        )
+        .map_err(problem)?;
+    }
     marker(task, &body.team, here)?;
     let current = task.view().map_err(fail)?;
     if fresh.task != old.task

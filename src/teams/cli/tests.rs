@@ -23,10 +23,10 @@ mod progress157;
 mod providers;
 #[cfg(unix)]
 mod publication;
-#[cfg(unix)]
-mod rework;
 mod reads;
 mod recorded_timings;
+#[cfg(unix)]
+mod rework;
 mod session_groups;
 mod status_items;
 mod storage_failure;

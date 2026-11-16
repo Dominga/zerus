@@ -364,10 +364,8 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @Composable private fun TaskSettingsSheet(model: ZerusViewModel, key: ProjectKey, task: TaskInfo, onDismiss: () -> Unit, onCancel: () -> Unit) {
     val tab = TasksPresentation.tab(task.stage)
     val editable = task.writable && task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG)
-    val original = remember(key, task.uuid) { task.copy() }
     var comment by remember(key, task.uuid) { mutableStateOf("") }
     var commentEntry by remember(key, task.uuid) { mutableStateOf<String?>(null) }
-    val target = original.target
     val draft = task
     val actions = TasksPresentation.cards(listOf(draft), tab, model.displayedTaskChosen(), false, model::sendRoute, model::cancelRoute, model::taskCurrentSession)
         .single().actions.filter { it.action != TaskAction.EDIT }
@@ -382,7 +380,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             }
             SelectionContainer { Text(task.text, style = MaterialTheme.typography.bodyMedium) }
             Text("Session: ${model.taskSessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
-            if (editable) OutlinedButton(onClick = { model.openTaskContent(key, original); onDismiss() }) {
+            if (editable) OutlinedButton(onClick = { model.openTaskContent(key, task); onDismiss() }) {
                 Text(androidx.compose.ui.res.stringResource(R.string.task_content_open))
             }
             if (TasksPresentation.note(task).isNotBlank()) Text(TasksPresentation.note(task), style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)

@@ -61,6 +61,7 @@ import ZerusReplica
             let file = Attachment(id: UUID().uuidString.lowercased(), name: "a.txt", mime: "text/plain", bytes: 1, sha256: String(repeating: "ab", count: 32))
             model.picked(ticket!, imports: [{ _ in file }]); try await wait(model, "import saved") { !$0.busy && $0.draft?.form.files.count == 1 }
             upload = false; model.save(id)
+            try await wait(model, "save refusal settled") { !$0.busy }
             XCTAssertEqual(completed, 0); XCTAssertEqual(model.state?.draft?.form.files.count, 1)
             XCTAssertTrue(try replicas.store(key, name: "Fixture").list().tasks.isEmpty)
         }
@@ -75,4 +76,31 @@ import ZerusReplica
             XCTAssertNil(try files.read(proposed.scope, isNew: true))
         }
     }
+
+    func testCancelledPickerAndPartialImportFailureKeepOriginalComposition() async throws {
+        try await fixture { replicas, files, context in
+            let removed = ContentRemovedFiles()
+            let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data([1]) }, remove: { id, _ in await removed.append(id) },
+                                              upload: { _, _ in true }, changed: { _, _ in XCTFail("no save requested") }, text: { $0 })
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Kept"))
+            try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
+            let id = model.state!.id; var first: TaskContentPicker?
+            model.preparePicker(id) { first = $0 }; try await wait(model, "first picker") { _ in first != nil }
+            model.picked(first!, imports: []); XCTAssertEqual(model.state?.busy, false)
+            var imports = 0
+            model.picked(first!, imports: [{ _ in imports += 1; throw ZerusError.invalid("cancelled callback") }])
+            try await Task.sleep(for: .milliseconds(20)); XCTAssertEqual(imports, 0)
+            var second: TaskContentPicker?
+            model.preparePicker(id) { second = $0 }; try await wait(model, "second picker") { _ in second != nil }
+            let file = Attachment(id: UUID().uuidString.lowercased(), name: "first.txt", mime: "text/plain", bytes: 1, sha256: String(repeating: "ab", count: 32))
+            model.picked(second!, imports: [{ _ in file }, { _ in throw ZerusError.invalid("forced provider refusal") }])
+            try await wait(model, "partial failure settled") { !$0.busy && $0.error.contains("forced provider refusal") }
+            XCTAssertEqual(model.state?.draft?.form.files.count, 0); XCTAssertEqual(model.state?.draft?.form.text, "Kept")
+            let ids = await removed.ids; XCTAssertEqual(ids, [file.id])
+        }
+    }
+}
+private actor ContentRemovedFiles {
+    var ids: [String] = []
+    func append(_ id: String) { ids.append(id) }
 }

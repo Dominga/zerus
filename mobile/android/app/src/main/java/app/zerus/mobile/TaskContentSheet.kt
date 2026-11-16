@@ -58,7 +58,7 @@ import org.json.JSONObject
                     runCatching { picker.launch(arrayOf("*/*")) }.onFailure { model.taskContentPicked(ticket, emptyList()) }
                 } }, enabled = live) { Text(stringResource(R.string.task_media_attach)) }
                 Box {
-                    OutlinedButton(onClick = { targets = true }, enabled = live) { Text(stringResource(R.string.task_edit_target)) }
+                    OutlinedButton(onClick = { targets = true }, enabled = live) { Text(stringResource(R.string.task_edit_target) + ": " + model.taskContentTargetLabel(state)) }
                     DropdownMenu(targets, { targets = false }) {
                         DropdownMenuItem(text = { Text(stringResource(R.string.task_edit_keep_target)) }, onClick = { model.changeTaskContent(state.token) { it.copy(target = null) }; targets = false })
                         DropdownMenuItem(text = { Text(stringResource(R.string.task_edit_any)) }, onClick = { model.changeTaskContent(state.token) { it.copy(target = app.zerus.mobile.replica.TaskTarget.AnySession) }; targets = false })

@@ -179,9 +179,7 @@ struct TaskEditorPicker: Equatable {
         let replicas = replicas
         app.viewer.openTask(key: JSON([scope.key.connectionId, scope.key.swarmId, scope.key.id, task, "", file.token]).compact, file: file) {
             try await replicas.run {
-                let store = replicas.store(scope.key, name: scope.projectName), metadata = try store.media(reference: task, entry: nil)
-                guard let index = metadata.firstIndex(where: { $0.token == file.token }) else { throw ZerusError.invalid("Refresh this task to open its media.") }
-                return try store.readMedia(reference: task, entry: nil, index: UInt32(index), expectedToken: file.token)
+                try TaskMediaSelection(task: task, entry: nil, token: file.token).read(replicas.store(scope.key, name: scope.projectName))
             }
         }
     }

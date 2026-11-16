@@ -63,13 +63,37 @@ final class TaskContentDraftTests: XCTestCase {
         }
     }
     func testMonotonicCheckpointAndQuotaKeepPreviousBytes() throws {
-        try fixture { _, files, _ in
+        try fixture { _, files, root in
             let draft = try files.create(TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession))
             var form = draft.form; form.text = "Latest"; form.sequence = 4
             let next = try files.checkpoint(draft, sequence: 4, changes: form.json())
             XCTAssertThrowsError(try files.checkpoint(draft, sequence: 3, changes: draft.form.json()))
             XCTAssertThrowsError(try files.checkpoint(draft, sequence: 4, changes: draft.form.json()))
+            let bounded = TaskContentDraftFiles(directory: root.appendingPathComponent("drafts"), keys: StaticKeyProvider(SymmetricKey(size: .bits256)), maxEntries: 1, syncDirectory: {})
+            let foreign = TaskContentDraft.new(ProjectKey(connectionId: key.connectionId, swarmId: key.swarmId, id: "other"), computer: "computer", stage: .todo, target: .anySession)
+            XCTAssertThrowsError(try bounded.create(foreign))
             XCTAssertEqual(try files.read(draft.scope, isNew: true), next)
         }
+    }
+
+    func testFailedPrivateSyncIsVisibleAndKeepsApplyingHold() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fault = ContentSyncFault(), keys = StaticKeyProvider(SymmetricKey(size: .bits256))
+        let files = TaskContentDraftFiles(directory: root, keys: keys, syncDirectory: { try fault.sync() })
+        let draft = try files.create(TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession))
+        fault.enable()
+        XCTAssertThrowsError(try files.begin(draft))
+        XCTAssertEqual(try files.read(draft.scope, isNew: true)?.state, .applying)
+        XCTAssertThrowsError(try files.begin(draft))
+    }
+}
+private final class ContentSyncFault: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+    func enable() { lock.lock(); failed = true; lock.unlock() }
+    func sync() throws {
+        lock.lock(); let fail = failed; lock.unlock()
+        if fail { throw ZerusError.invalid("forced private sync refusal") }
     }
 }

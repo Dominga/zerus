@@ -39,7 +39,7 @@ struct TaskContentSheet: View {
                                 }
                             }
                             Button(taskEditText("task_media_attach")) { model.preparePicker(state.id) { original in ticket = original; picking = true } }.disabled(!live)
-                            Menu(taskEditText("task_edit_target")) {
+                            Menu(taskEditText("task_edit_target") + ": " + tasks.contentTargetLabel(state)) {
                                 Button(taskEditText("task_edit_keep_target")) { model.change(state.id) { $0.target = nil } }
                                 Button(taskEditText("task_edit_any")) { model.change(state.id) { $0.target = .anySession } }
                                 ForEach(tasks.editorSessions(state.context.key)) { session in

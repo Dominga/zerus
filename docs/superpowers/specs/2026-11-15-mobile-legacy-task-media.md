@@ -75,3 +75,28 @@ Kill production guard mutants and restore exact source. Run Android unit tests,
 lint and unsigned three-ABI assembly on Arch, plus ZerusKit and an unsigned
 simulator build in the private Mac clone. No devices, signing, installs, relay
 changes or hosted gates.
+
+## Implemented local lifecycle
+
+Task settings open a separate prompt/files form; Send remains a separate task
+card action. The paperclip beside quick text entry opens a new task form with
+files. Each form captures its project/connection, original computer and draft
+nonce. Existing forms also retain the task UUID and content revision. Session
+labels resolve within that captured scope; renamed labels grant no authority.
+
+Content drafts use a separate encrypted `task-content-drafts-v1` namespace,
+with at most 32 records, 1 MiB per record and 16 MiB total, without eviction.
+Private file bytes remain in the existing attachment store. The shared bounded
+checkpoint pump saves text/retained tokens before a picker opens. Import failure
+removes only that import's unpublished copies; removing a picked file first
+checkpoints its removal. Explicit discard requires confirmation. Local Applying
+is fsynced before FFI creation/edit, and a restart or unconfirmed save keeps that
+record held for review. It never recreates a qualified handle or native request.
+Known completion refreshes/exchanges the captured project and releases its local
+draft; it does not send the task to an agent.
+
+The selected comment preview keeps its immutable entry ID and file token,
+re-resolves only that entry's bounded metadata and lets native `read_media`
+verify the selected position/token again. Schema-3 and schema-8 synthetic shared
+fixtures cover new history arriving without rebinding the preview and preserve
+the ordinary read-only writer boundary.

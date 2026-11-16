@@ -73,10 +73,7 @@ final class TasksModel {
         return TaskContentContext(connection: connection, key: key, projectName: taskProjectName(key), computer: matches[0])
     }
     private func contentUpload(_ context: TaskContentContext, _ target: TaskTarget) -> Bool {
-        guard app.connections.contains(context.connection) else { return false }
-        let bound: String? = if case .session(let session) = target { session.machine } else { nil }
-        let matches = app.machines.filter { $0.connectionId == context.connection.id && (bound != nil ? $0.machineId == bound : $0.id == context.computer.id) }
-        return matches.count == 1 && app.machineFeatures[MachineKey(connectionId: context.connection.id, computerId: matches[0].id), default: []].contains(TaskSyncPlan.uploadFeature)
+        TaskContentCapabilities.upload(context, target: target, connections: app.connections, machines: app.machines, features: app.machineFeatures)
     }
     private func openContent(_ context: TaskContentContext, _ draft: TaskContentDraft) {
         guard let replicas, let assets = app.attachmentStore else { return }
@@ -109,6 +106,11 @@ final class TasksModel {
         guard contentUpload(context, target) else { taskNotice = taskEditText("task_content_upload"); return }
         openContent(context, TaskContentDraft.new(key, computer: context.computer.id, stage: taskTab == .backlog ? .backlog : .todo, target: target))
     }
+    func contentTargetLabel(_ state: TaskContentState) -> String {
+        guard let form = state.draft?.form, case .session(let session) = form.target ?? form.originalTarget else { return taskEditText("task_edit_any") }
+        return TasksPresentation.resolve(session, machines: app.machines, connectionId: state.context.key.connectionId,
+                                         sessions: projectSessions(state.context.key))?.target.session ?? session.session
+    }
     func chooseContentSession(_ id: UUID, _ session: Session) {
         guard let editor = taskContent, let state = editor.state, state.id == id, editorSessions(state.context.key).contains(session),
               let machine = app.machines.first(where: { $0.connectionId == state.context.key.connectionId && $0.id == session.target.computerId }) else { return }
@@ -126,9 +128,7 @@ final class TasksModel {
         let name = taskProjectName(key)
         app.viewer.openTask(key: JSON([key.connectionId, key.swarmId, key.id, task, entry ?? "", file.token]).compact, file: file) {
             try await replicas.run {
-                let store = replicas.store(key, name: name), metadata = try store.media(reference: task, entry: entry)
-                guard let index = metadata.firstIndex(where: { $0.token == file.token }) else { throw ZerusError.invalid("Refresh this task to open its media.") }
-                return try store.readMedia(reference: task, entry: entry, index: UInt32(index), expectedToken: file.token)
+                try TaskMediaSelection(task: task, entry: entry, token: file.token).read(replicas.store(key, name: name))
             }
         }
     }
@@ -653,8 +653,7 @@ final class TasksModel {
             do {
                 try await taskSync.exchangeNow(connection, key, name: name, computerId: machine.id, fetch: [uuid])
                 let task = try await replicas.run { try replicas.store(key, name: name).get(reference: uuid) }
-                refreshTasks()
-                opened(task)
+                if tasksKey == key { refreshTasks(); opened(task) }
             } catch {
                 taskNotice = Self.reason(error, "The task could not be opened.")
             }

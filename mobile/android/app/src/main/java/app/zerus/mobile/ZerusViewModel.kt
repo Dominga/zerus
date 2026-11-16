@@ -994,13 +994,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         }
         taskContent.picked(ticket, imports)
     }
-    private fun taskContentUpload(context: TaskEditContext, target: TaskTarget): Boolean {
-        if (context.connection !in connections) return false
-        val bound = (target as? TaskTarget.Session)?.session?.machine
-        val candidates = machines.filter { it.connectionId == context.connection.id &&
-            (if (bound != null) it.machineId == bound else it.id == context.computer.id) }
-        return candidates.singleOrNull()?.let { TaskSyncPlan.UPLOAD_FEATURE in machineFeatures[MachineKey(context.connection.id, it.id)].orEmpty() } == true
-    }
+    private fun taskContentUpload(context: TaskEditContext, target: TaskTarget) =
+        TaskContentCapabilities.upload(context, target, connections, machines, machineFeatures)
     private fun taskContentContext(key: ProjectKey, target: TaskTarget): TaskEditContext? {
         val connection = connections.singleOrNull { it.id == key.connectionId } ?: return null
         val bound = (target as? TaskTarget.Session)?.session?.machine
@@ -1022,6 +1017,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (!taskContentUpload(context, target)) { taskNotice = getApplication<Application>().getString(R.string.task_content_upload); return }
         taskContent.open(context, TaskContentDraft.new(key, context.computer.id,
             if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO, target))
+    }
+    internal fun taskContentTargetLabel(state: TaskContentState): String {
+        val target = state.draft?.form?.let { it.target ?: it.originalTarget } as? TaskTarget.Session
+            ?: return getApplication<Application>().getString(R.string.task_edit_any)
+        return TasksPresentation.resolve(target.session, machines, state.context.key.connectionId, projectSessions(state.context.key))
+            ?.target?.session ?: target.session.session
     }
     internal fun chooseTaskContentSession(token: String, session: Session) {
         val state = taskContent.state?.takeIf { it.token == token } ?: return
@@ -1097,9 +1098,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val name = taskProjectName(key)
         attachments.openTask(taskMediaKey(key, task, file, entry), file) {
             withContext(Dispatchers.IO) { taskReplicas.store(key, name).use { store ->
-                val index = store.media(task, entry).indexOfFirst { it.token == file.token }
-                check(index >= 0)
-                store.readMedia(task, entry, index.toUInt(), file.token)
+                TaskMediaSelection(task, entry, file.token).read(store)
             } }
         }
     }
@@ -3130,8 +3129,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 taskSync.exchangeNow(connection, key, taskProjectName(key), machine.id, fetch = listOf(row.uuid))
                 val task = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.get(row.uuid) } }
-                refreshTasks()
-                opened(task)
+                if (tasksKey == key) { refreshTasks(); opened(task) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be opened." } }
             finally { taskBusy = false }

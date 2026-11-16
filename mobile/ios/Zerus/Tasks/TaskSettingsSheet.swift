@@ -80,7 +80,7 @@ struct TaskSettingsSheet: View {
                 Text(task.text).textSelection(.enabled)
                 Text("Session: \(tasks.taskSessionLabel(task))").font(.subheadline).foregroundStyle(Theme.muted)
                 if editable {
-                    Button(taskEditText("task_content_open")) { tasks.openTaskContent(key, original ?? task) }.buttonStyle(.bordered)
+                    Button(taskEditText("task_content_open")) { tasks.openTaskContent(key, task) }.buttonStyle(.bordered)
                 }
                 let note = TasksPresentation.note(task)
                 if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(Theme.muted) }

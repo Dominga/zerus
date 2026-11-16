@@ -65,6 +65,7 @@ class TaskContentModelTest {
             model.picked(ticket!!, listOf({ Attachment(UUID.randomUUID().toString(), "a.txt", "text/plain", 1, "ab".repeat(32)) }))
             await(model, "import saved") { !it.busy && it.draft!!.form.files.size == 1 }
             upload = false; model.save(token)
+            await(model, "save refusal settled") { !it.busy }
             assertEquals(0, completed); assertEquals(1, model.state!!.draft!!.form.files.size)
             replicas.store(key, "Fixture").use { assertTrue(it.list().tasks.isEmpty()) }
         } finally { owner.cancel() }
@@ -78,6 +79,31 @@ class TaskContentModelTest {
             val draft = TaskContentDraft.new(key.copy(id = "foreign"), "computer", TaskStage.TODO, TaskTarget.AnySession)
             model.open(context, draft); await(model, "foreign draft refused") { !it.loading && it.error.isNotEmpty() }
             assertNull(files.read(draft.scope, true))
+        } finally { owner.cancel() }
+    }
+
+    @Test fun cancelledPickerAndPartialImportFailureNeverConsumeAgainOrLoseOriginalFiles() = runBlocking {
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val removed = mutableListOf<String>()
+        val model = TaskContentModel({ "message:$it" }, owner, TaskReplicas(folders.newFolder()), TaskContentDraftFiles(folders.newFolder(), { secret }),
+            read = { byteArrayOf(1) }, remove = { id, _ -> removed += id }, upload = { _, _ -> true }, changed = { _, _ -> fail("no save requested") })
+        try {
+            model.open(context, TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+            await(model, "draft open") { !it.loading && it.draft != null }
+            val token = model.state!!.token; var first: TaskContentPicker? = null
+            model.picker(token) { first = it }; await(model, "first picker") { first != null }
+            model.picked(first!!, emptyList()); assertFalse(model.state!!.busy)
+            var imports = 0
+            model.picked(first!!, listOf({ imports++; error("cancelled callback must not import") }))
+            delay(20); assertEquals(0, imports)
+            var second: TaskContentPicker? = null
+            model.picker(token) { second = it }; await(model, "second picker") { second != null }
+            val file = Attachment(UUID.randomUUID().toString(), "first.txt", "text/plain", 1, "ab".repeat(32))
+            model.picked(second!!, listOf({ file }, { error("forced provider refusal") }))
+            await(model, "partial failure settled") { !it.busy && it.error.contains("forced provider refusal") }
+            assertTrue(model.state!!.draft!!.form.files.isEmpty())
+            assertEquals(listOf(file.id), removed)
+            assertEquals("Kept", model.state!!.draft!!.form.text)
         } finally { owner.cancel() }
     }
 }

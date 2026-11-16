@@ -125,3 +125,78 @@ fn final_reservation_custody_wins_before_a_later_pause_and_existing_work_can_rep
         zerus_team_plan::NodeState::InProgress
     );
 }
+
+#[test]
+fn a_barrier_and_the_real_task_reservation_obey_both_writer_orders() {
+    for barrier_first in [true, false] {
+        let (mut f, _, first) = published();
+        for r in &first {
+            crate::teams::tasks::observe(&f.config.state, &r.task).unwrap();
+        }
+        let tasks = another_published(&mut f);
+        let (body, args) = prepare(&mut f, &tasks);
+        let input = serde_json::to_string(&body).unwrap();
+        if barrier_first {
+            let (child, reply) = f.spawn("submitted", &args, &input, true);
+            wait(&f.config.state.join(format!("ready-{}", child.id())));
+            let current = scope(&f, 2);
+            f.h.run(
+                &person(),
+                Operation::SetPhaseBarrier {
+                    scope: current,
+                    barrier: true,
+                },
+            )
+            .unwrap();
+            std::fs::write(f.config.state.join("release"), b"go").unwrap();
+            let result = f.finish(child, reply);
+            assert_ne!(result["reply"]["state"], "submitted", "{result}");
+            assert_eq!(f.count(), 0);
+            let doc = crate::tasks::store(&f.config, &tasks[0].task.project)
+                .unwrap()
+                .load(&tasks[0].task.uuid)
+                .unwrap();
+            assert!(doc.attempt_phases().unwrap().is_empty());
+        } else {
+            let (child, reply) = f.spawn_with(
+                "submitted",
+                &args,
+                &input,
+                false,
+                &[("HGS_TEST_TEAM_LOCK_AT", "deliver")],
+            );
+            wait(&f.config.state.join("deliver-ready"));
+            let request = ops::tests::request(
+                f.h.store.team(TEAM).unwrap().unwrap().revision,
+                Operation::SetPhaseBarrier {
+                    scope: scope(&f, 2),
+                    barrier: true,
+                },
+            );
+            let mut writer = crate::teams::store::Store::open(&f.config.state).unwrap();
+            std::thread::scope(|s| {
+                let request = &request;
+                let join = s.spawn(move || {
+                    ops::tests::apply_fixture(&mut writer, &person(), request, now())
+                });
+                std::fs::write(f.config.state.join("deliver-release"), b"go").unwrap();
+                let result = f.finish(child, reply);
+                assert_eq!(result["reply"]["state"], "submitted", "{result}");
+                join.join().unwrap().unwrap();
+            });
+            assert_eq!(f.count(), 1);
+            // Closed readiness does not rewrite/replay an already-recorded
+            // submission. Recovery uses that same original attempt/receipt.
+            let mut recovery = args.clone();
+            recovery.push("--recover-only".into());
+            let (child, reply) = f.spawn("submitted", &recovery, &input, false);
+            assert_eq!(f.finish(child, reply)["reply"]["state"], "submitted");
+            assert_eq!(f.count(), 1);
+        }
+        assert!(
+            facts::phase(f.h.store.db.as_ref().unwrap(), TEAM, 2)
+                .unwrap()
+                .barrier
+        );
+    }
+}

@@ -191,6 +191,8 @@ impl TaskCustody {
         }
         answer._store = Some(project);
         answer.copy = Some(copy);
+        #[cfg(test)]
+        fixture::acquired();
         Ok(answer)
     }
 
@@ -232,6 +234,24 @@ impl TaskCustody {
             }
         }
         unstarted(db, &team.id, p)
+    }
+}
+
+/// A thread-local test rendezvous, never an environment-controlled product
+/// pause. It holds only the private fixture's already-acquired resources.
+#[cfg(test)]
+pub(crate) mod fixture {
+    thread_local! {
+        static ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+    }
+    pub(crate) fn once(hook: impl FnOnce() + 'static) {
+        ACQUIRED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+    }
+    pub(super) fn acquired() {
+        let hook = ACQUIRED.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 }
 

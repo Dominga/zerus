@@ -4,6 +4,8 @@ use super::*;
 use crate::teams::store::phase_controls as facts;
 use zerus_team_plan::{phase_control::*, Acceptance, PhaseState};
 mod admission;
+mod continuation;
+mod order;
 
 fn published() -> (
     Fixture,
@@ -31,6 +33,44 @@ fn scope(f: &Fixture, n: u32) -> PhaseControlScope {
         .controls
         .unwrap()
         .scope
+}
+
+fn another_published(f: &mut Fixture) -> Vec<crate::teams::store::publication::PlannedTaskRequest> {
+    let id = f.h.store.next_draft_node(TEAM).unwrap();
+    f.h.run(
+        &person(),
+        Operation::SubmitDraftPhase {
+            phase: 2,
+            draft: ops::publication::tests::input(&[id]),
+        },
+    )
+    .unwrap();
+    f.h.run(
+        &person(),
+        Operation::ApprovePhase {
+            phase: 2,
+            generation: 1,
+            confirm_initial: false,
+        },
+    )
+    .unwrap();
+    let requests = f.h.store.publication_work(TEAM).unwrap();
+    assert!(!requests.is_empty() && requests.iter().all(|r| r.phase == 2));
+    for r in &requests {
+        assert_eq!(write(f, r).unwrap(), "created");
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::ReconcilePublication {
+            phase: 2,
+            publication: requests[0].publication.clone(),
+        },
+    )
+    .unwrap();
+    for r in &requests {
+        crate::teams::tasks::observe(&f.config.state, &r.task).unwrap();
+    }
+    requests
 }
 
 #[test]

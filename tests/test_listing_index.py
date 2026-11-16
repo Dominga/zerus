@@ -30,6 +30,24 @@ def seed_aggregate(state,generation):
         return db.execute('SELECT count(*),sum(length(CAST(seed AS BLOB))),max(length(CAST(seed AS BLOB))) FROM snapshots WHERE generation=?',(generation,)).fetchone()
 
 
+def resident_body_after(test,state,previous):
+    deadline=time.monotonic()+8;attempts=[]
+    while time.monotonic()<deadline:
+        status=subprocess.run([str(HGS),'listing-index','status','--json'],env=test.env,capture_output=True,text=True,timeout=12)
+        test.assertEqual(status.returncode,0,status.stderr);status=json.loads(status.stdout)
+        if status.get('state')!='ready' or status.get('generation',0)<=previous:
+            time.sleep(.02);continue
+        test.assertTrue(worker_leased(state),'resident worker lost its lease before ls')
+        result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives'],env=test.env,capture_output=True,text=True,timeout=12)
+        test.assertTrue(worker_leased(state),'resident worker lost its lease after ls')
+        attempts.append(dict(code=result.returncode,bytes=len(result.stdout.encode()),reason=result.stderr.strip()))
+        if result.returncode==0:return status,json.loads(result.stdout),result.stdout,attempts
+        test.assertEqual(result.stdout,'','a stale cut published a partial body')
+        test.assertTrue(any(reason in result.stderr for reason in ['Session listing is building, stale or unavailable','Session listing changed before publication']),result.stderr)
+        time.sleep(.02)
+    test.fail(f'resident worker failed to publish a later complete body: {attempts[-3:]}')
+
+
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('tmux'), 'qualified Linux listing activation')
 class ListingIndex(unittest.TestCase):
     def setUp(self):
@@ -225,20 +243,11 @@ class ListingIndex(unittest.TestCase):
             record['last_event_at']=123+round
             staged=path.with_suffix('.fixture-staged')
             staged.write_text(json.dumps(record));staged.replace(path)
-            # Observe only: status cannot silently replace a worker that died
-            # while cloning an older/uninstrumented atomic writer's new object.
-            deadline=time.monotonic()+8
-            while time.monotonic()<deadline:
-                status=json.loads(self.call('listing-index','status','--json').stdout)
-                states.append({key:status.get(key) for key in ['state','generation','reason']})
-                if status.get('state')=='ready' and status.get('generation',0)>previous:break
-                time.sleep(.02)
-            else:self.fail(f'resident incremental worker failed to restore readiness: {states[-3:]}')
-            self.assertGreater(status['generation'],previous)
-            previous=status['generation']
-            self.assertTrue(worker_leased(self.state),'resident worker lost its lease before ls')
+            status,body,raw,attempts=resident_body_after(self,self.state,previous)
+            states.extend(attempts)
+            self.assertGreater(status['generation'],previous);previous=status['generation']
             expected={str(path):path.read_bytes() for _,path in sources}
-            body=self.complete();rows=body['sessions']
+            rows=body['sessions']
             self.assertEqual(len(rows),213)
             self.assertEqual({row['name'] for row in rows},{record['name'] for record,_ in sources})
             self.assert_rows(self.canonical(),rows)
@@ -853,20 +862,17 @@ class LiveListingIndex(test_pause.Harness):
         accepted=[]
         for event,fields in [('UserPromptSubmit',dict(prompt='Private current writer')),('PreToolUse',dict(tool_name='Bash',tool_use_id='incremental-private',tool_input={'command':'printf fixture'})),('Stop',dict(last_assistant_message='Private settled reply'))]:
             self.send_event(name,event,**fields) # genuine native-producer ancestry
-            self.wait(lambda:status().get('state')=='ready' and status().get('generation',0)>previous)
-            current=status()['generation'];self.assertGreater(current,previous);previous=current
-            self.assertTrue(worker_leased(self.state),'worker died before the full listing')
+            current,body,raw,attempts=resident_body_after(self,self.state,previous)
+            previous=current['generation'];rows=body['sessions']
             expected={str(path):path.read_bytes() for _,path in sources}
-            result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives'],env=self.env,capture_output=True,text=True,timeout=12)
-            self.assertEqual(result.returncode,0,result.stderr);body=json.loads(result.stdout);rows=body['sessions']
             self.assertEqual(len(rows),213);self.assertEqual({row['name'] for row in rows},{record['name'] for record,_ in sources})
             native=self.binding(name);row=next(row for row in rows if row['name']==name)
             for key in ['session_id','run_id','conversation_id']:self.assertEqual(row[key],native[key])
-            oracle=subprocess.run([str(HGS),'__state','merge'],input=result.stdout,env=self.env,capture_output=True,text=True,timeout=12)
+            oracle=subprocess.run([str(HGS),'__state','merge'],input=raw,env=self.env,capture_output=True,text=True,timeout=12)
             self.assertEqual(oracle.returncode,0,oracle.stderr);self.assert_rows(json.loads(oracle.stdout)['sessions'],rows)
             self.assertEqual({str(path):path.read_bytes() for _,path in sources},expected,'readiness replayed a canonical write')
             self.assertTrue(worker_leased(self.state),'worker died after the full listing')
-            accepted.append(dict(generation=current,body_bytes=len(result.stdout.encode())))
+            accepted.append(dict(generation=current['generation'],body_bytes=len(raw.encode()),attempts=attempts))
         print(json.dumps(dict(control='resident-current-hook-writer',sessions=213,seed_aggregate=aggregate,cuts=accepted)),flush=True)
 
     def test_idle_claude_native_limit_panel_keeps_the_canonical_full_row(self):

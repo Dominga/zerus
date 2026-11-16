@@ -787,6 +787,26 @@ class LiveListingIndex(test_pause.Harness):
             stop.set();thread.join(timeout=2);server.close()
             for client in clients:client.join(timeout=2)
 
+    def test_idle_claude_native_limit_panel_keeps_the_canonical_full_row(self):
+        frame=(Path(__file__).parent/'fixtures/claude-usage-limit.txt').read_text()
+        source=self.bin/'claude';script=source.read_text()
+        source.write_text(script.replace('\nfor line in sys.stdin:',f'\nimport tty\ntty.setraw(sys.stdin.fileno())\nprint({chr(27)+"[?2004h"+frame.replace(chr(10),chr(13)+chr(10))!r},flush=True)\nfor line in sys.stdin:',1))
+        name=self.start('claude','idle-native-limit')
+        self.send_event(name,'Stop',last_assistant_message='Private fixture reply')
+        record=self.binding(name)
+        self.assertEqual(record['phase'],'idle')
+        self.hgs('listing-index','enable','--json')
+        rows=self.ready_rows()
+        oracle=subprocess.run([str(HGS),'__state','merge'],input=json.dumps(dict(host='test',sessions=rows)),env=self.env,capture_output=True,text=True,timeout=12)
+        self.assertEqual(oracle.returncode,0,oracle.stderr)
+        expected=json.loads(oracle.stdout)['sessions']
+        native=next(row for row in expected if row['name']==name)
+        self.assertEqual(native['activity'],'busy')
+        detail=json.loads(self.hgs('inspect',name,'--skip-processes'))
+        self.assertTrue(any(q.get('source')=='claude_usage_limit' for q in detail['pending_questions']))
+        self.assert_rows(expected,rows)
+        self.assertEqual(self.binding(name),record,'public observation changed canonical record')
+
     def test_full_mobile_mixed_private_inventory_keeps_exact_canonical_detail(self):
         import threading
         frame='› \n\n  gpt-6 high · /srv/example\n'
@@ -849,7 +869,8 @@ class LiveListingIndex(test_pause.Harness):
         import threading
         count=int(os.environ.get('ZERUS_LISTING_LIVE_COUNT','20'))
         # Recorded ordinary Claude frame, emitted by our genuine fixture process.
-        frame=(Path(__file__).parent/'fixtures/claude-approval-running.txt').read_text()
+        idle=os.environ.get('ZERUS_LISTING_IDLE')=='1'
+        frame=(Path(__file__).parent/'fixtures'/('claude-approval-denied.txt' if idle else 'claude-approval-running.txt')).read_text()
         source=self.bin/'claude';script=source.read_text()
         self.assertIn('\nfor line in sys.stdin:',script)
         source.write_text(script.replace('\nfor line in sys.stdin:',f'\nprint({frame!r},flush=True)\nfor line in sys.stdin:',1))
@@ -857,6 +878,7 @@ class LiveListingIndex(test_pause.Harness):
         for name in owners:
             self.send_event(name,'UserPromptSubmit',prompt='Private live working fixture')
             self.send_event(name,'PreToolUse',tool_name='Bash',tool_use_id='private-working',tool_input={'command':'printf example'})
+            if idle:self.send_event(name,'Stop',last_assistant_message='Private idle reply')
         state=self.root/'state'
         for name in owners:
             path=state/(hashlib.sha256(name.encode()).hexdigest()+'.json')

@@ -400,3 +400,34 @@ fn older_sources_data_at_an_unchanged_stamp_cannot_downgrade_an_immutable_snapsh
     assert_eq!(page.rows.len(), 1);
     assert_eq!(fs::read(&source).unwrap(), before);
 }
+
+#[test]
+fn public_observation_never_starts_or_continues_after_the_original_deadline() {
+    let mut calls = 0;
+    let expired = Instant::now();
+    assert!(listing::observe_until(expired, || {
+        calls += 1;
+        Ok(())
+    })
+    .is_err());
+    assert_eq!(calls, 0, "expired observation started native work");
+    let until = Instant::now() + Duration::from_millis(5);
+    let result = listing::observe_until(until, || {
+        calls += 1;
+        std::thread::sleep(Duration::from_millis(20));
+        Ok(())
+    });
+    assert!(
+        result.is_err(),
+        "an overrun admitted the following public builder"
+    );
+    assert!(listing::observe_until(until, || {
+        calls += 1;
+        Ok(())
+    })
+    .is_err());
+    assert_eq!(
+        calls, 1,
+        "a new observation started after cooperative overrun"
+    );
+}

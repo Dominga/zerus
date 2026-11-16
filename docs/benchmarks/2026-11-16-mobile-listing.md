@@ -33,11 +33,15 @@ retain their separate scope.
 ## Public and canonical rows
 
 V4 projections classify only known ordinary Claude/Codex public shapes. One held,
-bounded complete ordinary-composer observation precedes the public normalization.
+bounded complete ordinary-composer observation precedes the public normalization,
+including idle rows. A phase shortcut cannot prove a missing no-hook panel.
 Unknown frames, approvals, startup/private transitions, Kimi and native children
 retain the original exact canonical enrichment and reconciliation. Public rows
 never enter native card/admission or canonical reconciliation helpers. Their own
-immutable native versions are checked again before publication.
+immutable native versions are checked again before publication. The original
+request clock is checked before each row, before/after its public screen
+precheck and before/after its public builder; an existing OS call may overrun
+cooperatively, but no next public observation starts after expiry.
 
 | Public fields | Source and parity control |
 | --- | --- |

@@ -562,7 +562,6 @@ pub(super) fn current(record:&Value)->Option<Value> {current_with(record,false)}
 // authority. A positive/failed observation needs the original canonical path.
 pub(super) fn listing_needs_record(record: &Value) -> bool {
     record["agent"] == "claude"
-        && active_phase(record)
         && kimi_tui_choice::capture(record)
             .ok()
             .is_none_or(|screen| !public_live_screen(&screen))

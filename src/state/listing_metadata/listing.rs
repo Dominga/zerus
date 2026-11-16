@@ -6,6 +6,24 @@ const COMPAT_BYTES: u64 = 16 << 20;
 const BODY_BYTES: usize = 64 << 20;
 const PAGE_BYTES: usize = 512 << 10;
 
+// One original request clock surrounds each public observation. The operating
+// system call may overrun cooperatively; no following observation may start.
+pub(super) fn observe_until<T>(
+    until: Instant,
+    observe: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    anyhow::ensure!(
+        Instant::now() < until,
+        "Selected listing overlay deadline exceeded"
+    );
+    let value = observe()?;
+    anyhow::ensure!(
+        Instant::now() < until,
+        "Selected listing overlay deadline exceeded"
+    );
+    Ok(value)
+}
+
 fn public_observation(record: &Value) -> bool {
     if record["agent"] == "claude" {
         return !claude_approval::listing_needs_record(record);
@@ -433,6 +451,10 @@ pub(in crate::state) fn merge(
             let mut opencode = Vec::new();
             let start_count = rows.len();
             for (source, seed) in batch {
+                anyhow::ensure!(
+                    Instant::now() < until,
+                    "Selected listing overlay deadline exceeded"
+                );
                 let mut record = seed["record"].clone();
                 if source.starts_with("dsh/") {
                     deepseek.push(record);
@@ -456,7 +478,7 @@ pub(in crate::state) fn merge(
                         kimi_tui_choice::observing(|| -> anyhow::Result<()> {
                             let public = indexed
                                 && record["_listing"]["live_public"] == true
-                                && public_observation(&record);
+                                && observe_until(until, || Ok(public_observation(&record)))?;
                             if indexed && !public {
                                 record = selected_record(
                                     &root,
@@ -492,12 +514,14 @@ pub(in crate::state) fn merge(
                                 );
                                 public_witnesses.push((source.clone(), stamp.to_owned()));
                                 let _public = storage::listing_scope::Public::enter(&record);
-                                checked(live_display_row(
-                                    &mut row,
-                                    record,
-                                    &shared,
-                                    &mut process_work,
-                                ))?;
+                                observe_until(until, || {
+                                    checked(live_display_row(
+                                        &mut row,
+                                        record,
+                                        &shared,
+                                        &mut process_work,
+                                    ))
+                                })?;
                             } else {
                                 checked(live_row(&mut row, record, &shared, &mut process_work))?;
                             }

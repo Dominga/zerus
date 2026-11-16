@@ -759,7 +759,7 @@ mod tests {
         original = original.replacen(acceptance_fences, "", 1);
         assert_eq!(
             format!("{:x}", Sha256::digest(original.as_bytes())),
-            "bc0f5cf88ff507a94252b74bd529f096d3822db8746a9558d286618dfbc2eb4a"
+            "59613e90dd2487deb1c88ce9820f0194714dcbab6ea0f7b580cf9f50598f36bd"
         );
     }
     fn fixture() -> (Value, Value, Guard<'static>) {

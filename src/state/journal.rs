@@ -1821,7 +1821,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
         // as a usage limit; Claude sends no SubagentStop after it. The child is
         // settled as an error, which never keeps its parent working. Any newer
         // event of the same child but its Start resumes it as usual.
-        let failed = kind == "StopFailure" && string(record, "agent") == "claude";
+        let failed = kind == "StopFailure" && matches!(string(record, "agent"), "claude" | "qwen");
         info["state"] = json!(if !revives {
             string(info, "state")
         } else if failed || ["SubagentStop", "SessionEnd", "Stop"].contains(&kind) {

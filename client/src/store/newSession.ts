@@ -208,7 +208,7 @@ const ACTION_KEYS: Record<keyof NewSessionActions, true> = {
 };
 const ACTIONS = Object.keys(ACTION_KEYS) as (keyof NewSessionActions)[];
 const EMPTY: Json = Object.freeze({}) as Json;
-const AGENTS = ["codex", "claude", "kimi", "dsh", "opencode"];
+const AGENTS = ["codex", "claude", "kimi", "qwen", "dsh", "opencode"];
 const INBOX = "ungrouped";
 const folderChanged = () => tr("This project folder changed. Select it again.");
 /** The folders of one project the dialog keeps (`project_folders` answers at most these). */

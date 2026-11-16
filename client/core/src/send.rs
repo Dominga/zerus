@@ -18,7 +18,7 @@ pub const NO_COLOR: &str = crate::source!(
 );
 
 /// The agents the composer sends to; any other is typed into in Terminal.
-pub const MESSAGE_AGENTS: [&str; 5] = ["codex", "claude", "kimi", "dsh", "opencode"];
+pub const MESSAGE_AGENTS: [&str; 6] = ["codex", "claude", "kimi", "qwen", "dsh", "opencode"];
 
 /// What the client knows about a session besides its inspected details.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,7 +254,7 @@ pub fn can_start_stopped(session: &Session, busy: bool) -> bool {
     session.online
         && matches!(session.state.as_str(), "paused" | "stopped")
         && session.tracked
-        && matches!(session.cmd.as_str(), "codex" | "claude" | "kimi")
+        && matches!(session.cmd.as_str(), "codex" | "claude" | "kimi" | "qwen")
         && !session.terminating
         && !busy
 }

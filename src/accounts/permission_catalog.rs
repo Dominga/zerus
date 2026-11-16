@@ -135,7 +135,7 @@ pub(super) fn check_mode(provider: &str, mode: &str) -> Result<()> {
     if mode == "provider" {
         return Ok(());
     }
-    if !["claude", "codex", "kimi", "dsh"].contains(&provider) {
+    if !["claude", "codex", "kimi", "qwen", "dsh"].contains(&provider) {
         return Err(Error::new(1, "Permissions are managed in this provider's native configuration."));
     }
     match mode {
@@ -179,7 +179,7 @@ fn valid_key(key: &str) -> bool {
 }
 
 fn unavailable(provider: &str, reason: impl Into<String>) -> Value {
-    let session_supported = ["claude", "codex", "kimi", "dsh"].contains(&provider);
+    let session_supported = ["claude", "codex", "kimi", "qwen", "dsh"].contains(&provider);
     let reason: String = reason.into();
     json!({
         "status": "unavailable",
@@ -881,6 +881,7 @@ pub(super) fn bypass_args(provider: &str) -> Vec<String> {
         "claude" => vec!["--permission-mode".into(), "bypassPermissions".into()],
         "codex" => vec!["--dangerously-bypass-approvals-and-sandbox".into()],
         "kimi" => vec!["--auto".into()],
+        "qwen" => vec!["--approval-mode".into(), "yolo".into()],
         _ => Vec::new(),
     }
 }

@@ -4,7 +4,7 @@ use super::*;
 use serde::Deserialize;
 
 fn eligible(record: &Value) -> bool {
-    ["codex", "claude", "kimi"].contains(&string(record, "agent"))
+    ["codex", "claude", "kimi", "qwen"].contains(&string(record, "agent"))
         && record["run_identity_version"] == 1 && record["supervisor"].is_object()
         && record["activity"] == "busy"
         && ["working", "tool", "compacting"].contains(&string(record, "phase"))

@@ -84,7 +84,7 @@ impl Host {
         provider: &str,
         label: &str,
     ) -> Result<Value, String> {
-        if !["codex", "claude", "kimi"].contains(&provider) || !valid_id(id) || !valid_label(label)
+        if !["codex", "claude", "kimi", "qwen"].contains(&provider) || !valid_id(id) || !valid_label(label)
         {
             return Err("Enter a valid account name and agent.".into());
         }

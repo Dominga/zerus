@@ -41,7 +41,7 @@ pub fn removal_offered(
     row_worktree: bool,
     exact_inspection_worktree: bool,
 ) -> bool {
-    let keeps_archive = live && tracked && matches!(cmd, "codex" | "claude" | "kimi");
+    let keeps_archive = live && tracked && matches!(cmd, "codex" | "claude" | "kimi" | "qwen");
     keeps_archive && (row_worktree || exact_inspection_worktree)
 }
 

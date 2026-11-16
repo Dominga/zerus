@@ -82,7 +82,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         std::env::remove_var(key);
     }
     let codex_no_daemon = agent == "codex" && codex_daemon_flag(&base[0])?;
-    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
+    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME"] {
         if nonempty_env(key).is_none() {
             std::env::remove_var(key);
         }

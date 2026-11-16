@@ -24,7 +24,7 @@ pub const PROFILE: &str = "creation-launch-v1";
 /// The closed agent set this leaf launches. Each starts detached (`-d`);
 /// DeepSeek hosts and OpenCode, external terminals and remote hosts keep
 /// the direct path.
-pub const AGENTS: [&str; 3] = ["codex", "claude", "kimi"];
+pub const AGENTS: [&str; 4] = ["codex", "claude", "kimi", "qwen"];
 const PATH_BYTES: usize = 4096;
 const NAME_BYTES: usize = 512;
 const ACCOUNT_BYTES: usize = 256;

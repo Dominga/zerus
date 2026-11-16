@@ -653,7 +653,7 @@ fn a_binding_names_two_distinct_requests() {
 /// any offer.
 #[test]
 fn a_codex_resume_verifies_and_only_codex_is_observed() {
-    assert_eq!(AGENTS, ["claude", "kimi", "codex"]);
+    assert_eq!(AGENTS, ["claude", "kimi", "codex", "qwen"]);
     assert_eq!(OBSERVED, ["codex"]);
     let agents = super::super::creation_launch::AGENTS
         .into_iter()

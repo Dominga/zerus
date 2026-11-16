@@ -246,7 +246,7 @@ impl Binding {
             }
         }
         if kind == Kind::Model {
-            if !["codex", "claude", "kimi", "dsh"].contains(&self.provider.as_str())
+            if !["codex", "claude", "kimi", "qwen", "dsh"].contains(&self.provider.as_str())
                 || values.model.chars().count() > 256
                 || values.effort.chars().count() > 40
                 || values

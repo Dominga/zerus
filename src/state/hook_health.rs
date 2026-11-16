@@ -45,7 +45,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 fn config_file(directory: &Path, provider: &str) -> Result<PathBuf> {
     Ok(directory.join(match provider {
-        "claude" => "settings.json",
+        "claude" | "qwen" => "settings.json",
         "codex" => "hooks.json",
         "kimi" => "config.toml",
         _ => return Err("This provider uses a native API, not tracking hook configuration".into()),

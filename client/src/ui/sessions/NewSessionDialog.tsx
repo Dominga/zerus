@@ -51,7 +51,7 @@ export type NewSessionChild =
   | { kind: "claude-app"; target: string; computer: string; project: string; path: string };
 export const [newSessionChild, setNewSessionChild] = createSignal<NewSessionChild>();
 
-const AGENTS = new Set(["codex", "claude", "kimi", "dsh", "opencode", "ollama"]);
+const AGENTS = new Set(["codex", "claude", "kimi", "qwen", "dsh", "opencode", "ollama"]);
 const sameKeys = (a: string[], b: string[]) => a.length === b.length && a.every((key, i) => key === b[i]);
 
 /** The row whose key is `key`, keeping the last one found while a removed row is disposed. */
@@ -88,7 +88,7 @@ export interface DenseAgent {
   selected: boolean;
 }
 /** The rail's agents in Qt's order: the six agents and the terminal (refreshDense). */
-export const DENSE_AGENTS = ["codex", "claude", "kimi", "dsh", "ollama", "opencode", "sh"] as const;
+export const DENSE_AGENTS = ["codex", "claude", "kimi", "qwen", "dsh", "ollama", "opencode", "sh"] as const;
 const SIGNED_OUT = new Set(["signed_out", "expired", "credentials_locked", "credentials_unavailable", "desktop_session_unavailable"]);
 
 /** A tile's kind: DeepSeek is a balance, Ollama and OpenCode are local, the shell is a terminal, the rest subscriptions. */
@@ -125,7 +125,8 @@ const balanceText = (usage: { balances: { balance: string; currency: string }[] 
 export function denseAgentsOf(rows: readonly AccountRow[], agent: string, account: number, minute: number): DenseAgent[] {
   if (!rows.length) return [];
   const hasShell = rows.some((row) => row.provider === "sh");
-  const keys = DENSE_AGENTS.filter((key) => key !== "opencode" || rows.some((row) => row.provider === "opencode"))
+  // OpenCode and Qwen Code show where an account of theirs is listed.
+  const keys = DENSE_AGENTS.filter((key) => !["opencode", "qwen"].includes(key) || rows.some((row) => row.provider === key))
     .filter((key) => key !== "sh" || hasShell);
   return keys.map((key) => {
     const found = rows.map((row, index) => ({ row, index })).filter((entry) => entry.row.provider === key);

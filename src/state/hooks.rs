@@ -19,7 +19,9 @@ const COMMON: &[&str] = &[
 fn events(agent: &str) -> Vec<&'static str> {
     let mut events = COMMON.to_vec();
     match agent {
-        "claude" => events.extend(["PostToolUseFailure", "StopFailure", "Notification"]),
+        // Qwen Code runs Claude Code's hook events with the same payloads
+        // (verified with 0.27.4, 2026-11-16).
+        "claude" | "qwen" => events.extend(["PostToolUseFailure", "StopFailure", "Notification"]),
         "codex" => events.push("Interrupt"),
         "kimi" => events.extend([
             "PostToolUseFailure",
@@ -433,6 +435,15 @@ fn owns_hook(command: &str) -> bool {
     argv[argv.len() - 2] == "__state" && names_hgs(&argv[argv.len() - 3])
 }
 
+/// Whether `command` is the PowerShell form of hgs's hook,
+/// `& "…/hgs.exe" __state hook; exit $LASTEXITCODE`.
+fn owns_powershell_hook(command: &str) -> bool {
+    command
+        .strip_prefix("& ")
+        .and_then(|rest| rest.strip_suffix("; exit $LASTEXITCODE"))
+        .is_some_and(owns_hook)
+}
+
 /// Whether `hook`, one item of a matcher group's `hooks`, is hgs's answer
 /// channel: `hgs __state answer-channel` as a command line or in exec form.
 fn owns_channel(hook: &Value) -> bool {
@@ -514,6 +525,8 @@ struct Entry {
     args: Option<Vec<String>>,
     /// Codex's command for Windows, which Codex prefers there.
     command_windows: Option<String>,
+    /// The shell the agent runs `command` with: Qwen Code's `powershell`.
+    shell: Option<String>,
 }
 
 impl Entry {
@@ -522,7 +535,16 @@ impl Entry {
             command,
             args: None,
             command_windows: None,
+            shell: None,
         }
+    }
+
+    /// Qwen Code's Windows entry: the PowerShell form, which it runs with
+    /// `powershell -Command` when the hook asks for that shell. Its default,
+    /// `cmd /d /s /c`, gets the command from Node.js with its quotes escaped
+    /// as `\"`, so no quoted hgs path runs there (verified with 0.27.4).
+    fn powershell(command: String) -> Self {
+        Self { shell: Some("powershell".into()), ..Self::shell(command) }
     }
 
     /// A matcher group holding this entry, as hgs writes it for one event.
@@ -534,6 +556,9 @@ impl Entry {
         if let Some(command) = &self.command_windows {
             hook["commandWindows"] = json!(command);
         }
+        if let Some(shell) = &self.shell {
+            hook["shell"] = json!(shell);
+        }
         json!({"hooks": [hook]})
     }
 
@@ -544,6 +569,7 @@ impl Entry {
             return args.iter().map(String::as_str).eq(HOOK_ARGS).then(|| Self {
                 args: Some(CHANNEL_ARGS.map(str::to_owned).to_vec()),
                 command_windows: None,
+                shell: None,
                 ..self.clone()
             });
         }
@@ -572,6 +598,9 @@ impl Entry {
     fn owned(hook: &Value, windows: bool) -> Option<Self> {
         let command = hook.get("command").and_then(Value::as_str)?;
         let text = |key: &str| hook.get(key).and_then(Value::as_str).map(str::to_owned);
+        if windows && text("shell").as_deref() == Some("powershell") && owns_powershell_hook(command) {
+            return Some(Self::powershell(command.to_owned()));
+        }
         if owns_hook(command) {
             return Some(if windows {
                 Self {
@@ -1015,7 +1044,7 @@ fn hook_config(agent: &str) -> Result<PathBuf> {
         });
     resolved_target(&directory.join(match agent {
         "kimi" => "config.toml",
-        "claude" => "settings.json",
+        "claude" | "qwen" => "settings.json",
         _ => "hooks.json",
     }))
 }
@@ -1060,7 +1089,7 @@ pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
     let _own = OwnProgram::for_config(Some(&executable), &path);
     let installed = Installed {
         program,
-        agent: if agent == "claude" { "Claude Code" } else { agent },
+        agent: match agent { "claude" => "Claude Code", "qwen" => "Qwen Code", _ => agent },
         version: std::cell::OnceCell::new(),
         seen: seen_version(&path),
     };
@@ -1316,7 +1345,7 @@ fn repair_owned(
     if health["compatibility"]["state"] != "compatible" { return Err("Hook configuration is incompatible; use a qualified supervised launch".into()); }
     merge_json_mode(original, path, agent, cfg!(windows), &mut || {
         #[cfg(windows)]
-        { if agent=="claude" { windows::claude_entry(executable, known, windows::git_bash().is_some()) } else { windows::codex_entry(executable) } }
+        { if agent=="claude" { windows::claude_entry(executable, known, windows::git_bash().is_some()) } else if agent=="qwen" { windows::qwen_entry(executable) } else { windows::codex_entry(executable) } }
         #[cfg(unix)]
         { Ok(Entry::shell(fresh_command(executable)?)) }
     }, &mut || Some(known), false)
@@ -1346,6 +1375,8 @@ fn fresh_command(executable: &str) -> Result<String> {
 fn fresh_entry(agent: &str, executable: &str, installed: &Installed) -> Result<Entry> {
     if agent == "claude" {
         windows::claude_entry(executable, installed.version()?, windows::git_bash().is_some())
+    } else if agent == "qwen" {
+        windows::qwen_entry(executable)
     } else {
         windows::codex_entry(executable)
     }
@@ -1564,6 +1595,7 @@ mod windows {
                 command: path(stable)?,
                 args: Some(HOOK_ARGS.map(str::to_owned).to_vec()),
                 command_windows: None,
+                shell: None,
             });
         }
         if !git_bash {
@@ -1607,6 +1639,10 @@ mod windows {
     /// 0.162: `build_hooks_config`, `default_user_shell`). `cmd.exe` runs it
     /// only for a session without one local environment, which hgs never
     /// starts, or on a computer without PowerShell.
+    pub(super) fn qwen_entry(stable: &str) -> Result<Entry> {
+        powershell_command(stable).map(Entry::powershell)
+    }
+
     pub(super) fn codex_entry(stable: &str) -> Result<Entry> {
         Ok(Entry {
             command_windows: Some(powershell_command(stable)?),
@@ -3331,6 +3367,7 @@ mod tests {
             command: forms::path(STABLE).unwrap(),
             args: Some(vec!["__state".into(), "hook".into()]),
             command_windows: None,
+            shell: None,
         };
         for version in [CLAUDE_EXEC_FORM, (2, 1, 300), (2, 2, 0), (3, 0, 0)] {
             for git_bash in [false, true] {
@@ -3359,7 +3396,12 @@ mod tests {
                 command: SHELL.into(),
                 args: None,
                 command_windows: Some(POWERSHELL.into()),
+                shell: None,
             }
+        );
+        assert_eq!(
+            forms::qwen_entry(STABLE).unwrap(),
+            Entry { shell: Some("powershell".into()), ..Entry::shell(POWERSHELL.into()) }
         );
     }
 

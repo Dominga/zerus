@@ -362,7 +362,7 @@ impl Config {
             "hooks" => {
                 self.hooks = Some(match value {
                     "none" => None,
-                    "claude" | "codex" | "kimi" => Some(value.to_owned()),
+                    "claude" | "codex" | "kimi" | "qwen" => Some(value.to_owned()),
                     _ => return Err(format!("unknown hook source {value:?}")),
                 })
             }
@@ -1392,6 +1392,7 @@ fn load_hooks(agent: &str) -> (Vec<Hook>, Value) {
     let (variable, folder, file) = match agent {
         "claude" => ("CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
         "codex" => ("CODEX_HOME", ".codex", "hooks.json"),
+        "qwen" => ("QWEN_HOME", ".qwen", "settings.json"),
         _ => ("KIMI_CODE_HOME", ".kimi-code", "config.toml"),
     };
     let directory = env::var_os(variable)
@@ -1475,6 +1476,12 @@ fn load_hooks(agent: &str) -> (Vec<Hook>, Value) {
                                 args,
                                 runner: if agent == "codex" {
                                     Runner::Codex
+                                } else if agent == "qwen" && text("shell") == Some("powershell") {
+                                    // Qwen Code's `"shell": "powershell"`.
+                                    Runner::Codex
+                                } else if agent == "qwen" {
+                                    // Qwen Code's default, `%COMSPEC% /d /s /c`.
+                                    Runner::Kimi
                                 } else {
                                     Runner::Direct
                                 },
@@ -2292,7 +2299,7 @@ fn main() {
         path
     });
     let style = config.hooks.clone().unwrap_or_else(|| {
-        ["claude", "codex", "kimi"]
+        ["claude", "codex", "kimi", "qwen"]
             .contains(&config.name.as_str())
             .then(|| config.name.clone())
     });

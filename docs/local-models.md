@@ -27,6 +27,31 @@ Windows the start command splits at spaces outside double quotes, so paths keep
 their backslashes. Such an account reports **Local model** instead of plan
 limits and needs no sign-in.
 
+## Qwen Code (WhiteWh fork)
+
+`hgs qwen PROJECT` starts Qwen Code (the `qwen` CLI, 0.27.4 or later) as a tracked
+agent beside Claude Code, Codex and Kimi: its hooks track the session's state, a
+session resumes with `qwen --resume ID`, Zerus's bypass mode passes
+`--approval-mode yolo`, and its account folder is `QWEN_HOME` (`~/.qwen` for
+`native-qwen`, listed wherever `qwen` is installed). An account of
+`--provider qwen` signs in inside Qwen Code itself (`/auth`).
+
+A Qwen Code account on a model server keeps the server in its own
+`settings.json`, as Qwen Code writes it:
+
+```json
+{
+  "env": {"GB10_API_KEY": "sk-..."},
+  "modelProviders": {"openai": [{"id": "qwen3.8-flash-next", "name": "qwen3.8-flash-next",
+    "baseUrl": "http://192.0.2.79:4000/v1", "envKey": "GB10_API_KEY"}]},
+  "security": {"auth": {"selectedType": "openai"}},
+  "model": {"name": "qwen3.8-flash-next"}
+}
+```
+
+Such an account reports the model server's address as its `gateway`, so a client
+shows the server's speed instead of limits (Model servers in `docs/reference.md`).
+
 ## Codex on an Ollama model
 
 The agent and the inference provider are separate choices. Codex owns tools,

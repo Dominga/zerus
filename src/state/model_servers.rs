@@ -1425,6 +1425,20 @@ pub(crate) fn account_gateway_url(home: &Path, provider: &str) -> Option<String>
                 .ok()
                 .map(|server| server.base_url)
         }
+        // Qwen Code: the model `model.name` names among the providers of the
+        // selected authentication type, else that type's first model.
+        "qwen" => {
+            let bytes = std::fs::read(home.join("settings.json")).ok()?;
+            let settings: Value = serde_json::from_slice(&bytes).ok()?;
+            let selected = settings["security"]["auth"]["selectedType"].as_str()?;
+            let models = settings["modelProviders"][selected].as_array()?;
+            let name = settings["model"]["name"].as_str().unwrap_or_default();
+            let model = models.iter().find(|model| model["id"].as_str() == Some(name)).or_else(|| models.first())?;
+            let kind = if selected == "anthropic" { "anthropic" } else { "openai" };
+            checked(Server { name: "gateway".into(), base_url: model["baseUrl"].as_str()?.into(), kind: kind.into(), ..Default::default() })
+                .ok()
+                .map(|server| server.base_url)
+        }
         _ => None,
     }
 }
@@ -2334,6 +2348,13 @@ mod tests {
         std::fs::write(codex.join("config.toml"), "model = \"gpt-5\"\n").unwrap();
         assert!(account_gateway_url(&codex, "codex").is_none(), "an account on the provider's cloud");
         assert!(account_gateway_url(&claude, "kimi").is_none());
+        let qwen = dir.path().join("qwen");
+        std::fs::create_dir_all(&qwen).unwrap();
+        let models = json!([{"id":"other","baseUrl":"http://192.0.2.9:8000/v1","envKey":"K"},{"id":"coder","baseUrl":"http://192.0.2.7:4000/v1","envKey":"K"}]);
+        std::fs::write(qwen.join("settings.json"), json!({"modelProviders":{"openai":models},"security":{"auth":{"selectedType":"openai"}},"model":{"name":"coder"}}).to_string()).unwrap();
+        assert_eq!(account_gateway_url(&qwen, "qwen").as_deref(), Some("http://192.0.2.7:4000"), "the selected model's server");
+        std::fs::write(qwen.join("settings.json"), json!({"security":{"auth":{"selectedType":"qwen-oauth"}}}).to_string()).unwrap();
+        assert!(account_gateway_url(&qwen, "qwen").is_none(), "Qwen OAuth is the provider's cloud");
     }
 
     #[test]

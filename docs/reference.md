@@ -507,8 +507,8 @@ termination of other programs. Already orphaned processes whose session ownershi
 cannot be verified stay untouched; a surviving process using the checkout still
 prevents its removal. Run Terminate from outside the target's own process tree.
 
-Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID` or the
-supported native DeepSeek operation. It preserves the original folder, account
+Restore uses `claude --resume ID`, `codex resume ID`, `kimi --session ID`,
+`qwen --resume ID` or the supported native DeepSeek operation. It preserves the original folder, account
 and project wrapper. There is no fallback to the latest conversation or a new
 conversation when exact restore fails. `resume -d` and `resume --all` run in the
 background; use `hgs a ...` when native startup needs input. A normal launch with a
@@ -1035,9 +1035,14 @@ operation or client repair UI is advertised. Diagnostic receipts have short
 read-only retention and never authorize replay of a mutation.
 
 
-At launch, `hgs` adds handlers to Claude `settings.json`, Codex `hooks.json` and
-Kimi `config.toml`, preserving other hooks and making a `.pre-hgs` backup before the
-first edit. It respects `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `KIMI_CODE_HOME`.
+At launch, `hgs` adds handlers to Claude `settings.json`, Codex `hooks.json`,
+Kimi `config.toml` and Qwen Code `settings.json`, preserving other hooks and making
+a `.pre-hgs` backup before the first edit. It respects `CLAUDE_CONFIG_DIR`,
+`CODEX_HOME`, `KIMI_CODE_HOME` and `QWEN_HOME`. Qwen Code (verified with 0.27.4)
+runs Claude Code's hook events with the same payloads. On Windows its handler is
+the PowerShell form with `"shell": "powershell"`: Qwen Code's default hook shell,
+`cmd /d /s /c`, receives the command from Node.js with its quotes escaped, so no
+quoted hgs path runs there.
 Handlers do nothing outside an `hgs` run. `HGS_TRACKING=0` disables registration for
 new launches. Native hook trust still requires an explicit user choice in Codex.
 Claude Code's `PostModelSwitch` is registered only once `claude --version` reports

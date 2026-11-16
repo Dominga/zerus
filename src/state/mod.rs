@@ -308,7 +308,7 @@ pub(crate) fn state_root() -> PathBuf {
 }
 
 pub(super) type Result<T> = std::result::Result<T, String>;
-pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi"];
+pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi", "qwen"];
 
 /// The entry points other modules call fail first where this computer runs no
 /// local sessions (a Windows control console), as they always have there.
@@ -394,6 +394,7 @@ pub(super) fn home_var(agent: &str) -> Result<&'static str> {
         "claude" => Ok("CLAUDE_CONFIG_DIR"),
         "codex" => Ok("CODEX_HOME"),
         "kimi" => Ok("KIMI_CODE_HOME"),
+        "qwen" => Ok("QWEN_HOME"),
         _ => Err(format!("unsupported agent: {agent}")),
     }
 }

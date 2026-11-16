@@ -293,9 +293,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
-  cmd      claude | codex | kimi (know --resume) | opencode (native API) | sh (login shell) | any command
+  cmd      claude | codex | kimi | qwen (know --resume) | opencode (native API) | sh (login shell) | any command
   project  name from ~/.config/hgs/projects, a path, or omitted = current dir
-  -c       resume the dir's last conversation (claude/kimi -c, codex resume --last)
+  -c       resume the dir's last conversation (claude/kimi/qwen -c, codex resume --last)
   -c ID    resume this exact conversation UUID; --resume=ID is also accepted
   -n tag   separate session <cmd>/<project>/<tag>
   --account ID   use a named native agent profile for this session
@@ -1979,7 +1979,7 @@ fn bound_terminal(session: &str) -> Result<Option<(String, String)>> {
 /// Commands that start a session, one list for the hosted forwarding refusal,
 /// the claimed-parent gate (`fork` takes no `--parent`) and the forwarded
 /// parent link; with `--parent` a launch names its parent.
-const LAUNCH_COMMANDS: &[&str] = &["claude", "codex", "kimi", "dsh", "opencode", "fork"];
+const LAUNCH_COMMANDS: &[&str] = &["claude", "codex", "kimi", "qwen", "dsh", "opencode", "fork"];
 
 /// Why forwarding `command` to another computer is refused for a resident
 /// DeepSeek host's tool call (`HGS_AGENT=dsh`) without its hosted proof, or
@@ -2524,7 +2524,7 @@ fn remote_via(
             "path-info" => vec![("hgs [@host] path-info --path", false)],
             "watch" => vec![(zerus_watch_protocol::HELP_MARKER, false)],
             "guide" => vec![("hgs [@host] guide", false)],
-            "claude" | "codex" | "kimi" | "dsh" | "opencode" if args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") => vec![("claimed-parent-v1", true)],
+            "claude" | "codex" | "kimi" | "qwen" | "dsh" | "opencode" if args.iter().take_while(|s| s.as_str() != "--").any(|s| s == "--parent") => vec![("claimed-parent-v1", true)],
             _ => vec![],
         };
         if let Some(selected) = selector_markers(command, &args)? {
@@ -3691,7 +3691,7 @@ fn launch(
             return Err(Error::new(1, "choose --permissions or the agent's own permission flags, not both"));
         }
     }
-    if state::parent_link::claimed_launch() && !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
+    if state::parent_link::claimed_launch() && !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen" | "dsh" | "opencode") {
         return Err(Error::new(1, "--parent is available for Claude, Codex, Kimi, DeepSeek and OpenCode launches"));
     }
     if command_name=="opencode" {
@@ -3786,10 +3786,10 @@ fn launch(
         Vec::new()
     };
     let requested_session = if let Some(id) = &options.resume_id {
-        if !matches!(command_name.as_str(), "claude" | "codex" | "kimi") {
+        if !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen") {
             return Err(Error::new(
                 1,
-                "resuming a conversation ID requires claude, codex or kimi",
+                "resuming a conversation ID requires claude, codex, kimi or qwen",
             ));
         }
         if options.tag.is_empty() {
@@ -3904,7 +3904,7 @@ fn launch(
     #[cfg(unix)]
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let (mut base, mut resume): (Vec<String>, Vec<String>) = match command_name.as_str() {
-        "claude" | "kimi" => (
+        "claude" | "kimi" | "qwen" => (
             vec![command_name.clone()],
             vec![command_name.clone(), "-c".into()],
         ),
@@ -3959,6 +3959,7 @@ fn launch(
                 "codex" => "resume",
                 "claude" => "--resume",
                 "kimi" => "--session",
+                "qwen" => "--resume",
                 _ => unreachable!(),
             }
             .into(),
@@ -3986,7 +3987,7 @@ fn launch(
     if !options.extra.is_empty() {
         match command_name.as_str() {
             "codex" => auto = false,
-            "claude"
+            "claude" | "qwen"
                 if options
                     .extra
                     .iter()
@@ -4008,7 +4009,7 @@ fn launch(
             resume.extend(options.extra.clone());
         }
     }
-    let tracked_permissions = matches!(command_name.as_str(), "claude" | "codex" | "kimi")
+    let tracked_permissions = matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen")
         && env::var("HGS_TRACKING").as_deref() != Ok("0");
     if let Some(mode) = options.permissions.as_deref() {
         // A tracked agent receives the symbolic choice through
@@ -4026,7 +4027,7 @@ fn launch(
     // Saved resumes/forks and explicit native choices retain their own settings.
     if !existing && !auto && options.resume_id.is_none()
         && (options.fresh || !binding_exists(config, &session)?)
-        && ["codex", "claude", "kimi"].contains(&command_name.as_str()) {
+        && ["codex", "claude", "kimi", "qwen"].contains(&command_name.as_str()) {
         crate::accounts::apply_model_defaults(config, options.account.as_deref().unwrap_or(""), &command_name, &mut base)?;
     }
     if options.remote_control {
@@ -4115,7 +4116,7 @@ fn launch(
             Ok(rc)
         };
     }
-    let tracked = matches!(command_name.as_str(), "claude" | "codex" | "kimi")
+    let tracked = matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen")
         && env::var("HGS_TRACKING").as_deref() != Ok("0");
     let allocation = tracked.then(state::launch_identity::Allocation::fresh);
     let helper = if tracked && !options.dry {
@@ -4219,7 +4220,7 @@ fn launch(
             |helper| helper.environment(allocation),
         );
         spec.env.extend(handoff.into_iter().map(|(key, value)| format!("{key}={value}")));
-        for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
+        for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME"] {
             spec.env
                 .push(format!("{key}={}", env::var(key).unwrap_or_default()));
         }
@@ -4569,7 +4570,7 @@ mod tests {
             "history-projection", "processes", "terminal", "session-action", "interrupt",
             "clear-context", "compact-context", "answer", "effort", "settings", "recovery",
             "read", "notifications", "voice", "schedules", "attachment", "file-read",
-            "claude", "codex", "kimi", "sh", "resume", "pause", "fork", "reference",
+            "claude", "codex", "kimi", "qwen", "sh", "resume", "pause", "fork", "reference",
             "archive", "terminate", "dirs", "worktrees", "git-status", "__state", "__host",
             "repository-git-worker", "Repository", "repository-extra", ""] {
             assert!(needs_local_sessions(command), "{command}");

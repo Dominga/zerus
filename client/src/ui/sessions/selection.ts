@@ -164,7 +164,7 @@ export function selectionCall(s: ActionRow, a: WriteAction): SelectionCall {
       if (forgetsBinding(s)) return { operation: `forget ${s.name}`, call: { kind: "forget_binding" } };
       return archived ? { operation: `forget archive ${s.name}`, archive: "forget" } : { operation: `kill ${s.name}`, call: { kind: "forget" } };
     case "terminate": {
-      const keepArchive = s.tracked && ["codex", "claude", "kimi"].includes(s.cmd);
+      const keepArchive = s.tracked && ["codex", "claude", "kimi", "qwen"].includes(s.cmd);
       return keepArchive ? { operation: `terminate ${s.name}`, call: { kind: "terminate" } } : { operation: `kill ${s.name}`, call: { kind: "kill" } };
     }
   }

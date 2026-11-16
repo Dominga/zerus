@@ -10,16 +10,17 @@ const fs = (await import(/* @vite-ignore */ ["node", "fs"].join(":"))) as {
   existsSync(path: URL): boolean;
 };
 const text = (relative: string) => fs.readFileSync(new URL(relative, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-const KINDS: AgentKind[] = ["claude", "codex", "kimi", "deepseek", "opencode", "ollama", "sh"];
+const KINDS: AgentKind[] = ["claude", "codex", "kimi", "qwen", "deepseek", "opencode", "ollama", "sh"];
 
 describe("agent logos", () => {
   it("map every agent to the file Qt uses: dsh and deepseek to DeepSeek, kimi to its colored logo, ollama included", () => {
     expect(LOGO_FILES).toEqual({
-      claude: "claude", codex: "codex", dsh: "deepseek", deepseek: "deepseek", kimi: "kimi-color", opencode: "opencode", ollama: "ollama",
+      claude: "claude", codex: "codex", dsh: "deepseek", deepseek: "deepseek", kimi: "kimi-color", qwen: "qwen-color", opencode: "opencode", ollama: "ollama",
     });
     expect(agentKind("dsh")).toBe("deepseek");
     expect(logoSource("dsh")).toBe(logoSource("deepseek"));
     expect(logoSource("kimi")).toContain("#1783FF");
+    expect(logoSource("qwen")).toContain("<title>Qwen</title>");
     expect(logoSource("ollama")).toContain("Ollama");
   });
 

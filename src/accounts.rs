@@ -78,7 +78,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         validate(id, p)?;
     }
     for (id, label) in &catalog.native_labels {
-        if !["native-codex", "native-claude", "native-kimi", "native-dsh", "native-opencode"].contains(&id.as_str()) {
+        if !["native-codex", "native-claude", "native-kimi", "native-qwen", "native-dsh", "native-opencode"].contains(&id.as_str()) {
             return Err(Error::new(1, "Invalid native account label."));
         }
         validate_label(label)?;
@@ -100,7 +100,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         }
     }
     for (provider, id) in &catalog.defaults {
-        if !["codex", "claude", "kimi"].contains(&provider.as_str())
+        if !["codex", "claude", "kimi", "qwen"].contains(&provider.as_str())
             || catalog.hidden_profiles.contains(id)
             || (id != &format!("native-{provider}") && catalog.profiles.get(id).is_none_or(|p| &p.provider != provider)) {
             return Err(Error::new(1, "Invalid default account profile."));
@@ -109,11 +109,11 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
-    if !["codex", "claude", "kimi"].contains(&provider) { return Ok(None); }
+    if !["codex", "claude", "kimi", "qwen"].contains(&provider) { return Ok(None); }
     Ok(decode(&read(config)?)?.defaults.get(provider).cloned())
 }
 fn native_id(id: &str) -> bool {
-    ["native-codex", "native-claude", "native-kimi", "native-dsh", "native-opencode"].contains(&id)
+    ["native-codex", "native-claude", "native-kimi", "native-qwen", "native-dsh", "native-opencode"].contains(&id)
 }
 fn revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -147,7 +147,8 @@ pub fn home_var(provider: &str) -> Result<&'static str> {
         "codex" => Ok("CODEX_HOME"),
         "claude" => Ok("CLAUDE_CONFIG_DIR"),
         "kimi" => Ok("KIMI_CODE_HOME"),
-        _ => Err(Error::new(1, "Accounts support Codex, Claude and Kimi.")),
+        "qwen" => Ok("QWEN_HOME"),
+        _ => Err(Error::new(1, "Accounts support Codex, Claude, Kimi and Qwen Code.")),
     }
 }
 fn native_home(config: &Config, provider: &str) -> PathBuf {
@@ -167,6 +168,8 @@ fn native_home(config: &Config, provider: &str) -> PathBuf {
             ".codex"
         } else if provider == "dsh" {
             ".dsh"
+        } else if provider == "qwen" {
+            ".qwen"
         } else {
             ".claude"
         })
@@ -474,6 +477,9 @@ fn credential_file(home: &Path, provider: &str) -> bool {
     match provider {
         "codex" => home.join("auth.json").is_file(),
         "claude" => home.join(".credentials.json").is_file(),
+        // Qwen OAuth's credentials, or a provider chosen in its settings (an
+        // API key in its environment or in the settings' own `env`).
+        "qwen" => home.join("oauth_creds.json").is_file() || qwen_auth_selected(home),
         "kimi" => fs::read_dir(home.join("credentials"))
             .ok()
             .is_some_and(|entries| {
@@ -483,6 +489,12 @@ fn credential_file(home: &Path, provider: &str) -> bool {
             }),
         _ => false,
     }
+}
+/// Whether Qwen Code's settings in `home` choose an authentication type.
+fn qwen_auth_selected(home: &Path) -> bool {
+    fs::read(home.join("settings.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|settings| settings["security"]["auth"]["selectedType"].as_str().is_some_and(|kind| !kind.is_empty()))
 }
 fn row(config: &Config, id: &str, p: &Profile, native: bool) -> Value {
     let home = if native {
@@ -521,6 +533,14 @@ fn list(config: &Config) -> Result<Value> {
             },
             true,
         ));
+    }
+    // Qwen Code's own account wherever it is installed or was removed by hand.
+    if platform::available("qwen") || catalog.hidden_profiles.contains("native-qwen") {
+        let id = "native-qwen";
+        rows.push(row(config, id, &Profile {
+            provider: "qwen".into(),
+            label: catalog.native_labels.get(id).cloned().unwrap_or_else(|| default_label("qwen").into()),
+        }, true));
     }
     for (id, p) in &catalog.profiles {
         rows.push(row(config, id, p, false));
@@ -618,7 +638,7 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// DeepSeek keep their native configuration: OpenCode refuses a Zerus mode,
 /// and DeepSeek's bypass needs its own confirmed setup.
 pub fn default_permission_mode(provider: &str) -> &'static str {
-    if matches!(provider, "claude" | "codex" | "kimi") { "bypass" } else { "provider" }
+    if matches!(provider, "claude" | "codex" | "kimi" | "qwen") { "bypass" } else { "provider" }
 }
 
 /// Called before state lookup: a resumed/forked record still retains its original native home.
@@ -635,7 +655,7 @@ pub fn permission_mode(config: &Config, account: &str, provider: &str) -> Result
 pub fn permission_modes(provider: &str) -> &'static [&'static str] {
     match provider {
         "claude" => &["provider", "auto", "bypass"],
-        "codex" | "kimi" | "dsh" => &["provider", "bypass"],
+        "codex" | "kimi" | "qwen" | "dsh" => &["provider", "bypass"],
         _ => &[],
     }
 }
@@ -673,6 +693,7 @@ pub fn explicit_permissions(provider: &str, argv: &[String]) -> bool {
         "claude" => &["--permission-mode", "--dangerously-skip-permissions"],
         "codex" => &["--ask-for-approval", "-a", "--sandbox", "-s", "--full-auto", "--yolo", "--approve-for-me", "--dangerously-bypass-approvals-and-sandbox"],
         "kimi" => &["--auto", "--yolo", "-y", "--plan"],
+        "qwen" => &["--approval-mode", "--yolo", "-y"],
         _ => &[],
     };
     argv[..at].iter().any(|v|explicit.contains(&v.split('=').next().unwrap_or("")))
@@ -761,7 +782,7 @@ pub(crate) fn provider_of(config: &Config, id: &str) -> Result<String> {
 pub(crate) fn move_target(config: &Config, id: &str) -> Result<(String, String, PathBuf)> {
     let (profile, home, native) = lookup(config, id)?;
     let provider = profile.provider.clone();
-    if !["claude", "codex", "kimi", "dsh", "opencode"].contains(&provider.as_str()) {
+    if !["claude", "codex", "kimi", "qwen", "dsh", "opencode"].contains(&provider.as_str()) {
         return Err(Error::new(1, format!("Account '{id}' belongs to an agent Zerus cannot start ({provider}).")));
     }
     if !agent_installed(&provider) {
@@ -770,7 +791,7 @@ pub(crate) fn move_target(config: &Config, id: &str) -> Result<(String, String, 
             format!("{} is not installed on {}; install it in Accounts before moving a session to it.", agent_name(&provider), config.host()),
         ));
     }
-    if ["claude", "codex", "kimi"].contains(&provider.as_str()) {
+    if ["claude", "codex", "kimi", "qwen"].contains(&provider.as_str()) {
         if !native && !home.is_dir() {
             return Err(Error::new(1, format!("Account '{id}' has no profile folder on this computer; log in to it first.")));
         }
@@ -790,6 +811,7 @@ pub(crate) fn agent_name(provider: &str) -> &'static str {
         "claude" => "Claude Code",
         "codex" => "Codex",
         "kimi" => "Kimi",
+        "qwen" => "Qwen Code",
         "dsh" => "DeepSeek",
         "opencode" => "OpenCode",
         _ => "This agent",
@@ -829,6 +851,7 @@ fn signed_in(home: &Path, provider: &str, native: bool) -> bool {
         }
         "codex" => key("OPENAI_API_KEY") || key("CODEX_API_KEY") || key("CODEX_ACCESS_TOKEN"),
         "kimi" => key("KIMI_API_KEY") || key("MOONSHOT_API_KEY"),
+        "qwen" => key("OPENAI_API_KEY") || key("DASHSCOPE_API_KEY"),
         _ => false,
     }
 }
@@ -841,7 +864,7 @@ pub(crate) fn label(config: &Config, id: &str) -> String {
 /// U53: every known account id's label: the native accounts and the profiles.
 pub(crate) fn labels(config: &Config) -> BTreeMap<String, String> {
     let catalog = read(config).ok().and_then(|bytes| decode(&bytes).ok()).unwrap_or_default();
-    let mut labels: BTreeMap<String, String> = ["codex", "claude", "kimi"]
+    let mut labels: BTreeMap<String, String> = ["codex", "claude", "kimi", "qwen"]
         .into_iter()
         .map(|provider| {
             let id = format!("native-{provider}");
@@ -962,7 +985,7 @@ fn session_profile_variables(
     };
     let home = home(&id);
     let is = |key: &str, path: &Path| var(key).is_some_and(|value| Path::new(&value) == path);
-    let mut found: Vec<&'static str> = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"]
+    let mut found: Vec<&'static str> = ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME"]
         .into_iter()
         .filter(|key| is(key, &home))
         .collect();
@@ -1112,7 +1135,7 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         "rename"=>{
             let label=arg(args,"--label").ok_or_else(||Error::new(1,"Account name is required."))?.trim();validate_label(label)?;
             let _lock=locked(config)?;let bytes=read(config)?;check_revision(&bytes,args)?;let mut catalog=decode(&bytes)?;
-            if ["native-codex","native-claude","native-kimi","native-dsh","native-opencode"].contains(&id) {
+            if ["native-codex","native-claude","native-kimi","native-qwen","native-dsh","native-opencode"].contains(&id) {
                 catalog.native_labels.insert(id.into(),label.into());
             } else {
                 catalog.profiles.get_mut(id).ok_or_else(||Error::new(1,"Account profile does not exist."))?.label=label.into();
@@ -1193,7 +1216,10 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
             }
             let (p,home,native)=lookup(config,id)?; let key=home_var(&p.provider)?;
             let arguments: Vec<&str> = if p.provider == "claude" && !native { vec!["auth", "login", "--claudeai"] }
-                else if p.provider == "claude" { vec!["auth", "login"] } else { vec!["login"] };
+                else if p.provider == "claude" { vec!["auth", "login"] }
+                // Qwen Code signs in inside its own terminal (`/auth`); its
+                // `auth` command is gone.
+                else if p.provider == "qwen" { vec![] } else { vec!["login"] };
             if dry {println!("{}",json!({"provider":p.provider,"home":home,"arguments":arguments}));return Ok(0);}
             if !native {private_dir(&home)?;}
             let mut command = inspection::native_command(&p.provider, &home, native);

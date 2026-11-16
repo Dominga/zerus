@@ -334,7 +334,7 @@ pub(super) fn start_scoped(
         || allocation.environment(),
         |helper| helper.environment(&allocation),
     ));
-    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME"] {
+    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME"] {
         environment.insert(key, String::new());
     }
     // A fork keeps the parent's explicit per-launch permission choice; the

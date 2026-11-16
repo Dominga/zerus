@@ -22,7 +22,7 @@ PowerShell, gets the PowerShell form.
 `TrackedHooks` enables local sessions in a temporary profile whose folder has
 spaces, Cyrillic and parentheses and, with an isolated state directory and private
 agent homes, launches tracked sessions of native fake agents named `claude`,
-`codex` and `kimi`. hgs installs its hooks into
+`codex`, `kimi` and `qwen`. hgs installs its hooks into
 their homes (Claude Code's exec form, with its answer channel beside the
 PermissionRequest hook, Codex's shell form as `command` and PowerShell form as
 `commandWindows`, Kimi's block); each fake reads them and runs
@@ -51,9 +51,9 @@ from test_windows_lifecycle import LifecycleCase, deny_execute, read_events, rea
 
 # What `hgs __state hook` answers a payload without a session ID.
 NO_SESSION = "hook did not supply a valid session_id"
-HOMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "kimi": "KIMI_CODE_HOME"}
+HOMES = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME", "kimi": "KIMI_CODE_HOME", "qwen": "QWEN_HOME"}
 # The answers to the capability probes hgs runs before a tracked agent starts.
-PROBES = {"claude": "2.1.296 (Claude Code)", "codex": "codex-cli 0.162.0", "kimi": "kimi 2.1.1"}
+PROBES = {"claude": "2.1.296 (Claude Code)", "codex": "codex-cli 0.162.0", "kimi": "kimi 2.1.1", "qwen": "0.27.4"}
 
 
 def git_bash():
@@ -244,6 +244,12 @@ class TrackedHooks(LifecycleCase):
         for event, groups in hooks["hooks"].items():
             self.assertEqual(groups, [{"hooks": [{"type": "command", "command": shell,
                                                   "commandWindows": powershell, "timeout": 5}]}], event)
+        # Qwen Code gets the PowerShell form and runs it with that shell: its
+        # default `cmd /d /s /c` receives the quotes escaped.
+        qwen = json.loads((self.homes["qwen"] / "settings.json").read_text(encoding="utf-8"))
+        for event, groups in qwen["hooks"].items():
+            self.assertEqual(groups, [{"hooks": [{"type": "command", "command": powershell, "timeout": 5,
+                                                  "shell": "powershell"}]}], event)
         kimi = (self.homes["kimi"] / "config.toml").read_text(encoding="utf-8")
         self.assertEqual(kimi.count("# BEGIN hgs session tracking"), 1)
         self.assertEqual({hook["command"] for hook in tomllib.loads(kimi)["hooks"]}, {shell})

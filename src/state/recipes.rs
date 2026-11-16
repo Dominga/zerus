@@ -67,6 +67,20 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
             "--skills-dir",
             "--add-dir",
         ],
+        // Qwen Code 0.27.4's options that a resume keeps.
+        "qwen" => &[
+            "-m",
+            "--model",
+            "--approval-mode",
+            "--auth-type",
+            "--openai-base-url",
+            "--extensions",
+            "-e",
+            "--include-directories",
+            "--allowed-mcp-server-names",
+            "--allowed-tools",
+            "--exclude-tools",
+        ],
         _ => return Err(format!("unsupported agent: {agent}")),
     };
     let multi_flags: &[&str] = match agent {
@@ -105,6 +119,7 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
             "--include-non-interactive",
         ],
         "kimi" => &["-y", "--yolo", "--auto", "--plan"],
+        "qwen" => &["-y", "--yolo", "--sandbox", "-s", "--debug", "-d", "--chat-recording"],
         _ => &[],
     };
     argv.first().ok_or("saved agent executable is missing")?;
@@ -113,7 +128,7 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
     result.extend([
         match agent {
             "codex" => "resume",
-            "claude" => "--resume",
+            "claude" | "qwen" => "--resume",
             _ => "--session",
         }
         .into(),
@@ -251,7 +266,7 @@ pub(super) fn verify_history(record: &Value, allow_error: bool) -> Result<()> {
 /// keep today's decision and are never read here; the presentation gate in
 /// session_action reuses this same code, never a second rule.
 pub(super) fn conversation_persisted(record: &Value) -> bool {
-    if matches!(string(record, "agent"), "claude" | "codex") {
+    if matches!(string(record, "agent"), "claude" | "codex" | "qwen") {
         !string(record, "conversation_id").is_empty() && transcript_saved(record)
     } else {
         true

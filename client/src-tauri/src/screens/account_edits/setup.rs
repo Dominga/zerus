@@ -185,7 +185,7 @@ impl Screens {
                 .iter()
                 .find(|e| e.computer == host.computer)
                 .ok_or(account_actions::CHANGED)?;
-            let mut providers: Vec<String> = ["codex", "claude", "kimi", "dsh", "opencode"]
+            let mut providers: Vec<String> = ["codex", "claude", "kimi", "qwen", "dsh", "opencode"]
                 .into_iter()
                 .filter(|p| accounts::launchable(entry, p))
                 .map(str::to_owned)
@@ -269,7 +269,7 @@ impl Screens {
             match kind {
                 SetupKind::Login
                     if !m.installed
-                        || !["codex", "claude", "kimi"].contains(&m.provider.as_str()) =>
+                        || !["codex", "claude", "kimi", "qwen"].contains(&m.provider.as_str()) =>
                 {
                     return Err("Sign-in is unavailable for this account.".into())
                 }

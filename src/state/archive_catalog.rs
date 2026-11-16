@@ -688,7 +688,7 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
 }
 
 fn supported_provider(provider: &Value) -> bool {
-    matches!(provider.as_str(),Some("codex"|"claude"|"kimi"))
+    matches!(provider.as_str(),Some("codex"|"claude"|"kimi"|"qwen"))
 }
 /// The authoritative archive reader already rejects providers outside AGENTS
 /// before indexing/counting. Keep its bounded totals and cursors unchanged.

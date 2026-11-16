@@ -179,6 +179,7 @@ export function StatusBadge(props: { kind: BadgeKind; caption: string; iconOnly?
 const PROVIDER_GLYPH: Record<AgentKind, string> = {
   claude: Array.from({ length: 8 }, (_, i) => `<path transform="rotate(${i * 45} 6 6)" d="M6 8V11"/>`).join(""),
   kimi: `<path d="M3 2V10M3 6L9 2M3 6L9 10"/>`,
+  qwen: `<path d="M9 9L10.5 10.5M6 2.5A3.5 3.5 0 1 0 6 9.5A3.5 3.5 0 1 0 6 2.5Z"/>`,
   opencode: `<path d="M4 3L1 6L4 9M8 3L11 6L8 9"/>`,
   codex: `<path d="M2 3L5 6L2 9M7 9H10"/>`,
   deepseek: `<path d="M2 3L5 6L2 9M7 9H10"/>`,

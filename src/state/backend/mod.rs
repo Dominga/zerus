@@ -59,6 +59,7 @@ pub(crate) const AGENT_COMMAND_CONTEXT: &[&str] = &[
     "CODEX_TOOL_CALL_ID",
     "DSH_SESSION_ID",
     "OPENCODE_SESSION_ID",
+    "QWEN_CODE_SESSION_ID",
     "NO_COLOR",
 ];
 

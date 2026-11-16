@@ -210,6 +210,7 @@ impl Catalog {
             "claude" => "Claude Code".into(),
             "codex" => "Codex".into(),
             "kimi" => "Kimi".into(),
+            "qwen" => "Qwen Code".into(),
             "dsh" | "deepseek" => "DeepSeek".into(),
             "" => "harness".into(),
             other => other.into(),

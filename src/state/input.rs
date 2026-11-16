@@ -627,6 +627,10 @@ struct TerminalStyle {
     dim: bool,
     background: bool,
     inverse: bool,
+    /// Underlined, as Qwen Code draws its caret.
+    underline: bool,
+    /// A foreground colour other than the default.
+    foreground: bool,
 }
 
 fn styled_cells(row: &str, style: &mut TerminalStyle) -> Vec<(char, TerminalStyle)> {
@@ -650,9 +654,17 @@ fn styled_cells(row: &str, style: &mut TerminalStyle) -> Vec<(char, TerminalStyl
                                 "7" => style.inverse = true,
                                 "27" => style.inverse = false,
                                 "49" => style.background = false,
+                                // tmux prints a styled underline as `4:N`.
+                                "4" => style.underline = true,
+                                "24" | "4:0" => style.underline = false,
+                                code if code.starts_with("4:") => style.underline = true,
+                                "39" => style.foreground = false,
                                 "38" | "48" | "58" => {
                                     if parameters[i] == "48" {
                                         style.background = true;
+                                    }
+                                    if parameters[i] == "38" {
+                                        style.foreground = true;
                                     }
                                     i += if parameters.get(i + 1) == Some(&"2") {
                                         4
@@ -665,6 +677,12 @@ fn styled_cells(row: &str, style: &mut TerminalStyle) -> Vec<(char, TerminalStyl
                                 }) =>
                                 {
                                     style.background = true
+                                }
+                                code if code.parse::<u8>().is_ok_and(|code| {
+                                    (30..=37).contains(&code) || (90..=97).contains(&code)
+                                }) =>
+                                {
+                                    style.foreground = true
                                 }
                                 _ => {}
                             }
@@ -765,8 +783,27 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
             // The older Python kimi-cli uses an unboxed panel and mode footer.
             agent_mode && (cursor == 1 && plain.trim().is_empty() && previous.contains(" input "))
         }
+        "qwen" => qwen_prompt_empty(row, &previous, cursor),
         _ => false,
     }
+}
+
+/// Qwen Code 0.27.4's composer: a full-width rule, then the mode glyph at the
+/// left edge (`>` default, `*` YOLO, `!` shell) and a space, its caret an
+/// underlined cell at column 2 and, when empty, only its placeholder after it
+/// ("Type your message or @path/to/file"), drawn in a set colour. A draft is in
+/// the default colour and moves the caret past its text.
+fn qwen_prompt_empty(row: &str, previous: &str, cursor: usize) -> bool {
+    let cells = styled_cells(row, &mut TerminalStyle::default());
+    let rule = !previous.starts_with(char::is_whitespace)
+        && previous.chars().count() >= 12
+        && previous.chars().all(|ch| "─━".contains(ch));
+    cursor == 2
+        && rule
+        && matches!(cells.first(), Some(('>' | '*' | '!', _)))
+        && cells.get(1).is_some_and(|(ch, _)| *ch == ' ')
+        && cells.get(2).is_some_and(|(ch, style)| *ch == ' ' && (style.underline || style.inverse))
+        && cells.iter().skip(3).all(|(ch, style)| ch.is_whitespace() || style.foreground || style.dim)
 }
 
 /// Kimi's startup progress frame: its spinner-led preparation banner is the
@@ -1076,7 +1113,7 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
         }
         // Claude and Python kimi-cli terminate the input with an unindented
         // full-width separator. Draft continuation lines have an input indent.
-        if matches!(agent, "claude" | "kimi")
+        if matches!(agent, "claude" | "kimi" | "qwen")
             && !plain.starts_with(char::is_whitespace)
             && plain.chars().count() >= 12
             && plain.chars().all(|ch| "─━╌".contains(ch))
@@ -3145,6 +3182,36 @@ mod tests {
         assert_eq!(native_draft(&record, &screen("❯ fix it"), "", 5).as_deref(), Some("fix it"));
         assert_eq!(native_draft(&json!({"agent":"kimi"}), &screen("❯ fix it"), "", 5), None);
     }
+    #[test]
+    fn qwen_codes_empty_composer_is_its_placeholder_after_the_caret() {
+        // Frames of Qwen Code 0.27.4 in a 100-column pseudoconsole (2026-11-16).
+        let rule = format!("[38;2;139;58;74m{}[39m", "─".repeat(100));
+        let frame = |composer: &str| format!("  Tips: run shell commands with !
+
+{rule}
+{composer}
+{rule}
+  ➜ project · qwen3.8-flash-next
+  YOLO mode (Tab to cycle)
+");
+        let empty = "[38;2;139;58;74m* [39m[4m [24m[38;2;108;112;134m Введите сообщение или @путь/к/файлу[39m";
+        assert!(composer_empty("qwen", &frame(empty), 2, 3));
+        // The default mode's glyph, and tmux's styled underline.
+        assert!(composer_empty("qwen", &frame(&empty.replace("* ", "> ").replace("[4m", "[4:1m")), 2, 3));
+        let draft = "[38;2;139;58;74m* [39mReply with the single word PONG[4m [24m";
+        assert!(!composer_empty("qwen", &frame(draft), 33, 3));
+        // The caret on a draft's first letter, and a draft in the default colour.
+        assert!(!composer_empty("qwen", &frame("[38;2;139;58;74m* [39m[4mR[24meply"), 2, 3));
+        assert!(!composer_empty("qwen", &frame("[38;2;139;58;74m* [39m[4m [24mtext typed after a space"), 2, 3));
+        // A past prompt in the history is no composer: no rule above it.
+        let history = format!("  > Reply with the single word PONG
+{empty}
+{rule}
+");
+        assert!(!composer_empty("qwen", &history, 2, 1));
+        assert!(!composer_empty("claude", &frame(empty), 2, 3));
+    }
+
     #[test]
     fn styled_cells_track_reverse_video_without_reading_color_data() {
         let cells = styled_cells(

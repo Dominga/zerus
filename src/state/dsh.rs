@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(not(unix))]
+use std::time::Instant;
 // The native host's socket and start (see `rpc` and `ensure_host`).
 #[cfg(unix)]
 use std::{

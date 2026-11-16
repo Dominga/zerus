@@ -8,7 +8,7 @@ use zerus_team_plan::{
 /// The exact agent kind names a team seat may be launched with in this
 /// milestone. A name is matched exactly: another spelling of a known kind
 /// would save a seat that can never launch, so it is refused here.
-const KNOWN_AGENTS: [&str; 4] = ["claude", "codex", "kimi", "dsh"];
+const KNOWN_AGENTS: [&str; 5] = ["claude", "codex", "kimi", "qwen", "dsh"];
 
 pub(crate) fn validate_roster(bundle: &TemplateBundle) -> Result<(), Problem> {
     let template = bundle.template.id.as_str();

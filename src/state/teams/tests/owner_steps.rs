@@ -19,7 +19,7 @@ fn a_rule_names_an_absolute_folder_and_known_agents() {
     assert_eq!(rule.agents, ["claude", "codex"], "sorted, once each");
     for (input, said) in [
         (json!({"folder":"relative","agents":["claude"]}), "absolute path"),
-        (json!({"folder":folder("x"),"agents":[]}), "1 to 5 agents"),
+        (json!({"folder":folder("x"),"agents":[]}), "1 to 6 agents"),
         (json!({"folder":folder("x"),"agents":["gpt"]}), "gpt is no agent"),
     ] {
         let error = rule_from(&input).unwrap_err().to_string();

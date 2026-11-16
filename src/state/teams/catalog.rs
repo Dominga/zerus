@@ -919,7 +919,7 @@ fn designer(input: &Value) -> anyhow::Result<Value> {
     std::fs::create_dir_all(&home).context("Could not create the Team designer's folder")?;
     let folder = home.to_string_lossy().into_owned();
     let agent = input["agent"].as_str().filter(|a| !a.is_empty()).unwrap_or("claude");
-    ensure!(["claude", "codex", "kimi", "dsh", "opencode"].contains(&agent), "Unknown agent {agent}");
+    ensure!(["claude", "codex", "kimi", "qwen", "dsh", "opencode"].contains(&agent), "Unknown agent {agent}");
     // A model or effort is one word, as a provider's command line takes it.
     let word = |key: &str| -> anyhow::Result<String> {
         let value = input[key].as_str().unwrap_or_default().trim().to_owned();

@@ -755,6 +755,27 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
                 return None;
             }
         }
+        // Qwen Code 0.27.4's chat log: the person's prompt (`real_user`) and
+        // the model's reply, without its thoughts or tool calls.
+        "qwen" => {
+            let role = match (string(event, "type"), string(event, "provenance")) {
+                ("user", "real_user") => "user",
+                ("assistant", _) => "assistant",
+                _ => return None,
+            };
+            let text = event["message"]["parts"]
+                .as_array()
+                .map(|parts| {
+                    parts
+                        .iter()
+                        .filter(|part| part["thought"] != true)
+                        .filter_map(|part| part["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default();
+            (role, text, string(event, "uuid"), timestamp(&event["timestamp"]), "qwen_transcript")
+        }
         _ => return None,
     };
     if text.trim().is_empty() || (role == "user" && !public_user(&text)) {
@@ -932,6 +953,29 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn qwen_codes_chat_log_gives_the_prompt_and_the_reply_without_thoughts() {
+        // Lines of Qwen Code 0.27.4's `chats/<id>.jsonl` (2026-11-16).
+        let user = json!({"uuid":"u1","sessionId":"s","timestamp":"2026-11-16T17:15:10.693Z","type":"user","provenance":"real_user",
+            "message":{"role":"user","parts":[{"text":"Run echo hi and reply DONE"}]}});
+        let (message, role) = provider_event("qwen", &user).unwrap();
+        assert_eq!((role, message["type"].as_str(), message["source"].as_str()), ("user", Some("UserPromptSubmit"), Some("qwen_transcript")));
+        assert_eq!(message["detail"], "Run echo hi and reply DONE");
+        let reply = json!({"uuid":"a1","sessionId":"s","timestamp":"2026-11-16T17:15:21.150Z","type":"assistant","provenance":"assistant_output",
+            "message":{"role":"model","parts":[{"text":"The user asked for DONE.","thought":true},{"text":"DONE"},
+                {"functionCall":{"name":"run_shell_command","args":{"command":"echo hi"}}}]}});
+        let (message, role) = provider_event("qwen", &reply).unwrap();
+        assert_eq!((role, message["detail"].as_str(), message["message_id"].as_str()), ("assistant", Some("DONE"), Some("a1")));
+        // Only thoughts and tool calls: nothing to show.
+        let thinking = json!({"uuid":"a2","type":"assistant","message":{"role":"model","parts":[{"text":"Thinking.","thought":true},{"functionCall":{"name":"x"}}]}});
+        assert!(provider_event("qwen", &thinking).is_none());
+        // Memory snapshots, tool results and telemetry are not the person's words.
+        for (kind, provenance) in [("system", "system"), ("tool_result", "tool_result"), ("user", "system")] {
+            let other = json!({"type":kind,"provenance":provenance,"message":{"role":"user","parts":[{"text":"context"}]}});
+            assert!(provider_event("qwen", &other).is_none(), "{kind} {provenance}");
+        }
     }
 
     #[test]

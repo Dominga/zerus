@@ -84,7 +84,7 @@ fn choice(options: &[(&str, &str)]) -> FieldType {
 }
 
 const AGENTS: &[(&str, &str)] =
-    &[("claude", "Claude"), ("codex", "Codex"), ("kimi", "Kimi"), ("dsh", "DeepSeek"), ("opencode", "OpenCode")];
+    &[("claude", "Claude"), ("codex", "Codex"), ("kimi", "Kimi"), ("qwen", "Qwen Code"), ("dsh", "DeepSeek"), ("opencode", "OpenCode")];
 
 /// The fields Qt's editors show for each kind, in Qt's order and words.
 pub fn schema(kind: Kind) -> Vec<FieldSpec> {

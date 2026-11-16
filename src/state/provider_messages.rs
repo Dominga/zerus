@@ -13,7 +13,7 @@ const LINE_BYTES: usize = 1024 * 1024;
 fn transcript(record: &Value) -> Option<(&str, &str, PathBuf)> {
     let agent = string(record, "agent");
     let id = string(record, "conversation_id");
-    if !["codex", "claude"].contains(&agent) || uuid::Uuid::parse_str(id).is_err() {
+    if !["codex", "claude", "qwen"].contains(&agent) || uuid::Uuid::parse_str(id).is_err() {
         return None;
     }
     let path = PathBuf::from(string(record, "transcript"));
@@ -58,7 +58,7 @@ fn line_messages(agent: &str, id: &str, line: &[u8]) -> Vec<Value> {
     let Ok(event) = serde_json::from_slice::<Value>(line) else {
         return vec![];
     };
-    if agent == "claude" && !string(&event, "sessionId").is_empty() && event["sessionId"] != id {
+    if matches!(agent, "claude" | "qwen") && !string(&event, "sessionId").is_empty() && event["sessionId"] != id {
         return vec![];
     }
     let mut messages = Vec::new();

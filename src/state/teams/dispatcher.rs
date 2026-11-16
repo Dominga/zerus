@@ -6501,8 +6501,8 @@ pub(crate) fn lead_context_action(team: &Team, lead: &Member) -> String {
 /// has no native clear; OpenCode has neither yet.
 pub(crate) fn native_context(agent: &str, action: &str) -> bool {
     match action {
-        "compact" => matches!(agent, "claude" | "codex" | "kimi" | "dsh"),
-        "clear" => matches!(agent, "claude" | "codex" | "kimi"),
+        "compact" => matches!(agent, "claude" | "codex" | "kimi" | "qwen" | "dsh"),
+        "clear" => matches!(agent, "claude" | "codex" | "kimi" | "qwen"),
         _ => false,
     }
 }
@@ -6512,6 +6512,7 @@ pub(crate) fn agent_label(agent: &str) -> &str {
         "claude" => "Claude",
         "codex" => "Codex",
         "kimi" => "Kimi",
+        "qwen" => "Qwen Code",
         "dsh" => "DeepSeek",
         "opencode" => "OpenCode",
         other => other,

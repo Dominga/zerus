@@ -12,7 +12,7 @@ import { KNOWN_MODELS, effortOptions, modelOptions, type ModelChoice } from "./c
 // dialog and the tests share one rule.
 
 /** The agents a member may run as (Qt's agentNames). */
-export const SWAP_AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"] as const;
+export const SWAP_AGENTS = ["claude", "codex", "kimi", "qwen", "dsh", "opencode"] as const;
 
 /** One member's chosen swap: a new session with these fields, or an existing one. */
 export interface SwapChoice {

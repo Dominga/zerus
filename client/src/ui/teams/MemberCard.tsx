@@ -41,7 +41,7 @@ function pulseText(pulse: TeamPulseView): string {
   return [...pulseLines(pulse), by].join("\n");
 }
 
-const AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"];
+const AGENTS = ["claude", "codex", "kimi", "qwen", "dsh", "opencode"];
 
 /**
  * The Tauri client sends a session message only from a composer: the member

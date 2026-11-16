@@ -23,7 +23,7 @@ pub(crate) const AWAY_AFTER: f64 = 600.0;
 /// At most this many scratch rules are kept.
 const RULES_MAX: usize = 20;
 /// The agents a scratch rule may name.
-pub(crate) const AGENTS: [&str; 5] = ["claude", "codex", "kimi", "dsh", "opencode"];
+pub(crate) const AGENTS: [&str; 6] = ["claude", "codex", "kimi", "qwen", "dsh", "opencode"];
 /// The agents whose start-up folder trust Zerus records from a rule.
 pub(crate) const TRUSTED_AGENTS: [&str; 2] = ["claude", "codex"];
 

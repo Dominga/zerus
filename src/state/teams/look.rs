@@ -206,6 +206,8 @@ fn prompt_row(agent: &str, row: &str) -> Option<String> {
     let tail = match agent {
         "codex" => boxed.strip_prefix('›').or_else(|| boxed.strip_prefix('»')),
         "kimi" => boxed.strip_prefix('>'),
+        // Qwen Code's mode glyph: `>` default, `*` YOLO, `!` shell.
+        "qwen" => boxed.strip_prefix("> ").or_else(|| boxed.strip_prefix("* ")).or_else(|| boxed.strip_prefix("! ")),
         _ => boxed.strip_prefix('❯').or_else(|| boxed.strip_prefix('>')).or_else(|| boxed.strip_prefix('›')),
     }?;
     let tail = tail.trim_matches(|ch: char| ch.is_whitespace() || ch == '\u{a0}' || ch == '│');

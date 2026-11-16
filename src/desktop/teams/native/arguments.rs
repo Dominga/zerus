@@ -89,7 +89,7 @@ pub(super) fn usage(data: &Value, agent: &str, id: &str) -> Result<AccountUsage>
         && (data["auth_status"] == "signed_in"
             || data["status"] == "ok"
             || native_auth
-            || (matches!(agent, "dsh" | "opencode") && data["status"] == "configured"));
+            || (matches!(agent, "dsh" | "opencode" | "qwen") && data["status"] == "configured"));
     let windows = data["windows"]
         .as_array()
         .ok_or_else(|| invalid("Account usage windows unavailable"))?;

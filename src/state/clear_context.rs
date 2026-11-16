@@ -657,6 +657,8 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
             hint.is_empty() || (hint.len()<=40 && hint.starts_with('<') && hint.ends_with('>')
                 && !hint[1..hint.len()-1].contains(['<','>']))
         }),
+        // Qwen Code's composer: its mode glyph at the left edge, then the command.
+        "qwen" => ["> ","* ","! "].iter().any(|glyph|before.trim_end()==format!("{glyph}{command}")) && after.trim().is_empty(),
         _ => false,
     }
 }
@@ -1367,6 +1369,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         assert!(command_row("codex","» /clear",8,"/clear"));
         assert!(command_row("claude","❯\u{a0}/clear",8,"/clear"));
         assert!(command_row("kimi"," │ > /clear       │",11,"/clear"));
+        assert!(command_row("qwen","* /clear",8,"/clear"));
+        assert!(command_row("qwen","> /compact",10,"/compact"));
+        assert!(!command_row("qwen","  > /clear",10,"/clear"), "a past prompt in the history is indented");
+        assert!(!command_row("qwen","* /clear now",8,"/clear"));
         assert!(command_row("kimi"," │ > /compact  <instruction>          │",13,"/compact"));
         assert!(command_row("kimi"," │ > /compact                        │",15,"/compact"));
         assert!(!command_row("kimi"," │ > /compact extra                  │",15,"/compact"));

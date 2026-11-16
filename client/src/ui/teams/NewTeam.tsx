@@ -58,7 +58,7 @@ export interface NewTeamProps {
   onDiscarded?: (team: string) => void;
 }
 
-const AGENTS = ["claude", "codex", "kimi", "dsh", "opencode"];
+const AGENTS = ["claude", "codex", "kimi", "qwen", "dsh", "opencode"];
 const PERMISSIONS: [string, () => string][] = [["", () => tr("Account")], ["auto", () => tr("Auto")], ["bypass", () => tr("Bypass")]];
 
 const FAVOURITES = "teams/templateFavourites";

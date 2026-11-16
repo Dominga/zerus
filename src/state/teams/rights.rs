@@ -50,6 +50,9 @@ pub(crate) fn profile_selection(agent: &str, profile: &str) -> Option<String> {
         ("dsh", "write" | "build" | "commit") => native(json!({"preset":"workspace-write"})),
         ("dsh", "network" | "operate") => native(json!({"preset":"danger-full-access"})),
         ("kimi", "read") => native(json!({"plan":"on"})),
+        ("qwen", "read") => native(json!({"mode":"plan"})),
+        ("qwen", "write") => native(json!({"mode":"default"})),
+        ("qwen", "build" | "commit" | "network" | "operate") => native(json!({"mode":"auto-edit"})),
         _ => None,
     }
 }
@@ -86,6 +89,7 @@ fn controls(agent: &str) -> &'static [(&'static str, &'static [&'static str])] {
             ("approve_for_me", &["on"]),
         ],
         "kimi" => &[("mode", &["yolo", "auto"]), ("plan", &["on"])],
+        "qwen" => &[("mode", &["plan", "default", "auto-edit", "auto", "yolo"])],
         // DeepSeek also names presets of its own; any preset name is checked
         // against its catalog at launch.
         "dsh" => &[("preset", &[])],
@@ -166,6 +170,7 @@ fn level(agent: &str, selection: &str) -> Level {
         },
         "claude" if control("mode") == "plan" => Level::Read,
         "kimi" if control("plan") == "on" => Level::Read,
+        "qwen" if control("mode") == "plan" => Level::Read,
         // Claude, Kimi and OpenCode run in no sandbox of their own.
         _ => Level::Full,
     }

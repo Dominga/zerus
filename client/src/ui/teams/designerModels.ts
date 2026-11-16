@@ -7,6 +7,7 @@ export const DESIGNER_AGENTS: [string, string][] = [
   ["claude", "Claude Code"],
   ["codex", "Codex"],
   ["kimi", "Kimi"],
+  ["qwen", "Qwen Code"],
   ["dsh", "DeepSeek"],
   ["opencode", "OpenCode"],
 ];
@@ -17,7 +18,7 @@ export function agentName(agent: string): string {
 
 /** Whether the agent takes an effort choice (Qt disables it for dsh and kimi). */
 export function effortAllowed(agent: string): boolean {
-  return agent !== "dsh" && agent !== "kimi";
+  return agent !== "dsh" && agent !== "kimi" && agent !== "qwen";
 }
 
 /** Qt updateModelButton's text: the model (or the agent's name), then the effort. */

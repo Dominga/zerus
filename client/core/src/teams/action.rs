@@ -1289,8 +1289,8 @@ impl TeamAction {
                 if goal.trim().is_empty() {
                     return Err("Describe the work for the designer.".into());
                 }
-                if !agent.is_empty() && !matches!(agent.as_str(), "claude" | "codex" | "kimi" | "dsh" | "opencode") {
-                    return Err("The designer runs as Claude, Codex, Kimi, DeepSeek or OpenCode.".into());
+                if !agent.is_empty() && !matches!(agent.as_str(), "claude" | "codex" | "kimi" | "qwen" | "dsh" | "opencode") {
+                    return Err("The designer runs as Claude, Codex, Kimi, Qwen Code, DeepSeek or OpenCode.".into());
                 }
                 for (value, what) in [(model, "A model"), (effort, "An effort"), (project, "A project")] {
                     plain(value, what, 200)?;

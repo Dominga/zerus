@@ -161,6 +161,7 @@ fn agent_name(agent: &str) -> &str {
         "codex" => "Codex",
         "dsh" => "DeepSeek",
         "kimi" => "Kimi",
+        "qwen" => "Qwen Code",
         "opencode" => "OpenCode",
         other => other,
     }

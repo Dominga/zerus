@@ -17,7 +17,7 @@ pub(crate) enum Composer {
 
 /// The agents whose composer can be read and cleared.
 pub(crate) fn supported(agent: &str) -> bool {
-    matches!(agent, "claude" | "codex" | "kimi")
+    matches!(agent, "claude" | "codex" | "kimi" | "qwen")
 }
 
 pub(crate) fn read(record: &Value, screen: &str, cursor_x: usize, cursor_y: usize) -> Composer {
@@ -39,6 +39,7 @@ pub(crate) fn read(record: &Value, screen: &str, cursor_x: usize, cursor_y: usiz
                 .join("\n");
             codex_draft(record, &plain, cursor_y)
         }
+        "qwen" => qwen_draft(screen, cursor_y),
         _ => kimi_text(screen, cursor_y),
     };
     match text.map(|text| text.chars().take(settle::RESIDUE_CHARS).collect::<String>()) {

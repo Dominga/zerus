@@ -32,7 +32,7 @@ impl Cache {
         std::thread::scope(|scope| {
             let jobs: Vec<_> = providers
                 .iter()
-                .filter(|provider| ["claude", "codex", "kimi", "dsh"].contains(&provider.as_str()))
+                .filter(|provider| ["claude", "codex", "kimi", "qwen", "dsh"].contains(&provider.as_str()))
                 .map(|provider| {
                     let provider = provider.clone();
                     let worker = provider.clone();
@@ -261,6 +261,7 @@ fn provider_command(provider: &str, home: &Path, argument: &str) -> Command {
         "claude" => command.env("CLAUDE_CONFIG_DIR", home),
         "codex" => command.env("CODEX_HOME", home),
         "kimi" => command.env("KIMI_CODE_HOME", home),
+        "qwen" => command.env("QWEN_HOME", home),
         _ => &mut command,
     };
     command.arg(argument);
@@ -454,6 +455,20 @@ fn kimi_catalog(_config: &Config, home: &Path) -> Value {
     available("kimi-help", version("kimi", home), controls)
 }
 
+/// Qwen Code's `--approval-mode` choices (0.27.4's help names exactly these);
+/// the version is read, the modes are not probed.
+fn qwen_catalog(home: &Path) -> Value {
+    let modes = [
+        ("plan", "Plan", "Analyze only: no file edits or commands."),
+        ("default", "Default", "Ask before file edits and shell commands."),
+        ("auto-edit", "Auto edit", "Approve file edits automatically."),
+        ("auto", "Auto", "A classifier approves safe actions and blocks risky ones."),
+        ("yolo", "YOLO", "Approve every tool automatically."),
+    ];
+    let options = modes.iter().map(|(value, label, detail)| option(value, label, Some(detail))).collect();
+    available("qwen-modes", version("qwen", home), vec![control("mode", "Approval mode", None, options)])
+}
+
 fn dsh_catalog(config: &Config) -> Value {
     match crate::state::dsh::permission_catalog(config) {
         Ok(value) if value["status"] == "available" && value["controls"].as_array().is_some_and(|controls| !controls.is_empty()) => {
@@ -483,6 +498,7 @@ fn discover(config: &Config, provider: &str, home: &Path) -> Value {
         "claude" => claude_catalog(config, home),
         "codex" => codex_catalog(config, home),
         "kimi" => kimi_catalog(config, home),
+        "qwen" => qwen_catalog(home),
         "dsh" => dsh_catalog(config),
         _ => unavailable(provider, "Permissions are managed in this provider's native configuration."),
     };
@@ -672,6 +688,18 @@ fn native_values(
                 None => (BTreeMap::new(), "Kimi settings could not be read.".into()),
             }
         }
+        "qwen" => {
+            let mode = fs::read(home.join("settings.json")).ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|settings| settings["tools"]["approvalMode"].as_str().filter(|mode| !mode.is_empty()).map(str::to_owned));
+            match mode {
+                Some(mode) => (
+                    BTreeMap::from([("mode".to_owned(), mode.clone())]),
+                    format!("From Qwen Code settings: tools.approvalMode={mode}."),
+                ),
+                None => (BTreeMap::new(), "Qwen Code settings do not pin tools.approvalMode.".into()),
+            }
+        }
         "dsh" => {
             let values = string_map(&catalog["selected"]);
             let detail = if values.is_empty() {
@@ -693,6 +721,7 @@ fn bypass_selection(provider: &str) -> BTreeMap<String, String> {
             ("sandbox".to_owned(), "danger-full-access".to_owned()),
         ]),
         "kimi" => BTreeMap::from([("mode".to_owned(), "auto".to_owned())]),
+        "qwen" => BTreeMap::from([("mode".to_owned(), "yolo".to_owned())]),
         "dsh" => BTreeMap::from([("preset".to_owned(), "danger-full-access".to_owned())]),
         _ => BTreeMap::new(),
     }
@@ -774,6 +803,11 @@ fn legacy_mode(provider: &str, values: &BTreeMap<String, String>) -> String {
         }
         "kimi" => match values.get("mode").map(String::as_str) {
             Some("auto") => "bypass",
+            _ => "default",
+        },
+        "qwen" => match values.get("mode").map(String::as_str) {
+            Some("yolo") => "bypass",
+            Some("plan") => "plan",
             _ => "default",
         },
         "dsh" => match values.get("preset").map(String::as_str) {
@@ -872,6 +906,10 @@ fn args_for(provider: &str, selection: &BTreeMap<String, String>) -> Vec<String>
             }
             args
         }
+        "qwen" => selection
+            .get("mode")
+            .map(|mode| vec!["--approval-mode".to_owned(), mode.clone()])
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -1097,6 +1135,20 @@ mod tests {
         }
         selection.insert("approve_for_me".into(), "off".into());
         assert!(validate_selection("codex", &catalog, &selection).is_err());
+    }
+
+    #[test]
+    fn qwen_modes_are_its_approval_mode_switch() {
+        let catalog = qwen_catalog(Path::new("/nonexistent/qwen-home"));
+        assert_eq!(catalog["status"], "available");
+        let modes: Vec<&str> = catalog["controls"][0]["options"].as_array().unwrap().iter().map(|o| o["value"].as_str().unwrap()).collect();
+        assert_eq!(modes, ["plan", "default", "auto-edit", "auto", "yolo"]);
+        let selection = BTreeMap::from([("mode".to_owned(), "auto-edit".to_owned())]);
+        assert!(validate_selection("qwen", &catalog, &selection).is_ok());
+        assert_eq!(args_for("qwen", &selection), ["--approval-mode", "auto-edit"]);
+        assert!(validate_selection("qwen", &catalog, &BTreeMap::from([("mode".to_owned(), "never".to_owned())])).is_err());
+        assert_eq!(bypass_args("qwen"), ["--approval-mode", "yolo"]);
+        assert_eq!(legacy_mode("qwen", &BTreeMap::from([("mode".to_owned(), "yolo".to_owned())])), "bypass");
     }
 
     #[test]

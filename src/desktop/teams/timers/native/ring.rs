@@ -23,7 +23,7 @@ const CODES: Codes = Codes {
 /// The doorbell keeps this much of the send's stderr, its refusal.
 const REFUSAL_BYTES: usize = 8 << 10;
 /// Agents whose `hgs send` writes `input_receipts` before the first byte.
-const RECEIPTED: [&str; 3] = ["claude", "codex", "kimi"];
+const RECEIPTED: [&str; 4] = ["claude", "codex", "kimi", "qwen"];
 
 pub(super) fn deliver(n: &Native<'_>, store: &Store, ring: &Ring) -> Rung {
     let Some(db) = store.db.as_ref() else {

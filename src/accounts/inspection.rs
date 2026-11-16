@@ -994,6 +994,24 @@ fn retain_cached_identity(data: &mut Value, cached: &Value, current_signature: &
     }
 }
 
+/// Qwen Code has no quota read: an account is configured when it has Qwen
+/// OAuth credentials or its settings choose a provider; a model server's
+/// account shows the server's speed instead (`gateway`).
+fn qwen(home: &Path) -> Value {
+    let settings = fs::read(home.join("settings.json")).ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or_default();
+    let method = settings["security"]["auth"]["selectedType"].as_str().filter(|kind| !kind.is_empty())
+        .map(str::to_owned)
+        .or_else(|| home.join("oauth_creds.json").is_file().then(|| "qwen-oauth".to_owned()));
+    match method {
+        Some(method) => json!({"status":"configured","source":"Qwen Code","identity":{"auth_method":method},"windows":[],
+            "reason":"Qwen Code reports no quota; an account on a model server shows its speed"}),
+        None => json!({"status":"signed_out","auth_status":"signed_out","source":"Qwen Code","identity":{},"windows":[],
+            "reason":"Choose a provider in Qwen Code (/auth)"}),
+    }
+}
+
 pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
     let session = arg(args, "--session");
     let context = session
@@ -1046,6 +1064,7 @@ pub(super) fn inspect(config: &Config, args: &[String]) -> Result<Value> {
             "claude" => claude(config, &home, native, if same { &cached["data"] } else { &Value::Null })?,
             "kimi" => kimi(&home),
             "dsh" => dsh(&home),
+            "qwen" => qwen(&home),
             "opencode"=>json!({"status":"configured","source":"OpenCode","identity":{},"windows":[],"reason":"OpenCode uses its native inference-provider configuration; quota inspection is not available"}),
             _ => Value::Null,
         };

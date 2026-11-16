@@ -391,7 +391,7 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
   return merged;
 }
 
-const PROVIDER_SOURCES = new Set(["codex_transcript", "claude_transcript", "kimi_wire"]);
+const PROVIDER_SOURCES = new Set(["codex_transcript", "claude_transcript", "kimi_wire", "qwen_transcript"]);
 const MESSAGE_TYPES = new Set(["SessionCleared", "UserPromptSubmit", "UserPromptQueued", "UserMessage", "TurnStarted", "QuestionAnswered", "AgentMessage", "Stop"]);
 
 /** The inspection keeps up to 100 main journal messages independently of its

@@ -572,7 +572,7 @@ fn list(config: &Config) -> Result<Value> {
     let providers: BTreeSet<String> = rows
         .iter()
         .filter_map(|row| row["provider"].as_str())
-        .filter(|provider| ["claude", "codex", "kimi", "dsh"].contains(provider))
+        .filter(|provider| ["claude", "codex", "kimi", "qwen", "dsh"].contains(provider))
         .map(str::to_owned)
         .collect();
     let mut catalogs = permission_catalog::Cache::prefetch(config, &providers);

@@ -36,6 +36,15 @@ session resumes with `qwen --resume ID`, Zerus's bypass mode passes
 `native-qwen`, listed wherever `qwen` is installed). An account of
 `--provider qwen` signs in inside Qwen Code itself (`/auth`).
 
+Activity, conversation history and search read the person's prompts and the
+model's replies (without its thoughts or tool calls) from Qwen Code's
+`projects/<folder>/chats/<id>.jsonl`. Clear input reads and clears its draft, and
+`/clear` and `/compact` run in its composer. Accounts and team members choose its
+`--approval-mode` (Plan, Default, Auto edit, Auto, YOLO; the account's own mode is
+`tools.approvalMode` in its settings); team rights map read to Plan, write to
+Default and the wider profiles to Auto edit. Usage analytics count Qwen Code under
+`other` until every client knows the provider.
+
 A Qwen Code account on a model server keeps the server in its own
 `settings.json`, as Qwen Code writes it:
 

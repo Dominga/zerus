@@ -1567,8 +1567,34 @@ pub(super) fn native_draft(record: &Value, styled: &str, plain: &str, cursor_y: 
         "claude" => claude_draft(styled, cursor_y),
         "codex" => codex_draft(record, plain, cursor_y).filter(|draft| !draft.trim().is_empty()),
         "kimi" => kimi_draft(plain, cursor_y),
+        "qwen" => qwen_draft(styled, cursor_y),
         _ => None,
     }
+}
+
+/// Qwen Code's draft (0.27.4): the rows between its two full-width rules
+/// around the cursor, the first after its mode glyph (`> `, `* ` or `! `) and
+/// the others after their two-column indent. None outside that frame, and for
+/// its empty prompt, whose placeholder is no draft.
+pub(super) fn qwen_draft(screen: &str, cursor_y: usize) -> Option<String> {
+    let rows: Vec<String> = screen.lines().map(|row| styled_row(row).iter().map(|(ch, _)| ch).collect()).collect();
+    let rule = |row: &str| !row.starts_with(char::is_whitespace) && row.chars().count() >= 12 && row.chars().all(|ch| "─━".contains(ch));
+    let glyph = |row: &str| ["> ", "* ", "! "].iter().find_map(|glyph| row.strip_prefix(glyph)).map(str::to_owned);
+    let cursor = cursor_y.min(rows.len().checked_sub(1)?);
+    let start = (1..=cursor).rev().take_while(|&index| !rule(&rows[index])).find(|&index| rule(&rows[index - 1]) && glyph(&rows[index]).is_some())?;
+    if composer_empty("qwen", screen, 2, start) {
+        return None;
+    }
+    let mut lines = vec![glyph(&rows[start])?.trim_end().to_owned()];
+    for row in &rows[start + 1..] {
+        if rule(row) {
+            let text = lines.join("
+").trim_end().to_owned();
+            return (!text.trim().is_empty()).then_some(text);
+        }
+        lines.push(row.strip_prefix("  ").unwrap_or(row).trim_end().to_owned());
+    }
+    None
 }
 
 pub(super) fn safe_filename(name: &str, index: usize) -> String {
@@ -3210,6 +3236,16 @@ mod tests {
 ");
         assert!(!composer_empty("qwen", &history, 2, 1));
         assert!(!composer_empty("claude", &frame(empty), 2, 3));
+        // The draft itself, over two rows, and none for the empty prompt.
+        assert_eq!(qwen_draft(&frame(draft), 3).as_deref(), Some("Reply with the single word PONG"));
+        let two = format!("{draft}
+  and then stop");
+        assert_eq!(qwen_draft(&frame(&two), 4).as_deref(), Some("Reply with the single word PONG
+and then stop"));
+        assert_eq!(qwen_draft(&frame(empty), 3), None);
+        let record = json!({"agent":"qwen"});
+        assert_eq!(composer::read(&record, &frame(draft), 33, 3), composer::Composer::Text("Reply with the single word PONG".into()));
+        assert_eq!(composer::read(&record, &frame(empty), 2, 3), composer::Composer::Empty);
     }
 
     #[test]

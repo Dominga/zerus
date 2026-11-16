@@ -876,6 +876,7 @@ fn a_resident_incremental_clone_shares_the_whole_step_seed_budget() {
     .unwrap();
     let expected = fs::read(&selected).unwrap();
     let mut complete = false;
+    let mut retained_generation = None;
     for _ in 0..128 {
         let stats = background_at(root.path(), &mut work).unwrap();
         assert!(
@@ -883,6 +884,43 @@ fn a_resident_incremental_clone_shares_the_whole_step_seed_budget() {
             "incremental step would terminate the real worker: {stats:?}"
         );
         assert!(stats.entries <= 256 && stats.rows <= 128 && stats.bytes <= 16 << 20);
+        assert!(
+            work.is_some(),
+            "budget yield discarded the retained native stream"
+        );
+        let store = Store::read(root.path()).unwrap();
+        let serial: i64 = store
+            .db
+            .query_row("SELECT serial FROM meta WHERE id=1", [], |row| row.get(0))
+            .unwrap();
+        if let Some(previous) = retained_generation {
+            assert_eq!(serial, previous, "budget yield restarted the census");
+        } else {
+            retained_generation = Some(serial);
+        }
+        let scan: Option<(i64, String)> = store
+            .db
+            .query_row("SELECT phase,after_key FROM scan WHERE id=1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .unwrap();
+        if let Some((6, after)) = scan {
+            let last: Option<String> = store
+                .db
+                .query_row(
+                    "SELECT max(source) FROM snapshots WHERE generation=?1",
+                    [serial],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                last.as_deref(),
+                Some(after.as_str()),
+                "cursor advanced beyond its last copied row"
+            );
+        }
+        drop(store);
         if stats.complete {
             complete = true;
             break;

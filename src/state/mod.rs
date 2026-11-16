@@ -24,6 +24,7 @@ mod interrupt;
 mod clear_context;
 mod codex_clear_recovery;
 mod codex_sqlite;
+mod codex_tasks;
 mod compact_context;
 mod continuations;
 mod cache_hint;

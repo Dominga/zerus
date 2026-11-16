@@ -1,6 +1,6 @@
 //! Deliberate, identity-checked input to an existing interactive agent.
-//! A receipt acknowledges terminal submission, never a model response. Once input
-//! may have reached the PTY we retain its request ID and never automatically retry.
+//! A receipt acknowledges submission to a native input route, never a model response.
+//! Once input may have reached that route we retain its request ID and never retry.
 //! Codex's one-line status footer names its folder as `/…` or `~/…`, and with a
 //! Windows platform home also as a drive path or `~\…`. Under inbox ConPTY the
 //! hidden Claude and Kimi cursor stays at the end of the last painted row, so
@@ -13,11 +13,12 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::Duration;
 
+pub(in crate::state) mod acceptance;
+mod codex_queue;
 pub(crate) mod composer;
 mod diagnostic;
-pub(in crate::state) mod acceptance;
-mod refusal;
 pub(in crate::state) mod outcome;
+mod refusal;
 pub(crate) mod settle;
 pub(crate) mod task_refusal;
 
@@ -1125,6 +1126,9 @@ fn checked_send_gate(record: &Value) -> std::result::Result<(), Gate> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) fn checked_send_terminal(record: &Value) -> Result<()> {
+    if codex_tasks::multiple(record) {
+        return Err("Codex task settings cannot verify the selected native conversation".into());
+    }
     terminal_check(record, true, true)
 }
 
@@ -1138,7 +1142,15 @@ pub(super) fn checked_terminal_on(record: &Value, empty: bool, terminal: &dyn ba
     terminal_check_on(record, empty, false, terminal)
 }
 
-fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
+fn terminal_check_on(
+    record: &Value,
+    empty: bool,
+    sending: bool,
+    terminal: &dyn backend::TerminalBackend,
+) -> Result<()> {
+    if codex_tasks::multiple(record) && !sending {
+        return Err("Codex has separate native tasks; this Terminal action cannot verify the selected conversation".into());
+    }
     terminal_gate_on(record, empty, sending, terminal).map_err(Gate::reason)
 }
 
@@ -2014,6 +2026,13 @@ fn submit_core(
         remember_send_refusal(typed, witness(gate.reason(), waiting, dialog), retain_refusal, terminal_outcome)
     };
     let record = checked_record_gate(name, &request).map_err(|gate| gated(typed, gate))?;
+    if codex_tasks::multiple(&record) && effort::pending_applies(&record) {
+        return Err(refused(
+            typed,
+            "Codex task settings need a verified native task; no settings or input were sent"
+                .into(),
+        ));
+    }
     if matches!(origin, Origin::Answer) && effort::pending_applies(&record) {
         return Err(refused(
             typed,
@@ -2114,17 +2133,34 @@ fn submit_core(
     };
     let buffer = format!("hgs-input-{request_id}");
     let terminal = backend::current();
+    let mut queue = if codex_tasks::multiple(&record) {
+        if !matches!(origin, Origin::Person) {
+            return Err(refused(
+                typed,
+                "This Codex native-task operation needs its exact native input route".into(),
+            ));
+        }
+        Some(codex_queue::Queue::prepare(&record, &text).map_err(|e| refused(typed, e))?)
+    } else {
+        None
+    };
     // A staging error may leave a buffer loaded: unknown, never a witness.
-    if !terminal
-        .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
-        .map_err(|e| unknown(kimi_expiry::refused(&receipt_path,e)))?
+    if queue.is_none()
+        && !terminal
+            .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
+            .map_err(|e| unknown(kimi_expiry::refused(&receipt_path, e)))?
     {
         return Err(refused(
             typed,
             "could not stage terminal input; nothing was submitted".into(),
         ));
     }
-    let cleanup = || terminal.discard(&buffer);
+    let queued = queue.is_some();
+    let cleanup = || {
+        if !queued {
+            terminal.discard(&buffer);
+        }
+    };
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
     if let Err(gate) = checked_record_gate(name, &request).and_then(|r| checked_send_gate(&r)) {
@@ -2147,7 +2183,12 @@ fn submit_core(
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
-    if pre_send_compaction.is_object() { receipt["pre_send_compaction"] = pre_send_compaction; }
+    if queued {
+        receipt["transport"] = json!("codex_queue");
+    }
+    if pre_send_compaction.is_object() {
+        receipt["pre_send_compaction"] = pre_send_compaction;
+    }
     if let Some(target) = session_graph::target_receipt(&record) {
         delivery::bind(&mut receipt, &record, &target);
         receipt["graph_target"] = target;
@@ -2199,6 +2240,13 @@ fn submit_core(
     let mut residue: Option<String> = None;
     let mut pasted_at = now();
     let result: Result<()> = (|| {
+        if let Some(queue) = &mut queue {
+            let id = queue.offer()?;
+            receipt["native_queued_message_id"] = json!(id);
+            receipt["status"] = json!("submitted");
+            receipt_index::persist(&receipt_path, &receipt)?;
+            return Ok(());
+        }
         pasted_at = now();
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
         deadline = std::time::Instant::now() + settle::WINDOW;

@@ -1734,6 +1734,12 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
         eprintln!("hgs is terminating this session; no new work or binding was admitted");
         return Ok(2);
     }
+    if codex_tasks::recover_main(&mut record, &event)? {
+        write(&mut record)?;
+        // Only exact accepted text in the held original native transcript can
+        // credit the old request; this different fresh prompt cannot do so.
+        input::acceptance::reconcile_locked(&mut record)?;
+    }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
@@ -1806,6 +1812,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
         }
         if sid != string(&record, "conversation_id") {
             clear_context::observe_start(&mut record, &event);
+            codex_tasks::main_changed(&mut record, sid);
             for key in [
                 "clear_context_request",
                 "compact_context_request",
@@ -1876,6 +1883,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
     keep_warm::observe(&mut record, &mut event, now());
+    if external_agents::main_codex_hook(&record) && codex_tasks::observe(&mut record, &event) {
+        // A newly created task can emit its own SessionStart immediately.
+        // Do not let a busy activity journal lose the main/task distinction.
+        write(&mut record)?;
+    }
     let seen_before = record["input_seen_at"].clone();
     let acceptance_allowed = input::acceptance::allows_hook(&record, &event);
     journal::update_activity(&mut record, &event);

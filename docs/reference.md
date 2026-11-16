@@ -9025,6 +9025,26 @@ own queue, the refusal says so. `agent_id` is supported only for
 verified DeepSeek continuable children. Questions carry request identity/hash
 through `pending_questions`; answers use the exact unchanged request.
 
+Codex can open independent interactive tasks in the same native process.
+Its own MCP create/fork results and addressed thread IDs keep those tasks
+separate from the tracked main conversation; their hooks cannot replace its
+Activity binding. Known task membership survives a main-context change in the
+same run and expires with a new run. For such a process, an ordinary send uses the running
+Codex version's exact-thread native queue, without `--resume`, after the
+existing identity and empty-composer checks. The original request is reserved
+before the one offer. A `codex_queue` receipt includes the exact native queued
+message UUID; submission still does not prove that the agent read it. A missing
+capability or uncertain result never falls back to terminal keys or replays the
+message. Pending settings, automatic continuation and terminal actions that
+cannot prove their selected task refuse before input.
+
+A legacy binding already replaced by a native task can recover only on a fresh
+prompt from the original supervised main conversation. Recovery requires its
+original held native history, first recorded start and a completed native MCP
+creation of the wrongly bound task. It saves the previous record privately and
+retains all original delivery receipts. A completion, inspection or output text
+claim alone cannot repair the binding or resend input.
+
 An inspection indexes the Codex question transcript and recovers earlier
 submitted answers from this session's question receipts within one shared
 one-second budget, saving its progress so the next inspection resumes. Its

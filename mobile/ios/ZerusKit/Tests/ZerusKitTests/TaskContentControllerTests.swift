@@ -55,6 +55,7 @@ import ZerusReplica
             try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
             let id = model.state!.id
             model.preparePicker(id) { _ in opened += 1 }; XCTAssertEqual(opened, 0); XCTAssertEqual(model.state?.busy, false)
+            try await wait(model, "refused picker physically settled") { !$0.busy }
             upload = true; var ticket: TaskContentPicker?
             model.preparePicker(id) { opened += 1; ticket = $0 }
             try await wait(model, "picker open") { _ in ticket != nil }

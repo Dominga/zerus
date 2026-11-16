@@ -4,6 +4,7 @@ use super::*;
 use ops::Operation;
 mod completion;
 mod recovery;
+mod rework;
 
 fn fixture() -> (
     Fixture,

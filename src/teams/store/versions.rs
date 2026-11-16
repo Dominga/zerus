@@ -18,7 +18,7 @@ allocations! {
     CORE_NATIVE_PERSON = 4;
     /// Published by zerus-63rru.161 slice 3 only with durable approval inputs.
     CORE_PUBLICATION = 5;
-    /// TODO(zerus-63rru.161 rework): implement, register and qualify this migration.
+    /// Activated by zerus-63rru.161 slice 4 only with its first SendBack fact.
     CORE_REWORK = 6;
     /// TODO(zerus-63rru.31 S2): implement, register and qualify the native execution floor.
     CORE_NATIVE_FLOOR = 7;
@@ -33,7 +33,7 @@ allocations! {
 
 // TODO(reserved PRs above): promote only with the real older-store migration
 // and its writer tests. Update these aliases and the controls below in that PR.
-pub(crate) const CORE_CURRENT: u32 = CORE_PUBLICATION;
+pub(crate) const CORE_CURRENT: u32 = CORE_REWORK;
 pub(crate) const TIMER_CURRENT: u32 = TIMER_KEY_REFUSAL_ORDER;
 
 #[cfg(test)]
@@ -51,7 +51,7 @@ mod tests {
         TIMER_HOLD_OWNERS,
         TIMER_KEY_REFUSAL_ORDER,
     ];
-    const RESERVED_CORE: &[u32] = &[CORE_REWORK, CORE_NATIVE_FLOOR];
+    const RESERVED_CORE: &[u32] = &[CORE_NATIVE_FLOOR];
 
     #[test]
     fn teams_store_version_registry_wiring() {
@@ -118,7 +118,7 @@ mod tests {
                 0x8000_000c
             ]
         );
-        assert_eq!(CORE_CURRENT, CORE_PUBLICATION);
+        assert_eq!(CORE_CURRENT, CORE_REWORK);
         assert_eq!(super::super::LEGACY_QUEUE_LAYOUT, CORE_LEGACY);
         assert_eq!(super::super::LEGACY_PLANNING_LAYOUT, CORE_PLANNING);
         assert_eq!(TIMER_CURRENT, TIMER_KEY_REFUSAL_ORDER);

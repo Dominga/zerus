@@ -20,6 +20,16 @@ pub(crate) fn load(
     phase: u32,
     revision: u64,
 ) -> Result<PhaseNodeSnapshot> {
+    load_except(db, team, phase, revision, None)
+}
+
+pub(crate) fn load_except(
+    db: &Connection,
+    team: &str,
+    phase: u32,
+    revision: u64,
+    excluded: Option<&str>,
+) -> Result<PhaseNodeSnapshot> {
     let mut answer = PhaseNodeSnapshot {
         phase,
         revision,
@@ -65,14 +75,7 @@ pub(crate) fn load(
         }
         answer.nodes.push(node);
     }
-    if let Some(p) = publication::publication(db, team, phase)? {
-        if p.state != "published" || p.total == 0 || p.total != p.created {
-            answer.complete = false;
-        }
-        let missing: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM phase_publication_nodes p WHERE p.publication=?1 AND (NOT EXISTS(SELECT 1 FROM node_identity i WHERE i.team=p.team AND i.id=p.node AND i.task_uuid=p.task_uuid) OR NOT EXISTS(SELECT 1 FROM nodes n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid UNION ALL SELECT 1 FROM node_archive n WHERE n.team=p.team AND n.id=p.node AND json_extract(n.data,'$.phase')=?2 AND json_extract(n.data,'$.task.uuid')=p.task_uuid)))",params![p.id, phase],|r|r.get(0)).map_err(storage)?;
-        answer.complete &= !missing;
-    } else {
-        answer.complete = false;
-    }
+    let unsettled:bool=db.query_row("SELECT NOT EXISTS(SELECT 1 FROM phase_publications WHERE team=?1 AND phase=?2 AND (?3 IS NULL OR id<>?3)) OR EXISTS(SELECT 1 FROM phase_publications p WHERE p.team=?1 AND p.phase=?2 AND (?3 IS NULL OR p.id<>?3) AND (p.state<>'published' OR NOT EXISTS(SELECT 1 FROM phase_publication_nodes n WHERE n.publication=p.id) OR EXISTS(SELECT 1 FROM phase_publication_nodes n WHERE n.publication=p.id AND (n.state<>'created' OR n.reason<>'' OR NOT EXISTS(SELECT 1 FROM node_identity i WHERE i.team=n.team AND i.id=n.node AND i.task_uuid=n.task_uuid) OR NOT EXISTS(SELECT 1 FROM nodes v WHERE v.team=n.team AND v.id=n.node AND json_extract(v.data,'$.phase')=?2 AND json_extract(v.data,'$.task.uuid')=n.task_uuid UNION ALL SELECT 1 FROM node_archive v WHERE v.team=n.team AND v.id=n.node AND json_extract(v.data,'$.phase')=?2 AND json_extract(v.data,'$.task.uuid')=n.task_uuid)))))",params![team,phase,excluded],|r|r.get(0)).map_err(storage)?;
+    answer.complete &= !unsettled;
     Ok(answer)
 }

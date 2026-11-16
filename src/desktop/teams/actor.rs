@@ -31,6 +31,7 @@ mod retry;
 mod schedule;
 mod tasks;
 mod publication;
+mod rework;
 mod project_limit;
 mod terminal;
 #[cfg(test)]

@@ -25,6 +25,8 @@ mod providers;
 mod publication;
 mod reads;
 mod recorded_timings;
+#[cfg(unix)]
+mod rework;
 mod session_groups;
 mod status_items;
 mod storage_failure;

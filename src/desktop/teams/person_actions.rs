@@ -17,9 +17,9 @@ pub(crate) fn required() -> zerus_team_plan::Problem {
     )
 }
 
-/// Read-only seam for the existing Linux real-publication fixtures. It
+/// Read-only seam for the existing Unix real-publication fixtures. It
 /// constructs no native admission and grants no Person authority.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 pub(crate) fn phase_facts_fixture(
     config: &crate::config::Config,
     db: &rusqlite::Connection,

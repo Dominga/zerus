@@ -648,7 +648,7 @@ pub enum Phase {
     Queued,
     Running,
     /// The CLI's own receipt of this exact request says `submitted`: the
-    /// input was submitted to the terminal. Never proof that the agent read
+    /// input was submitted to the selected native input route. Never proof that the agent read
     /// or answered it.
     Recorded,
     /// Only at the closed no-spawn boundary ([`NOT_STARTED`]): nothing ran.
@@ -688,6 +688,8 @@ struct CliReceipt {
     status: String,
     transport: String,
     #[serde(default)]
+    native_queued_message_id: Option<String>,
+    #[serde(default)]
     refusal_schema: Option<u32>,
 }
 impl Outcome {
@@ -713,7 +715,9 @@ impl Outcome {
             && receipt.run_id == plan.run_id
             && receipt.conversation_id == plan.conversation_id
             && receipt.digest == plan.input_sha256
-            && receipt.transport == "terminal";
+            && (receipt.transport == "terminal"
+                || (receipt.transport == "codex_queue"
+                    && receipt.native_queued_message_id.as_deref().is_some_and(uuid)));
         if !exact || receipt.refusal_schema.is_some() {
             return Err(RECEIPT_MISMATCH);
         }

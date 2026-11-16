@@ -250,7 +250,10 @@ fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
                 && receipt["first_message"] == true
                 && receipt["conversation_id"].as_str() == Some("")))
         || receipt["submitted_at"] != record["input_pending_at"]
-        || receipt["transport"] != "terminal"
+        || !(receipt["transport"] == "terminal"
+            || (record["agent"] == "codex" && receipt["transport"] == "codex_queue"
+                && uuid::Uuid::parse_str(string(&receipt, "native_queued_message_id"))
+                    .is_ok_and(|id| !id.is_nil() && id.to_string() == string(&receipt, "native_queued_message_id"))))
         || string(&receipt, "submitted_text").is_empty()
         || digest.len() != 64
         || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())

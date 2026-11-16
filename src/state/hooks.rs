@@ -1734,6 +1734,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
         eprintln!("hgs is terminating this session; no new work or binding was admitted");
         return Ok(2);
     }
+    if codex_tasks::recover_main(&mut record, &event)? {
+        write(&mut record)?;
+    }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         if scoped["hgs_retired_external_hook"] == true { return Ok(0); }
         processes::observe(&mut record, &scoped);
@@ -1812,6 +1815,7 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
                 "prompt",
                 "last_message",
                 "subagents",
+                "codex_native_tasks",
                 "subagent_retirements",
                 "subagents_ended_pruned",
                 "active_tools",
@@ -1876,6 +1880,11 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     tasks::observe(&mut record, &event);
     processes::observe(&mut record, &event);
     keep_warm::observe(&mut record, &mut event, now());
+    if codex_tasks::observe(&mut record, &event) {
+        // A newly created task can emit its own SessionStart immediately.
+        // Do not let a busy activity journal lose the main/task distinction.
+        write(&mut record)?;
+    }
     let seen_before = record["input_seen_at"].clone();
     let acceptance_allowed = input::acceptance::allows_hook(&record, &event);
     journal::update_activity(&mut record, &event);

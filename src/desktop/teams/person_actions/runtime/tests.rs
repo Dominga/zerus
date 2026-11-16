@@ -321,6 +321,27 @@ fn native_task_original_is_reserved_before_document_and_only_its_receipt_recover
     assert_eq!(original["reply"]["ok"], true, "{original}");
     assert_eq!(original["reply"]["task"]["uuid"], draft.request_id);
     assert_eq!(original["reply"]["team"]["queued"], true, "{original}");
+    let db = h.store.db.as_ref().unwrap();
+    let mut query = db.prepare("SELECT id,content FROM requests WHERE team=?1 AND json_extract(content,'$.op')='observe_task'").unwrap();
+    let observations: Vec<(String, String)> = query
+        .query_map([TEAM], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        observations.len(),
+        1,
+        "the admitted queue has one initial observation original"
+    );
+    let observation: ops::Request = serde_json::from_str(&observations[0].1).unwrap();
+    assert_eq!(observations[0].0, observation.request_id);
+    assert_ne!(
+        observation.request_id, draft.request_id,
+        "observation custody cannot spend the intake UUID"
+    );
+    let saved = store::person_actions::original(db, &review.intent).unwrap();
+    assert_eq!(saved.request.request_id, draft.request_id);
+    assert_eq!(saved.result, Some(original["reply"].clone()));
     let project =
         zerus_replica::ProjectStore::open(&h.temp.path().join("replica"), "example-project")
             .unwrap();

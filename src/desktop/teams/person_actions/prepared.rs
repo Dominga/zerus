@@ -15,6 +15,7 @@ use zerus_client_core::{desktop::team_person_actions as wire, teams::action::Tea
 use zerus_team_plan::{model::Team, problem::code, Problem};
 
 type Result<T> = std::result::Result<T, Problem>;
+mod phases;
 
 pub(super) struct Prepared {
     pub plan: Arc<wire::Plan>,
@@ -207,11 +208,13 @@ impl Prepared {
             ("member","members","id","data,state,person_stopped,machine,session_id",65536),
             ("card","cards","seq","kind,node,actor,text,notes,state,decision,decided_actor,created_ms,decision_seq,parameters,decisions",49152),
             ("item","inbox","seq","kind,node,generation,actor,text,notes,state,reply,reply_actor,created_ms",49152),
-            ("phase","phases","n","data",262144),
         ] {
             if let Some(value) = fields.get(field) {
                 facts.push(point(db,table,"team",id,Some((key,value)),columns,bound)?);
             }
+        }
+        if let wire::Action::Team { change } = &self.plan.action {
+            facts.extend(phases::capture(db, id, change)?);
         }
         let current = if team.is_null() {
             None

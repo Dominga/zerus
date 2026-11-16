@@ -22,6 +22,20 @@ fn waiting_with_approval(
     String,
     Vec<crate::teams::store::publication::PlannedTaskRequest>,
 ) {
+    waiting_with_input(policy, approval, |first| {
+        ops::publication::tests::input(&[first, first + 1])
+    })
+}
+
+fn waiting_with_input(
+    policy: Acceptance,
+    approval: zerus_team_plan::Approval,
+    input: impl FnOnce(u32) -> zerus_team_plan::draft::DraftInput,
+) -> (
+    Fixture,
+    String,
+    Vec<crate::teams::store::publication::PlannedTaskRequest>,
+) {
     let mut f = Fixture::new();
     f.h.settings(|s| {
         s.integration = Integration::None;
@@ -34,7 +48,7 @@ fn waiting_with_approval(
         &person(),
         Operation::SubmitDraftPhase {
             phase: 1,
-            draft: ops::publication::tests::input(&[first, first + 1]),
+            draft: input(first),
         },
     )
     .unwrap();
@@ -54,10 +68,20 @@ fn waiting_with_approval(
             .publication
             .unwrap()
             .id;
-    let requests = f.h.store.publication_work(TEAM).unwrap();
-    for r in &requests {
-        write(&f, r).unwrap();
+    let mut requests = Vec::new();
+    // The production work page is four originals. Drain bounded pages for
+    // the large-source control instead of treating its first page as whole.
+    for _ in 0..50 {
+        let page = f.h.store.publication_work(TEAM).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        for r in page {
+            assert_eq!(write(&f, &r).unwrap(), "created");
+            requests.push(r);
+        }
     }
+    assert!(f.h.store.publication_work(TEAM).unwrap().is_empty());
     f.h.run(
         &ops::tests::service(),
         Operation::ReconcilePublication {
@@ -337,6 +361,249 @@ fn send_back(f: &mut Fixture, p: &str) -> String {
     )
     .unwrap();
     f.h.store.phase_draft(TEAM, 1).unwrap().rework.unwrap().id
+}
+
+fn consent_source_fixture(
+    approved: bool,
+) -> (
+    Fixture,
+    zerus_client_core::desktop::team_person_actions::Plan,
+    String,
+    u32,
+) {
+    let (mut f, base, _) = waiting(Acceptance::Person);
+    let episode = send_back(&mut f, &base);
+    let next = f.h.store.next_draft_node(TEAM).unwrap();
+    f.h.run(
+        &person(),
+        Operation::SubmitPhaseCorrections {
+            phase: 1,
+            publication: base.clone(),
+            rework: episode.clone(),
+            draft: ops::publication::tests::input(&[next]),
+        },
+    )
+    .unwrap();
+    let publication = if approved {
+        f.h.run(
+            &person(),
+            Operation::ApprovePhaseCorrections {
+                phase: 1,
+                publication: base.clone(),
+                rework: episode.clone(),
+                generation: 2,
+            },
+        )
+        .unwrap();
+        f.h.store
+            .phase_draft(TEAM, 1)
+            .unwrap()
+            .rework
+            .unwrap()
+            .draft
+            .unwrap()
+            .publication
+            .unwrap()
+            .id
+    } else {
+        base.clone()
+    };
+    let plan = zerus_client_core::desktop::team_person_actions::Plan {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: TEAM.into(),
+        expected_revision: f.h.store.team(TEAM).unwrap().unwrap().revision,
+        action: zerus_client_core::desktop::team_person_actions::Action::Team {
+            change: Box::new(
+                zerus_client_core::teams::action::TeamAction::ApprovePhaseCorrections {
+                    phase: 1,
+                    publication: base,
+                    rework: episode,
+                    generation: 2,
+                },
+            ),
+        },
+    };
+    (f, plan, publication, next)
+}
+
+fn changed_source(
+    f: &Fixture,
+    plan: &zerus_client_core::desktop::team_person_actions::Plan,
+    sql: &str,
+    key: &dyn rusqlite::ToSql,
+) {
+    let tx =
+        f.h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .unchecked_transaction()
+            .unwrap();
+    let before =
+        crate::desktop::teams::person_actions::phase_facts_fixture(&f.config, &tx, plan).unwrap();
+    // Explicit negative fault injection changes an existing producer row
+    // without a team revision. No canonical row is invented by hand.
+    assert_eq!(tx.execute(sql, [key]).unwrap(), 1);
+    let after = crate::desktop::teams::person_actions::phase_facts_fixture(&f.config, &tx, plan);
+    assert!(
+        after.is_err() || after.unwrap() != before,
+        "the exact changed canonical source must stale native consent"
+    );
+}
+
+#[test]
+fn native_seven_consent_binds_the_exact_base_snapshot_before_custody() {
+    let (f, plan, base, _) = consent_source_fixture(false);
+    changed_source(&f, &plan,
+        "UPDATE phase_publications SET snapshot=json_set(snapshot,'$[0].title',replace(json_extract(snapshot,'$[0].title'),'Task','Mask')) WHERE id=?1", &base);
+}
+
+#[test]
+fn native_seven_consent_binds_the_separate_proposal_before_custody() {
+    let (f, plan, _, node) = consent_source_fixture(false);
+    changed_source(&f, &plan,
+        "UPDATE phase_draft_nodes SET data=json_set(data,'$.title',replace(json_extract(data,'$.title'),'Task','Mask')) WHERE id=?1", &node);
+}
+
+#[test]
+fn native_seven_consent_binds_the_exact_new_approval_snapshot_before_custody() {
+    let (f, plan, approval, _) = consent_source_fixture(true);
+    changed_source(&f, &plan,
+        "UPDATE phase_publications SET snapshot=json_set(snapshot,'$[0].title',replace(json_extract(snapshot,'$[0].title'),'Task','Mask')) WHERE id=?1", &approval);
+}
+
+#[test]
+fn native_seven_keeps_large_base_proposal_and_approval_as_separate_valid_sources() {
+    let (mut f, base, _) = waiting_with_input(
+        Acceptance::Person,
+        zerus_team_plan::Approval::Review,
+        |first| {
+            let mut draft =
+                ops::publication::tests::input(&(first..first + 10).collect::<Vec<_>>());
+            for node in &mut draft.nodes {
+                node.text = "b".repeat(15_000);
+            }
+            draft
+        },
+    );
+    let episode = send_back(&mut f, &base);
+    let first = f.h.store.next_draft_node(TEAM).unwrap();
+    let mut draft = ops::publication::tests::input(&(first..first + 10).collect::<Vec<_>>());
+    for node in &mut draft.nodes {
+        node.text = "p".repeat(15_000);
+    }
+    f.h.run(
+        &person(),
+        Operation::SubmitPhaseCorrections {
+            phase: 1,
+            publication: base.clone(),
+            rework: episode.clone(),
+            draft,
+        },
+    )
+    .unwrap();
+    let plan = zerus_client_core::desktop::team_person_actions::Plan {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: TEAM.into(),
+        expected_revision: f.h.store.team(TEAM).unwrap().unwrap().revision,
+        action: zerus_client_core::desktop::team_person_actions::Action::Team {
+            change: Box::new(
+                zerus_client_core::teams::action::TeamAction::ApprovePhaseCorrections {
+                    phase: 1,
+                    publication: base.clone(),
+                    rework: episode.clone(),
+                    generation: 2,
+                },
+            ),
+        },
+    };
+    let db = f.h.store.db.as_ref().unwrap();
+    let (base_bytes, proposal_bytes): (u64,u64) = db.query_row("SELECT (SELECT length(CAST(snapshot AS BLOB)) FROM phase_publications WHERE id=?1),(SELECT sum(length(CAST(data AS BLOB))) FROM phase_draft_nodes WHERE team=?2 AND phase=1)",params![base,TEAM],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert!(
+        base_bytes <= 262144 && proposal_bytes <= 262144 && base_bytes + proposal_bytes > 262144
+    );
+    crate::desktop::teams::person_actions::phase_facts_fixture(&f.config, db, &plan).unwrap();
+    f.h.run(
+        &person(),
+        Operation::ApprovePhaseCorrections {
+            phase: 1,
+            publication: base,
+            rework: episode,
+            generation: 2,
+        },
+    )
+    .unwrap();
+    let mut publishing = plan;
+    publishing.request_id = uuid::Uuid::new_v4().to_string();
+    publishing.expected_revision = f.h.store.team(TEAM).unwrap().unwrap().revision;
+    crate::desktop::teams::person_actions::phase_facts_fixture(
+        &f.config,
+        f.h.store.db.as_ref().unwrap(),
+        &publishing,
+    )
+    .unwrap();
+}
+
+#[test]
+fn native_seven_oversized_proposal_fault_is_unavailable_before_materializing_it() {
+    let (f, plan, _, node) = consent_source_fixture(false);
+    let tx =
+        f.h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .unchecked_transaction()
+            .unwrap();
+    let body: String = tx
+        .query_row(
+            "SELECT data FROM phase_draft_nodes WHERE team=?1 AND id=?2",
+            params![TEAM, node],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    value["text"] = json!("");
+    let overhead = serde_json::to_vec(&value).unwrap().len();
+    value["text"] = json!("x".repeat(262145 - overhead));
+    let body = serde_json::to_string(&value).unwrap();
+    assert_eq!(body.len(), 262145);
+    // Negative corruption only; the initial row was produced by Submit.
+    tx.execute(
+        "UPDATE phase_draft_nodes SET data=?3 WHERE team=?1 AND id=?2",
+        params![TEAM, node, body],
+    )
+    .unwrap();
+    assert!(
+        crate::desktop::teams::person_actions::phase_facts_fixture(&f.config, &tx, &plan).is_err()
+    );
+}
+
+#[test]
+fn native_seven_oversized_original_request_fault_is_unavailable_at_its_own_bound() {
+    let (f, plan, base, _) = consent_source_fixture(false);
+    let tx =
+        f.h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .unchecked_transaction()
+            .unwrap();
+    let (node,body):(u32,String)=tx.query_row("SELECT node,request FROM phase_publication_nodes WHERE publication=?1 ORDER BY node LIMIT 1",[&base],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    value["text"] = json!("");
+    let overhead = serde_json::to_vec(&value).unwrap().len();
+    value["text"] = json!("x".repeat(530001 - overhead));
+    let body = serde_json::to_string(&value).unwrap();
+    assert_eq!(body.len(), 530001);
+    // Negative corruption of an existing original, not a hand-built seed.
+    tx.execute(
+        "UPDATE phase_publication_nodes SET request=?3 WHERE publication=?1 AND node=?2",
+        params![base, node, body],
+    )
+    .unwrap();
+    assert!(
+        crate::desktop::teams::person_actions::phase_facts_fixture(&f.config, &tx, &plan).is_err()
+    );
 }
 
 #[test]

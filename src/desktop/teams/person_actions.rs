@@ -16,3 +16,16 @@ pub(crate) fn required() -> zerus_team_plan::Problem {
         "Perform this team action in the Zerus window after native confirmation.",
     )
 }
+
+/// Read-only seam for the existing Linux real-publication fixtures. It
+/// constructs no native admission and grants no Person authority.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn phase_facts_fixture(
+    config: &crate::config::Config,
+    db: &rusqlite::Connection,
+    plan: &zerus_client_core::desktop::team_person_actions::Plan,
+) -> Result<String, zerus_team_plan::Problem> {
+    prepared::Prepared::resolve(config, std::sync::Arc::new(plan.clone()))?
+        .bound_facts(db, Some(config))
+        .map(|(_, facts)| facts)
+}

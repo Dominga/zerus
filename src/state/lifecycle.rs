@@ -25,6 +25,26 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
     Ok(agent_help(executable)?.split_whitespace().any(|word| word == "--no-daemon"))
 }
 
+/// WhiteWh fork (owner, 2026-11-17): Qwen Code's default "virtualized
+/// history" draws the whole screen on every frame and turns on mouse tracking.
+/// In a Zerus terminal a wheel scroll then moved both views, and a frame that
+/// came out a few rows taller than the pane scrolled it each time: the whole
+/// terminal shook. Its sessions start with Qwen Code's own scrollback
+/// rendering instead, as a default in `QWEN_CODE_SYSTEM_DEFAULTS_PATH`, which
+/// the user's own settings still override. A path the user set is kept.
+fn qwen_defaults() -> Result<()> {
+    if nonempty_env("QWEN_CODE_SYSTEM_DEFAULTS_PATH").is_some() {
+        return Ok(());
+    }
+    let path = root().join("qwen-defaults.json");
+    let wanted = "{\"ui\":{\"useTerminalBuffer\":false}}\n";
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted) {
+        atomic(&path, wanted)?;
+    }
+    std::env::set_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH", &path);
+    Ok(())
+}
+
 pub(super) fn agent_help(executable: &str) -> Result<String> {
     use std::process::Stdio;
     // Probe capabilities without starting a conversation or inheriting a hook identity.
@@ -126,6 +146,9 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         // another security session. Join immediately before the native launch.
         let _ = crate::macos_session::join();
         crate::accounts::prepare_claude_settings().map_err(|e|e.message)?;
+    }
+    if agent == "qwen" {
+        qwen_defaults()?;
     }
     crate::accounts::prepare_mcp_servers(&agent).map_err(|e|e.message)?;
     // A PowerShell interpreter is not an agent version witness. Keep the

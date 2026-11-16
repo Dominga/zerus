@@ -36,6 +36,15 @@ session resumes with `qwen --resume ID`, Zerus's bypass mode passes
 `native-qwen`, listed wherever `qwen` is installed). An account of
 `--provider qwen` signs in inside Qwen Code itself (`/auth`).
 
+Zerus starts Qwen Code with its scrollback rendering: `ui.useTerminalBuffer` is
+false in a defaults file that `QWEN_CODE_SYSTEM_DEFAULTS_PATH` names
+(`qwen-defaults.json` in the state folder). Qwen Code's default "virtualized
+history" redraws the whole screen on every frame and tracks the mouse, so in a
+Zerus terminal a wheel scroll moved both views and the pane shook. The user's own
+Qwen settings still override it, and a `QWEN_CODE_SYSTEM_DEFAULTS_PATH` the user
+set is kept. A Qwen subscription account shows its plan (Lite, Plus or Pro) in
+the composer's chip; Qwen reports its credits only once they run out.
+
 Activity, conversation history and search read the person's prompts and the
 model's replies (without its thoughts or tool calls) from Qwen Code's
 `projects/<folder>/chats/<id>.jsonl`. Clear input reads and clears its draft, and

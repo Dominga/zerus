@@ -55,6 +55,20 @@ fn digest(path: &Path) -> String {
     format!("{:x}", hash.finalize())
 }
 
+/// Owner, 2026-11-16 (build 205): a running GUI sets ZERUS_CLIENT_HGS to the
+/// CLI beside it for its own children, and an older build's update helper
+/// passed that on to the new build. Taken as a chosen CLI it skipped the
+/// session host install and this app's binding, so the takeover failed and the
+/// update was rolled back. The CLI beside this app is the default anyway: a
+/// value naming it chooses nothing and the normal checks run.
+fn inherited_adjacent(value: &Path, adjacent: Option<&Path>) -> bool {
+    let Some(adjacent) = adjacent else { return false };
+    match (std::fs::canonicalize(value), std::fs::canonicalize(adjacent)) {
+        (Ok(value), Ok(adjacent)) => value == adjacent,
+        _ => false,
+    }
+}
+
 pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
     let executable = std::env::current_exe().ok();
     let adjacent = executable
@@ -66,6 +80,7 @@ pub fn select_hgs(configured: Option<&Path>, installed: bool) -> PathBuf {
         std::env::var_os("ZERUS_CLIENT_HGS")
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
+            .filter(|p| !inherited_adjacent(p, adjacent.as_deref()))
     });
     let selected = original
         .clone()
@@ -242,6 +257,18 @@ fn set_login_item(key: &str, value: &str, command: Option<&str>) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn an_inherited_cli_beside_the_app_chooses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let beside = dir.path().join("hgs.exe");
+        let other = dir.path().join("other").join("hgs.exe");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&beside, b"cli").unwrap();
+        std::fs::write(&other, b"cli").unwrap();
+        assert!(inherited_adjacent(&beside, Some(&beside)));
+        assert!(!inherited_adjacent(&other, Some(&beside)));
+        assert!(!inherited_adjacent(&beside, None));
+    }
     #[test]
     fn restart_line_does_not_inject_an_empty_program_argument() {
         let args = crate::windows_shell::restart_arguments(&[

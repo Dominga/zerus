@@ -77,7 +77,7 @@ fn produced_mode(rework: bool) -> Value {
         body.insert("request_id".into(), json!(uid(900 + h.revision() as u32)));
         body.insert("team".into(), json!(TEAM));
         body.insert("expected_revision".into(), json!(h.revision()));
-        let (v, exit) = h.cli(&Caller::Person, name, &Value::Object(body).to_string());
+        let (v, exit) = h.native_command(name, &Value::Object(body).to_string());
         assert_eq!(exit, 0, "{v}");
     };
     command(

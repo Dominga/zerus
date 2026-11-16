@@ -400,6 +400,23 @@ current-layout leaf is unavailable and must not be reconstructed. Both
 writer-lock orderings and a connection opened before activation need explicit
 controls before final integration.
 
+Cumulative installation from native 4 or publication 5 without Send back
+installs the complete rework prerequisite inside the same writer transaction.
+It retains the 65,536-publication and 256 MiB preflight and raw parent rebuild,
+without decoding/re-encoding original snapshots or inventing an episode.
+A late failure rolls back the floor, prerequisites and raw rows together.
+
+Phase consent binds separate exact canonical sources: the selected episode
+and its retained BASE, the proposal (at most 200 rows and 262,144 aggregate
+bytes), and any reserved NEW approval (262,144 bytes per snapshot). Each
+saved original request retains its separate 530,000-byte bound; episode
+header/comment bounds are 4,096/16,384 bytes. The frontend's 250,000-byte
+input bound is distinct. Before consent and under writer custody, the same
+source identities and digests must match. A published correction switches
+current selection to NEW; the prior episode's BASE remains historical evidence,
+never a replacement for the current publication. Future controls must enroll
+their own identities explicitly; this slice does not grant unknown operations.
+
 Intake is a compound metadata action. Project locks precede the Teams writer
 lock. Native admission and a durable exact-request reservation must precede
 any task/document write. Only its live, nonserializable original custody may

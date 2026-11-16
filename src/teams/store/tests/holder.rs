@@ -104,5 +104,5 @@ fn attempt_lookup_uses_its_index_and_an_old_version_two_file_gains_it_on_open() 
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, crate::teams::store::NATIVE_PERSON_LAYOUT);
+    assert_eq!(version, crate::teams::store::SCHEMA_VERSION);
 }

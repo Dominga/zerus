@@ -61,7 +61,7 @@ fn a_version_two_store_gets_empty_pipeline_storage_on_open_without_a_migration()
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, crate::teams::store::NATIVE_PERSON_LAYOUT);
+    assert_eq!(version, crate::teams::store::SCHEMA_VERSION);
     h.bind("m1");
     let parent = h.add(&person(), 1);
     h.submit(parent, "m1");

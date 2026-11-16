@@ -739,8 +739,8 @@ tool approvals.
 - Person team decisions and mutations require explicit native confirmation in
   the Zerus window on the computer that owns the team. This includes owner-card
   **Decide**, Create, Start planning, team settings and membership, dependencies,
-  advance-base, queue and phase decisions, and sending or creating a task for a
-  team. A person's CLI command for these actions returns
+  advance-base, queue and phase decisions (including Send back and correction
+  approval/rejection), and sending or creating a task for a team. A person's CLI command for these actions returns
   `person_gesture_required`, including remote commands. Independently proved
   lead/member commands and service facts retain their existing scope.
 - A CLI Person claim or renderer `confirmed` flag grants no permission. The

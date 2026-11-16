@@ -219,7 +219,7 @@ fn approval_freezes_original_requests_and_does_not_publish_partial_tasks() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::layout::PUBLICATION
+        store::versions::CORE_NATIVE_FLOOR
     );
 }
 
@@ -354,7 +354,7 @@ fn another_planning_team_cannot_lower_the_publication_floor() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::layout::PUBLICATION
+        store::versions::CORE_NATIVE_FLOOR
     );
     assert_eq!(
         h.store.team(TEAM_B).unwrap().unwrap().status,
@@ -496,12 +496,12 @@ fn publication_has_its_own_floor_and_keeps_native_person_identity_and_receipts()
         (version, nonce, receipts)
     };
     let before = snapshot(&h.store);
-    assert_eq!(before.0, store::layout::NATIVE_PERSON);
+    assert_eq!(before.0, store::versions::CORE_NATIVE_FLOOR);
     assert_eq!(before.2.len(), 1);
     reserved(&mut h, &[1]);
     let reopened = Store::open(h.temp.path()).unwrap();
     let after = snapshot(&reopened);
-    assert_eq!(after.0, store::layout::PUBLICATION);
+    assert_eq!(after.0, store::versions::CORE_NATIVE_FLOOR);
     assert_eq!((after.1, after.2), (before.1, before.2));
     Store::person_evidence(h.temp.path()).expect("a publication keeps the native leaf readable");
 }

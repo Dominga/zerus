@@ -308,6 +308,14 @@ impl Fixture {
         Self::with_agent("codex")
     }
     fn with_agent(agent: &str) -> Self {
+        Self::with_intake_seed(agent, true)
+    }
+    // Explicit historical fixture: an independently bound lead queues the
+    // initial task, so there is no new Person-original evidence to erase.
+    fn with_legacy_session_intake() -> Self {
+        Self::with_intake_seed("codex", false)
+    }
+    fn with_intake_seed(agent: &str, native_person: bool) -> Self {
         let h = Harness::empty();
         let config = Config {
             home: h.temp.path().display().to_string(),
@@ -387,7 +395,11 @@ impl Fixture {
             &crate::teams::tasks::Caller {
                 state: &f.config.state,
                 machine: &home,
-                actor: Actor::Person,
+                actor: if native_person {
+                    Actor::Person
+                } else {
+                    Actor::Agent(f.lead.clone())
+                },
             },
             &f.task,
             TEAM,

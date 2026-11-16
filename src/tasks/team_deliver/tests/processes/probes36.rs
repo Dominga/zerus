@@ -705,12 +705,38 @@ fn an_exhausted_older_build_intake_is_retryable_busy_and_changes_nothing() {
     };
     let sql_before = f.h.store.team(TEAM).unwrap().unwrap().revision;
     let sent = std::fs::read(f.h.temp.path().join("submissions")).unwrap();
-    let answer = zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
-        intake(&f, &uuid, TEAM, "temporary proof exhaustion")
-    });
+    let answer =
+        zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+            let error = crate::teams::tasks::send(
+                &crate::teams::tasks::Caller {
+                    state: &f.config.state,
+                    machine: &crate::swarm::local_node_id(&f.config).unwrap(),
+                    actor: Actor::Agent(zerus_replica::SessionKey {
+                        machine: f.lead.machine.clone(),
+                        session_id: f.lead.session_id.clone(),
+                        session: "codex/private-intake-lead".into(),
+                    }),
+                },
+                &TaskRef {
+                    project: "example-project".into(),
+                    uuid: uuid.clone(),
+                },
+                TEAM,
+                None,
+                None,
+            )
+            .unwrap_err();
+            json!({"error":{"code":error.code,"message":error.message}})
+        });
     assert_eq!(answer["error"]["code"], "store_busy", "{answer}");
-    assert!(answer["error"]["message"].as_str().unwrap().contains("try again"));
-    assert_eq!(std::fs::read(f.h.temp.path().join("submissions")).unwrap(), sent);
+    assert!(answer["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("try again"));
+    assert_eq!(
+        std::fs::read(f.h.temp.path().join("submissions")).unwrap(),
+        sent
+    );
     assert_eq!(f.h.store.team(TEAM).unwrap().unwrap().revision, sql_before);
     let store = crate::tasks::store(&f.config, "example-project").unwrap();
     assert_eq!(store.load(&uuid).unwrap().snapshot().unwrap(), before);

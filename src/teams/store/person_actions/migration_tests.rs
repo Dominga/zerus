@@ -182,3 +182,90 @@ fn native_seven_rejects_partial_current_evidence_before_open_or_original_replay(
         );
     }
 }
+
+/// Operation-written publication rows, with only the empty post-publication
+/// schema reduced. This is a schema fixture, not a historical executable.
+pub(crate) fn publication_five(h: &Harness) {
+    let db = h.store.db.as_ref().unwrap();
+    for table in ["person_action_originals", "phase_reworks"] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            0,
+            "historical schema fixture cannot erase {table} evidence"
+        );
+    }
+    let tx = db.unchecked_transaction().unwrap();
+    for (name, kind, _) in OBJECTS.iter().rev() {
+        tx.execute_batch(&format!("DROP {kind} {name}")).unwrap();
+    }
+    // The old parent allowed one publication per phase. Restore that schema
+    // from the same raw rows before exercising the actual bounded rebuild.
+    tx.execute_batch(
+        "PRAGMA defer_foreign_keys=ON;
+        DROP TABLE phase_reworks;
+        CREATE TEMP TABLE native7_publication_fixture AS SELECT * FROM phase_publications;
+        DROP TABLE phase_publications;
+        CREATE TABLE phase_publications (
+          id TEXT PRIMARY KEY, team TEXT NOT NULL, phase INTEGER NOT NULL,
+          generation INTEGER NOT NULL, snapshot TEXT NOT NULL, initial INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('reserved','published')), created_ms INTEGER NOT NULL,
+          UNIQUE(team,phase), FOREIGN KEY(team,phase) REFERENCES phases(team,n));
+        INSERT INTO phase_publications SELECT * FROM native7_publication_fixture;
+        DROP TABLE native7_publication_fixture;
+        CREATE INDEX phase_publication_pending ON phase_publications(team,state,phase);",
+    )
+    .unwrap();
+    tx.pragma_update(None, "user_version", versions::CORE_PUBLICATION)
+        .unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn native_seven_late_storage_failure_rolls_back_floor_objects_and_native_receipts() {
+    use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+    let mut h = Harness::new();
+    native_receipt(&mut h);
+    native_four(&h);
+    let db = h.store.db.as_mut().unwrap();
+    let before = kept(db);
+    let schema = |db: &Connection| {
+        db.prepare("SELECT json_array(type,name,sql) FROM sqlite_master ORDER BY type,name")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before_schema = schema(db);
+    db.authorizer(Some(|context: AuthContext<'_>| {
+        if matches!(
+            context.action,
+            AuthAction::CreateTable {
+                table_name: "person_action_originals"
+            }
+        ) {
+            Authorization::Deny
+        } else {
+            Authorization::Allow
+        }
+    }));
+    let problem = super::super::initialize(db).unwrap_err();
+    db.authorizer(Some(|_: AuthContext<'_>| Authorization::Allow));
+    assert_eq!(
+        db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+            .unwrap(),
+        versions::CORE_NATIVE_PERSON
+    );
+    assert_eq!(kept(db), before);
+    assert_eq!(
+        schema(db),
+        before_schema,
+        "late failure rolls back the parent rebuild and every prerequisite"
+    );
+    assert_eq!(problem.code, code::STORAGE_FAILED);
+    super::super::initialize(db).unwrap();
+    super::super::native_floor::validate(db).unwrap();
+    assert_eq!(kept(db), before);
+}

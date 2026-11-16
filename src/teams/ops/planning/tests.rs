@@ -53,7 +53,7 @@ fn planning_creation_is_replayed_without_tasks_or_member_effects() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT
+        store::SCHEMA_VERSION
     );
     let reopened = Store::open(h.temp.path()).unwrap();
     assert_eq!(
@@ -82,7 +82,7 @@ fn only_a_person_can_start_planning_and_an_empty_goal_is_refused() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT,
+        store::SCHEMA_VERSION,
         "a refused plan leaves the already established native writer fence unchanged"
     );
 }
@@ -147,7 +147,7 @@ fn ordinary_create_keeps_its_wire_shape_and_status_at_the_current_schema() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT
+        store::SCHEMA_VERSION
     );
     assert_eq!(serde_json::to_value(create()).unwrap(), before);
 }
@@ -268,6 +268,6 @@ fn export_planning_compatibility_fixture() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, store::NATIVE_PERSON_LAYOUT);
+    assert_eq!(version, store::SCHEMA_VERSION);
     println!("compatibility fixture {mode}, schema {version}");
 }

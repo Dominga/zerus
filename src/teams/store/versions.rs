@@ -20,7 +20,7 @@ allocations! {
     CORE_PUBLICATION = 5;
     /// Activated by zerus-63rru.161 slice 4 only with its first SendBack fact.
     CORE_REWORK = 6;
-    /// TODO(zerus-63rru.31 S2): implement, register and qualify the native execution floor.
+    /// Cumulative native admission fences every older Person writer.
     CORE_NATIVE_FLOOR = 7;
     TIMER_BASE = 8;
     TIMER_ANSWERS = 9;
@@ -33,7 +33,7 @@ allocations! {
 
 // TODO(reserved PRs above): promote only with the real older-store migration
 // and its writer tests. Update these aliases and the controls below in that PR.
-pub(crate) const CORE_CURRENT: u32 = CORE_REWORK;
+pub(crate) const CORE_CURRENT: u32 = CORE_NATIVE_FLOOR;
 pub(crate) const TIMER_CURRENT: u32 = TIMER_KEY_REFUSAL_ORDER;
 
 #[cfg(test)]
@@ -51,7 +51,6 @@ mod tests {
         TIMER_HOLD_OWNERS,
         TIMER_KEY_REFUSAL_ORDER,
     ];
-    const RESERVED_CORE: &[u32] = &[CORE_NATIVE_FLOOR];
 
     #[test]
     fn teams_store_version_registry_wiring() {
@@ -118,7 +117,7 @@ mod tests {
                 0x8000_000c
             ]
         );
-        assert_eq!(CORE_CURRENT, CORE_REWORK);
+        assert_eq!(CORE_CURRENT, CORE_NATIVE_FLOOR);
         assert_eq!(super::super::LEGACY_QUEUE_LAYOUT, CORE_LEGACY);
         assert_eq!(super::super::LEGACY_PLANNING_LAYOUT, CORE_PLANNING);
         assert_eq!(TIMER_CURRENT, TIMER_KEY_REFUSAL_ORDER);
@@ -162,10 +161,11 @@ mod tests {
             };
             let mut nonce = None;
             if from != UNINITIALIZED {
-                assert_eq!(core(&h), CORE_NATIVE_PERSON);
+                assert_eq!(core(&h), CORE_NATIVE_FLOOR);
                 if from == CORE_PLANNING {
                     h.run_for(TEAM_B, &person(), planning(TEAM_B)).unwrap();
                 }
+                super::super::person_actions::migration_tests::native_four(&h);
                 let db = h.store.db.as_ref().unwrap();
                 if keep_native {
                     nonce = Some(
@@ -182,13 +182,13 @@ mod tests {
                 db.pragma_update(None, "user_version", from).unwrap();
                 assert_eq!(core(&h), from);
                 h.store = Store::open(h.temp.path()).unwrap();
-                assert_eq!(core(&h), CORE_NATIVE_PERSON, "upgrade from {from}");
+                assert_eq!(core(&h), CORE_NATIVE_FLOOR, "upgrade from {from}");
             }
             let team = "00000000-0000-4000-8000-00000000cafe";
             h.run_for(team, &person(), planning(team)).unwrap();
-            assert_eq!(core(&h), CORE_NATIVE_PERSON, "from {from}");
+            assert_eq!(core(&h), CORE_NATIVE_FLOOR, "from {from}");
             h.store = Store::open(h.temp.path()).unwrap();
-            assert_eq!(core(&h), CORE_NATIVE_PERSON, "reopen from {from}");
+            assert_eq!(core(&h), CORE_NATIVE_FLOOR, "reopen from {from}");
             if let Some(nonce) = nonce {
                 let actual = h
                     .store
@@ -226,11 +226,11 @@ mod tests {
             Authorization::Allow
         }));
         super::super::initialize(&mut db).unwrap();
-        assert_eq!(*writes.lock().unwrap(), [CORE_LEGACY, CORE_NATIVE_PERSON]);
+        assert_eq!(*writes.lock().unwrap(), [CORE_LEGACY, CORE_NATIVE_FLOOR]);
         assert_eq!(
             db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            CORE_NATIVE_PERSON
+            CORE_NATIVE_FLOOR
         );
     }
 
@@ -238,7 +238,7 @@ mod tests {
     // changed to represent an unsupported/future writer, never application rows.
     #[test]
     fn teams_store_version_registry_reserved_core_layouts_remain_unimplemented() {
-        for version in std::iter::once(RETIRED_PREVIEW).chain(RESERVED_CORE.iter().copied()) {
+        for version in [RETIRED_PREVIEW, CORE_CURRENT + 1] {
             let h = Harness::new();
             h.store
                 .db
@@ -312,7 +312,7 @@ mod tests {
                 assert_eq!(marker(), TIMER_CURRENT | flag);
                 assert_eq!(
                     core(&h),
-                    CORE_NATIVE_PERSON,
+                    CORE_NATIVE_FLOOR,
                     "extension never changes the native core mark"
                 );
                 timers::observe_migrations();

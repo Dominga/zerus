@@ -85,13 +85,16 @@ fn set_deps_binds_revision_and_replays_one_receipt_and_journal_row() {
     let rev = h.store.team(TEAM).unwrap().unwrap().revision;
     let stale = request(rev - 1, deps(b, &[a]));
     refused(
-        apply(&mut h.store, &person(), &stale, 1234),
+        apply_fixture(&mut h.store, &person(), &stale, 1234),
         code::STALE_REVISION,
     );
     assert!(h.node(b).deps.is_empty());
     let req = request(rev, deps(b, &[a]));
-    let first = apply(&mut h.store, &person(), &req, 1234).unwrap();
-    assert_eq!(apply(&mut h.store, &person(), &req, 1235).unwrap(), first);
+    let first = apply_fixture(&mut h.store, &person(), &req, 1234).unwrap();
+    assert_eq!(
+        apply_fixture(&mut h.store, &person(), &req, 1235).unwrap(),
+        first
+    );
     let rows = h.store.journal(TEAM, 200, None).unwrap().rows;
     assert_eq!(rows.iter().filter(|row| row.kind == "set_deps").count(), 1);
     let changed = Request {
@@ -99,7 +102,7 @@ fn set_deps_binds_revision_and_replays_one_receipt_and_journal_row() {
         ..req
     };
     refused(
-        apply(&mut h.store, &person(), &changed, 1235),
+        apply_fixture(&mut h.store, &person(), &changed, 1235),
         code::DUPLICATE,
     );
 }
@@ -157,7 +160,7 @@ fn refuses_started_edit(h: &mut Harness, node: u32, dependency: u32) {
     );
     let revision = h.store.team(TEAM).unwrap().unwrap().revision;
     let req = request(revision, deps(node, &[dependency]));
-    let error = apply(&mut h.store, &person(), &req, 1234).unwrap_err();
+    let error = apply_fixture(&mut h.store, &person(), &req, 1234).unwrap_err();
     assert_eq!(error.code, code::INVALID_STATE);
     assert_eq!(error.message, PRESTART_CAUSE);
     assert_eq!(h.node(node), before);
@@ -175,7 +178,8 @@ fn refuses_started_edit(h: &mut Harness, node: u32, dependency: u32) {
         .unwrap();
     assert!(saved, "the refusal is stored under the original request ID");
     assert_eq!(
-        serde_json::to_value(apply(&mut h.store, &person(), &req, 1235).unwrap_err()).unwrap(),
+        serde_json::to_value(apply_fixture(&mut h.store, &person(), &req, 1235).unwrap_err())
+            .unwrap(),
         serde_json::to_value(error).unwrap(),
     );
 }

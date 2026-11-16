@@ -308,6 +308,6 @@ fn revocation_uses_pending_and_approval_indexes_and_an_older_v2_gains_the_index(
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        crate::teams::store::NATIVE_PERSON_LAYOUT
+        crate::teams::store::SCHEMA_VERSION
     );
 }

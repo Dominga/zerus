@@ -113,10 +113,10 @@ fn stopped_swap_retains_identity_checkout_and_old_receipts_without_replay() {
         stop(&mut h, target);
         let revision = h.store.team(TEAM).unwrap().unwrap().revision;
         let req = request(revision, swap(target));
-        let answer = ops::apply(&mut h.store, &person(), &req, 1234).unwrap();
+        let answer = ops::tests::apply_fixture(&mut h.store, &person(), &req, 1234).unwrap();
         assert_eq!(answer.member.as_deref(), Some(target));
         assert_eq!(
-            ops::apply(&mut h.store, &person(), &req, 1235).unwrap(),
+            ops::tests::apply_fixture(&mut h.store, &person(), &req, 1235).unwrap(),
             answer
         );
         assert!(h.store.member_handle(TEAM, target).unwrap().is_none());
@@ -272,13 +272,13 @@ fn swapping_requires_person_authority_and_preserves_saved_refusals() {
     let revision = h.store.team(TEAM).unwrap().unwrap().revision;
     let stale = request(revision - 1, swap("m1"));
     assert_eq!(
-        ops::apply(&mut h.store, &person(), &stale, 1234)
+        ops::tests::apply_fixture(&mut h.store, &person(), &stale, 1234)
             .unwrap_err()
             .code,
         code::STALE_REVISION
     );
     let req = request(revision, swap("m1"));
-    ops::apply(&mut h.store, &person(), &req, 1234).unwrap();
+    ops::tests::apply_fixture(&mut h.store, &person(), &req, 1234).unwrap();
     assert_eq!(
         h.store
             .member(TEAM, "m1")

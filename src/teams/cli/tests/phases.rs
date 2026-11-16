@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
 use serde_json::{json, Value};
@@ -15,7 +17,7 @@ fn input() -> Value {
 }
 fn produced() -> (Value, Value, Value) {
     let h = seed();
-    let (v,exit)=h.cli(&Caller::Person,"submit-draft-phase",&json!({"request_id":uid(700),"team":TEAM,"expected_revision":h.revision(),"phase":1,"draft":input()}).to_string());
+    let (v,exit)=h.native_command("submit-draft-phase",&json!({"request_id":uid(700),"team":TEAM,"expected_revision":h.revision(),"phase":1,"draft":input()}).to_string());
     assert_eq!(exit, 0, "{v}");
     let (list, e) = h.cli(&Caller::Person, &format!("phases --team {TEAM}"), "");
     assert_eq!(e, 0, "{list}");
@@ -62,7 +64,7 @@ fn phase_reads_and_edits_use_the_real_writer_and_refuse_members() {
     assert_eq!(v["draft"]["nodes"].as_array().unwrap().len(), 2);
     let mut next = input();
     next["title"] = json!("Edited by the person");
-    let (v,e)=h.cli(&Caller::Person,"edit-draft-phase",&json!({"request_id":uid(701),"team":TEAM,"expected_revision":h.revision(),"phase":1,"generation":1,"draft":next}).to_string());
+    let (v,e)=h.native_command("edit-draft-phase",&json!({"request_id":uid(701),"team":TEAM,"expected_revision":h.revision(),"phase":1,"generation":1,"draft":next}).to_string());
     assert_eq!(e, 0, "{v}");
     assert_eq!(
         h.store().phase_draft(TEAM, 1).unwrap().phase.title,
@@ -137,9 +139,7 @@ fn regenerate_phase_draft_fixtures() {
 #[test]
 fn review_probe_cursor_beyond_ceiling_is_refused() {
     let h = seed();
-    let (v, exit) = h.cli(
-        &Caller::Person,
-        "submit-draft-phase",
+    let (v, exit) = h.native_command("submit-draft-phase",
         &json!({"request_id":uid(700),"team":TEAM,"expected_revision":h.revision(),"phase":1,"draft":input()}).to_string(),
     );
     assert_eq!(exit, 0, "{v}");

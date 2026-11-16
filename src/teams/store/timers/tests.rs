@@ -48,9 +48,12 @@ fn a_reopened_store_keeps_its_timer_triggers_under_their_versioned_names() {
             "key_clear_terminal_v1",
             "member_handles_removed_v1",
             "member_handles_terminal_v1",
+            "person_action_original_immutable",
+            "person_action_original_kept",
             "person_gesture_store_immutable",
             "person_gesture_store_kept",
             "person_gestures_immutable",
+            "phase_rework_identity",
             "timer_cards_decided_v1",
             "timer_cards_item_v1"
         ],

@@ -60,11 +60,11 @@ fn only_the_person_edits_and_stale_or_replayed_requests_keep_identity() {
     }
     let revision = h.store.team(TEAM).unwrap().unwrap().revision;
     let r = request(revision, add());
-    let first = super::super::apply(&mut h.store, &person(), &r, 1234).unwrap();
-    let replay = super::super::apply(&mut h.store, &person(), &r, 2234).unwrap();
+    let first = super::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap();
+    let replay = super::apply_fixture(&mut h.store, &person(), &r, 2234).unwrap();
     assert_eq!(first, replay);
     refused(
-        super::super::apply(&mut h.store, &person(), &request(revision, add()), 3234),
+        super::apply_fixture(&mut h.store, &person(), &request(revision, add()), 3234),
         code::STALE_REVISION,
     );
     assert_eq!(h.store.members(TEAM, 200, None).unwrap().rows.len(), 5);

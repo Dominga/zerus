@@ -13,7 +13,7 @@ fn submitted(id: &str) {
 fn as_person(state: &Path, op: Operation) -> String {
     let mut store = Store::open(state).unwrap();
     let rev = store.team(TEAM).unwrap().unwrap().revision;
-    match ops::apply(
+    match ops::tests::apply_fixture(
         &mut store,
         &person(),
         &crate::teams::ops::tests::request(rev, op),
@@ -353,7 +353,7 @@ fn conflict_at_reopen(state: &Path, node: u32) {
     o.attempt_id.clear();
     o.attempt_conflict = true;
     let revision = store.team(TEAM).unwrap().unwrap().revision;
-    ops::apply(
+    ops::tests::apply_fixture(
         &mut store,
         &service(),
         &crate::teams::ops::tests::request(

@@ -129,6 +129,7 @@ mod task_forms;
 mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
+mod task_team;
 #[cfg(feature = "live")]
 mod team_drawers;
 #[cfg(feature = "live")]

@@ -1,6 +1,28 @@
 //! Base advances and hand-out pins through the operation writer.
 use super::*;
 
+pub(crate) fn apply_with_repository_fixture(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+) -> Result<Reply> {
+    if matches!(actor, Actor::Person { .. }) {
+        super::super::apply_with_native_context(
+            store,
+            actor,
+            request,
+            now,
+            None,
+            repository,
+            crate::desktop::teams::person_actions::kernel::Permit::fixture(actor, request),
+        )
+    } else {
+        super::super::apply_with_repository(store, actor, request, now, repository)
+    }
+}
+
 #[test]
 fn advance_base_is_a_revisioned_operation() {
     let value = serde_json::json!({
@@ -15,7 +37,7 @@ fn advance_base_is_a_revisioned_operation() {
     let mut h = Harness::new();
     // No trusted repository resolver: a raw operation must fail closed.
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &person(), &request, 1)
+        super::apply_fixture(&mut h.store, &person(), &request, 1)
             .unwrap_err()
             .code,
         code::INVALID_STATE
@@ -108,9 +130,7 @@ impl GitFixture {
         h
     }
     pub(crate) fn apply(&self, h: &mut Harness, actor: &Actor, req: &Request) -> Result<Reply> {
-        crate::teams::ops::apply_with_repository(&mut h.store, actor, req, 1234, &|_| {
-            Ok(self.repo.clone())
-        })
+        apply_with_repository_fixture(&mut h.store, actor, req, 1234, &|_| Ok(self.repo.clone()))
     }
     pub(crate) fn request(&self, h: &Harness, commit: &str) -> Request {
         request(
@@ -249,18 +269,16 @@ fn advance_base_replay_precedes_stale_revision_and_repository_access() {
     let mut h = f.harness();
     let req = f.request(&h, &f.next);
     let reply = f.apply(&mut h, &person(), &req).unwrap();
-    let replay =
-        crate::teams::ops::apply_with_repository(&mut h.store, &person(), &req, 9999, &|_| {
-            panic!("replay consulted Git")
-        });
+    let replay = apply_with_repository_fixture(&mut h.store, &person(), &req, 9999, &|_| {
+        panic!("replay consulted Git")
+    });
     assert_eq!(reply, replay.unwrap());
     let mut stale = f.request(&h, &f.latest);
     stale.expected_revision -= 1;
-    let error =
-        crate::teams::ops::apply_with_repository(&mut h.store, &person(), &stale, 9999, &|_| {
-            panic!("stale revision consulted Git")
-        })
-        .unwrap_err();
+    let error = apply_with_repository_fixture(&mut h.store, &person(), &stale, 9999, &|_| {
+        panic!("stale revision consulted Git")
+    })
+    .unwrap_err();
     assert_eq!(error.code, code::STALE_REVISION);
     let mut changed = req.clone();
     changed.operation = Operation::AdvanceBase {
@@ -280,11 +298,10 @@ fn advance_base_refuses_every_agent_and_service_before_git_access() {
     let member = h.bind("m1");
     for actor in [lead, member, other(), service()] {
         let req = f.request(&h, &f.next);
-        let error =
-            crate::teams::ops::apply_with_repository(&mut h.store, &actor, &req, 1234, &|_| {
-                panic!("agent reached Git")
-            })
-            .unwrap_err();
+        let error = apply_with_repository_fixture(&mut h.store, &actor, &req, 1234, &|_| {
+            panic!("agent reached Git")
+        })
+        .unwrap_err();
         assert_eq!(error.code, code::NOT_ALLOWED);
     }
 }

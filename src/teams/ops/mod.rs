@@ -38,10 +38,14 @@ pub use unstaffed::{unstaffed_changes, unstaffed_of, unstaffed_stages};
 mod validation;
 use super::store::{self, rows, DecisionState, Store};
 #[cfg(test)]
+pub(crate) use apply::apply_with_native;
+#[cfg(test)]
 pub(crate) use apply::apply_with_repository;
 #[allow(unused_imports)]
 pub use apply::{apply, apply_with_config};
-pub(crate) use apply::{apply_with_gesture, replay};
+pub(crate) use apply::{
+    apply_with_gesture, apply_with_native_context, observe_native_intake, replay,
+};
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

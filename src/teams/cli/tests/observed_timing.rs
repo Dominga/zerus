@@ -181,7 +181,14 @@ fn service_only_replay_stale_and_exhausted_source_do_not_feed_the_ledger() {
         crate::teams::ops::apply(&mut store, &person(), &denied, NOW)
             .unwrap_err()
             .code,
-        zerus_team_plan::problem::code::NOT_ALLOWED
+        "person_gesture_required"
+    );
+    // Even explicit native admission cannot grant this Service-only op.
+    assert_eq!(
+        crate::teams::ops::tests::apply_fixture(&mut store, &person(), &denied, NOW)
+            .unwrap_err()
+            .code,
+        zerus_team_plan::problem::code::NOT_ALLOWED,
     );
     assert_eq!(optional_tables(&store), 0);
     let mut stale = h.request(operation.clone());
@@ -452,7 +459,7 @@ fn optional_initialization_uses_no_archive_index_and_settles_a_competing_canonic
         ready.wait();
         let start = Instant::now();
         let mut s = crate::teams::store::Store::open(&state).unwrap();
-        let r = crate::teams::ops::apply(&mut s, &person(), &other, NOW);
+        let r = crate::teams::ops::tests::apply_fixture(&mut s, &person(), &other, NOW);
         (r, start.elapsed())
     });
     let start = Instant::now();

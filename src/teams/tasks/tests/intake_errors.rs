@@ -24,8 +24,23 @@ pub(in crate::teams::tasks) fn after_apply(result: Result<ops::Reply>) -> Result
     result
 }
 
+// These controls exercise the still-supported, independently bound lead
+// Session path (including its old task-identity recovery). Native Person
+// originals have separate reserve/unknown-no-replay controls.
+fn harness() -> Harness {
+    let mut h = Harness::new();
+    h.bind("lead");
+    h
+}
 fn send_task(h: &Harness, reference: &TaskRef) -> Intake {
-    send(&caller(h, &TaskActor::Person), reference, TEAM, None, None).unwrap()
+    let lead = h.store.member(TEAM, "lead").unwrap().unwrap();
+    let session = lead.session.expect("the product writer bound the lead");
+    let actor = TaskActor::Agent(zerus_replica::SessionKey {
+        machine: session.machine,
+        session_id: session.session_id,
+        session: "codex/intake-fixture-lead".into(),
+    });
+    super::super::send(&caller(h, &actor), reference, TEAM, None, None).unwrap()
 }
 fn one_node(h: &Harness, reference: &TaskRef, node: u32) {
     let doc = task(h, reference);
@@ -75,7 +90,7 @@ fn rule_refusal_after_prepare(h: &Harness) {
             let team = store.team(TEAM).unwrap().unwrap();
             let mut settings = team.settings;
             settings.caps.max_open_tasks -= 1;
-            ops::apply(
+            ops::tests::apply_fixture(
                 &mut store,
                 &person(),
                 &ops::Request {
@@ -101,7 +116,7 @@ fn targeted(h: &Harness) -> (TaskRef, Target) {
 
 #[test]
 fn a_failed_receipt_repeat_keeps_the_key_and_observer_finds_one_node() {
-    let h = Harness::new();
+    let h = harness();
     let reference = document(&h);
     let first = send_task(&h, &reference).node.unwrap();
     let before = task(&h, &reference).revision();
@@ -117,7 +132,7 @@ fn a_failed_receipt_repeat_keeps_the_key_and_observer_finds_one_node() {
 
 #[test]
 fn a_busy_repeat_keeps_the_key_and_observer_finds_one_node() {
-    let h = Harness::new();
+    let h = harness();
     let reference = document(&h);
     let first = send_task(&h, &reference).node.unwrap();
     let before = task(&h, &reference).revision();
@@ -143,7 +158,7 @@ fn a_busy_repeat_keeps_the_key_and_observer_finds_one_node() {
 
 #[test]
 fn a_rule_refused_repeat_keeps_the_key_it_did_not_set() {
-    let h = Harness::new();
+    let h = harness();
     let reference = document(&h);
     let first = send_task(&h, &reference).node.unwrap();
     rule_refusal_after_prepare(&h);
@@ -157,7 +172,7 @@ fn a_rule_refused_repeat_keeps_the_key_it_did_not_set() {
 
 #[test]
 fn a_first_rule_refusal_restores_the_absent_key_and_original_target() {
-    let h = Harness::new();
+    let h = harness();
     let (reference, target) = targeted(&h);
     rule_refusal_after_prepare(&h);
     assert_eq!(
@@ -173,7 +188,7 @@ fn a_first_rule_refusal_restores_the_absent_key_and_original_target() {
 
 #[test]
 fn a_first_busy_send_restores_key_and_target_then_queues_once() {
-    let h = Harness::new();
+    let h = harness();
     let (reference, target) = targeted(&h);
     h.store
         .db
@@ -199,7 +214,7 @@ fn a_first_busy_send_restores_key_and_target_then_queues_once() {
 
 #[test]
 fn a_first_unknown_result_keeps_the_prepared_key_and_target_then_queues_once() {
-    let h = Harness::new();
+    let h = harness();
     let (reference, _) = targeted(&h);
     receipt_failure(&h);
     let result = send_task(&h, &reference);
@@ -215,7 +230,7 @@ fn a_first_unknown_result_keeps_the_prepared_key_and_target_then_queues_once() {
 
 #[test]
 fn a_lost_committed_answer_is_recovered_by_task_identity() {
-    let h = Harness::new();
+    let h = harness();
     let reference = document(&h);
     LOST_REPLY.with(|lost| lost.set(true));
     let result = send_task(&h, &reference);
@@ -229,7 +244,7 @@ fn a_lost_committed_answer_is_recovered_by_task_identity() {
 
 #[test]
 fn a_rule_refusal_restores_a_previous_teams_key_and_its_name() {
-    let mut h = Harness::new();
+    let mut h = harness();
     let other = ops::tests::TEAM_B;
     let mut create = ops::tests::create();
     if let ops::Operation::Create {

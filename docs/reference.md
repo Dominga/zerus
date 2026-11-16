@@ -6038,16 +6038,29 @@ Unknown options and repeated valued options are refused ("given twice");
 a repeated switch is accepted and reads as once. `--team` takes a lowercase
 canonical UUID; a lead or a member may omit it for its own team.
 
-**Owner-card decisions.** A person decides an owner card in the Zerus window,
-after its native confirmation of the canonical card, computer, decision and
-revision. `hgs team decide` returns `person_gesture_required`, including an
-unmarked, detached or remotely forwarded Person command. A renderer
-`confirmed` flag, an actor label or a saved receipt supplies no new permission.
-An uncertain decision is checked only through its exact original receipt;
-missing, corrupt or foreign evidence never resends it. Teams schema 3 retains
-the native intent with the decision's receipt and fences older CLI writers.
-The remaining Person operations below still use the interim caller rule
-during the following migration slices.
+**Person team decisions and mutations.** Perform these in the Zerus window
+on the computer that owns the team, after native confirmation of the exact
+operation, payload, computer, configuration, store, team, revision and UUID.
+This includes owner-card Decide, Create/Start planning, settings, membership,
+dependencies, advance-base, queue/phase decisions and team task intake.
+A person's CLI command returns `person_gesture_required`, including unmarked,
+detached and remotely forwarded commands. A renderer `confirmed` flag, actor
+label or saved receipt supplies no new permission. Independently proved
+Session and Service operations retain their existing authority checks.
+
+Check reads only the exact original receipt. Missing, corrupt or foreign
+evidence never sends the operation again, adopts a new revision or restarts
+an unknown task intake. The native task original is reserved before document
+writes; its one live custodian keeps project exclusion through the team commit.
+Core layout 7 includes the cumulative native evidence and fences older writers;
+its migration preserves existing nonce, receipts and phase evidence.
+
+Ordinary commands that mutate a live team-owned task (rename, edit, stage,
+target, send and cancel) remain interim for S2b. Preview, computer
+configuration, catalog/template and legacy import/save/remove writers remain
+interim for S3. The ancestry check below is defense in depth for those paths,
+not a proof against same-user arbitrary code, detach/re-exec or redirected
+state. The parent migration remains open until these writers are covered.
 
 **Who runs other commands.** `hgs team` proves its caller with one interim check.
 With the preview on, so does an `hgs task` command that touches a team: one

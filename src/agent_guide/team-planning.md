@@ -1,5 +1,9 @@
 Team planning (hgs guide team-planning)
 
+Person writes require native confirmation in the Zerus window. Person CLI
+writes, including @host, return person_gesture_required. Independently bound
+lead/member drafting and service facts keep their existing scope.
+
 Read the goal and the pinned routes before drafting:
 
   hgs team current

@@ -273,7 +273,7 @@ fn admission_lock(mode: &str, phase: &str) {
         let mut store = Store::open(&state).unwrap();
         started.send(()).unwrap();
         let request = ops::tests::request(revision, ops::Operation::Pause);
-        let result = ops::apply(&mut store, &person(), &request, now());
+        let result = ops::tests::apply_fixture(&mut store, &person(), &request, now());
         sent.send(result).unwrap();
     });
     ready.recv_timeout(Duration::from_secs(3)).unwrap();

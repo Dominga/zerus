@@ -273,14 +273,61 @@ impl Fixture {
         serde_json::from_slice(&std::fs::read(reply).unwrap()).unwrap()
     }
 
+    fn config(&self) -> Config {
+        Config {
+            home: self.h.temp.path().display().to_string(),
+            dir: self.h.temp.path().join("config"),
+            state: self.h.temp.path().to_owned(),
+            selves: vec!["test".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+    /// Ordinary task rows are produced in Rust; queue admission explicitly
+    /// models the native window. No detached CLI Person write is used here.
     fn add(&self) -> Value {
-        let out = self.run(
-            &["add", "--project", "example", "--team", TEAM, "--json"],
-            "A queued task",
+        let config = self.config();
+        let machines = super::super::machines(&config).unwrap();
+        let (id, name) = super::super::project(&config, "example-project").unwrap();
+        let tasks = ProjectStore::open(&config.state.join("replica"), &id).unwrap();
+        let mut document = tasks
+            .new_task(
+                "A queued task",
+                Stage::Todo,
+                Target::Any,
+                Actor::Person,
+                &zerus_replica::Position::End,
+                &name,
+                1,
+            )
+            .unwrap();
+        tasks.save(&mut document).unwrap();
+        let reference = zerus_team_plan::model::TaskRef {
+            project: id,
+            uuid: document.uuid().into(),
+        };
+        drop(tasks);
+        let home = self.h.store.team(TEAM).unwrap().unwrap().home;
+        let admitted = crate::teams::tasks::models::send(
+            &crate::teams::tasks::Caller {
+                state: &config.state,
+                machine: &home,
+                actor: Actor::Person,
+            },
+            &reference,
+            TEAM,
             None,
-        );
-        assert_eq!(out["ok"], true, "{out}");
-        out["value"]["task"].clone()
+            None,
+        )
+        .unwrap();
+        assert!(admitted.queued, "{admitted:?}");
+        let tasks = ProjectStore::open(&config.state.join("replica"), &reference.project).unwrap();
+        let document = tasks.load(&reference.uuid).unwrap();
+        super::super::view(&document, &name, true, &machines).unwrap()
     }
 
     fn document(&self, task: &Value) -> TaskDoc {
@@ -369,8 +416,9 @@ impl Fixture {
 }
 
 #[test]
-fn cli_duplicate_add_and_target_create_one_plan_node() {
-    let f = Fixture::new();
+fn cli_duplicate_add_keeps_one_node_and_the_lead_cannot_retarget_a_live_task() {
+    let mut f = Fixture::new();
+    let lead = f.bind("lead");
     let id = uuid::Uuid::new_v4().to_string();
     let args = [
         "add",
@@ -384,8 +432,8 @@ fn cli_duplicate_add_and_target_create_one_plan_node() {
         &id,
         "--json",
     ];
-    let first = f.run(&args, "Details", None);
-    let second = f.run(&args, "Details", None);
+    let first = f.run(&args, "Details", Some(&lead));
+    let second = f.run(&args, "Details", Some(&lead));
     assert_eq!(first["ok"], true, "{first}");
     assert_eq!(second["ok"], true, "{second}");
     assert_eq!(
@@ -394,9 +442,17 @@ fn cli_duplicate_add_and_target_create_one_plan_node() {
     );
     let reference = format!("example/{}", first["value"]["task"]["id"].as_str().unwrap());
     for _ in 0..2 {
-        let out = f.run(&["target", &reference, "team", TEAM, "--json"], "", None);
-        assert_eq!(out["ok"], true, "{out}");
-        assert_eq!(out["value"]["task"]["target"]["kind"], "any");
+        let out = f.run(
+            &["target", &reference, "team", TEAM, "--json"],
+            "",
+            Some(&lead),
+        );
+        assert_eq!(out["ok"], false, "{out}");
+        assert!(out["error"].as_str().unwrap().contains("not_allowed"));
+        assert_eq!(
+            f.document(&first["value"]["task"]).view().unwrap().target,
+            Target::Any
+        );
     }
     assert_eq!(f.h.store.queue(TEAM, 200, None).unwrap().rows.len(), 1);
 }
@@ -597,7 +653,23 @@ fn a_send_that_becomes_a_team_task_after_freeze_never_reserves_an_attempt() {
     let (child, reply) = f.paused_send(&reference, &member, &pause);
     let ready = child.wait_for_marker(&pause.join("ready"));
     let joined = if ready {
-        Some(f.run(&["target", &reference, "team", TEAM, "--json"], "", None))
+        Some(
+            crate::teams::tasks::models::send(
+                &crate::teams::tasks::Caller {
+                    state: f.h.temp.path(),
+                    machine: &f.machine,
+                    actor: Actor::Person,
+                },
+                &zerus_team_plan::model::TaskRef {
+                    project: "example-project".into(),
+                    uuid: task["uuid"].as_str().unwrap().into(),
+                },
+                TEAM,
+                None,
+                None,
+            )
+            .unwrap(),
+        )
     } else {
         None
     };
@@ -609,7 +681,7 @@ fn a_send_that_becomes_a_team_task_after_freeze_never_reserves_an_attempt() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(ready, "{}", String::from_utf8_lossy(&output.stdout));
-    assert_eq!(joined.unwrap()["value"]["team"]["queued"], true);
+    assert!(joined.unwrap().queued);
     let response: Value = serde_json::from_slice(&std::fs::read(reply).unwrap()).unwrap();
     let id = std::fs::read_to_string(pause.join("ready")).unwrap();
     assert!(
@@ -626,12 +698,13 @@ fn a_send_that_becomes_a_team_task_after_freeze_never_reserves_an_attempt() {
 #[test]
 fn preflight_capacity_and_routing_fail_before_creating_a_task() {
     let mut f = Fixture::new();
+    let lead = f.bind("lead");
     f.h.settings(|s| s.caps.max_open_tasks = 1);
     f.add();
     let out = f.run(
         &["add", "--project", "example", "--team", TEAM, "--json"],
         "Over capacity",
-        None,
+        Some(&lead),
     );
     assert_eq!(out["ok"], false, "{out}");
     assert!(out["error"].as_str().unwrap().contains("over_cap"));
@@ -652,7 +725,7 @@ fn preflight_capacity_and_routing_fail_before_creating_a_task() {
                 "--json",
             ],
             "Unknown route",
-            None,
+            Some(&lead),
         );
         assert_eq!(out["ok"], false, "{out}");
     }
@@ -668,12 +741,13 @@ fn preflight_capacity_and_routing_fail_before_creating_a_task() {
 
 #[test]
 fn unknown_intake_keeps_the_existing_task_and_its_prepared_marker() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    let lead = f.bind("lead");
     f.h.store.db.as_ref().unwrap().execute_batch("CREATE TRIGGER reject_team_intake BEFORE INSERT ON live_tasks BEGIN SELECT RAISE(ABORT,'fixture team refusal'); END").unwrap();
     let out = f.run(
         &["add", "--project", "example", "--team", TEAM, "--json"],
         "Task survives team refusal",
-        None,
+        Some(&lead),
     );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["value"]["task_exists"], true);
@@ -737,16 +811,25 @@ fn definite_refusal_and_pending_observation_keep_their_distinct_answers() {
 
 #[test]
 fn a_cli_unknown_repeat_keeps_one_node_through_the_production_observer() {
-    let f = Fixture::new();
-    let first = f.run(
-        &["add", "--project", "example", "--team", TEAM, "--json"],
+    let mut f = Fixture::new();
+    let lead = f.bind("lead");
+    let id = uuid::Uuid::new_v4().to_string();
+    let args = [
+        "add",
+        "--project",
+        "example",
+        "--team",
+        TEAM,
+        "--title",
         "Queue once",
-        None,
-    );
+        "--request-id",
+        &id,
+        "--json",
+    ];
+    let first = f.run(&args, "Queue once", Some(&lead));
     assert_eq!(first["value"]["team"]["queued"], true, "{first}");
-    let reference = first["value"]["task"]["ref"].as_str().unwrap();
     f.h.store.db.as_ref().unwrap().execute_batch("CREATE TRIGGER intake_reply_failure BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT,'private receipt failure'); END;").unwrap();
-    let failed = f.run(&["target", reference, "team", TEAM, "--json"], "", None);
+    let failed = f.run(&args, "Queue once", Some(&lead));
     f.h.store
         .db
         .as_ref()
@@ -767,7 +850,7 @@ fn a_cli_unknown_repeat_keeps_one_node_through_the_production_observer() {
         uuid: doc.uuid().into(),
     };
     crate::teams::tasks::observe(f.h.temp.path(), &task).unwrap();
-    let repeated = f.run(&["target", reference, "team", TEAM, "--json"], "", None);
+    let repeated = f.run(&args, "Queue once", Some(&lead));
     assert_eq!(repeated["value"]["team"]["queued"], true, "{repeated}");
     assert_eq!(
         repeated["value"]["team"]["node"],
@@ -789,12 +872,13 @@ fn a_cli_unknown_repeat_keeps_one_node_through_the_production_observer() {
 
 #[test]
 fn an_observation_refusal_keeps_successful_intake_and_marks_it_pending() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    let lead = f.bind("lead");
     f.h.store.db.as_ref().unwrap().execute_batch("CREATE TRIGGER reject_first_observation BEFORE UPDATE OF task_revision ON nodes BEGIN SELECT RAISE(ABORT,'fixture observation refusal'); END").unwrap();
     let out = f.run(
         &["add", "--project", "example", "--team", TEAM, "--json"],
         "Queued with pending observation",
-        None,
+        Some(&lead),
     );
     assert_eq!(out["ok"], true, "{out}");
     assert_eq!(out["value"]["team"]["queued"], true);
@@ -903,18 +987,22 @@ fn a_foreign_home_marker_requires_a_person_to_clear_it_before_intake() {
     );
     assert_eq!(agent["ok"], false, "{agent}");
     let person = f.run(&["target", &reference, "team", TEAM, "--json"], "", None);
-    assert_eq!(person["ok"], true, "{person}");
-    assert_eq!(person["value"]["team"]["queued"], false);
-    assert!(person["value"]["message"]
+    assert_eq!(person["ok"], false, "{person}");
+    assert!(person["error"]
         .as_str()
         .unwrap()
-        .contains("target REF any"));
+        .contains("person_gesture_required"));
     assert_eq!(f.document(&task).team().unwrap().unwrap().home, home);
     assert_eq!(
         f.run(&["target", &reference, "any", "--json"], "", None)["ok"],
         true
     );
-    let queued = f.run(&["target", &reference, "team", TEAM, "--json"], "", None);
+    let lead = f.bind("lead");
+    let queued = f.run(
+        &["target", &reference, "team", TEAM, "--json"],
+        "",
+        Some(&lead),
+    );
     assert_eq!(queued["value"]["team"]["queued"], true, "{queued}");
 }
 
@@ -1316,7 +1404,8 @@ fn home_marked_tasks_follow_ordinary_commands_while_the_preview_is_off() {
 
 #[test]
 fn a_task_reenters_as_a_new_node_after_a_persons_retarget() {
-    let f = Fixture::new();
+    let mut f = Fixture::new();
+    let lead = f.bind("lead");
     let task = f.add();
     let old = f.h.store.queue(TEAM, 200, None).unwrap().rows[0].id;
     let reference = format!("example/{}", task["id"].as_str().unwrap());
@@ -1327,7 +1416,11 @@ fn a_task_reenters_as_a_new_node_after_a_persons_retarget() {
         f.h.store.task_observation(TEAM, old).unwrap().unwrap().key,
         ops::KeyState::Absent
     );
-    let out = f.run(&["target", &reference, "team", TEAM, "--json"], "", None);
+    let out = f.run(
+        &["target", &reference, "team", TEAM, "--json"],
+        "",
+        Some(&lead),
+    );
     assert_eq!(out["value"]["team"]["queued"], true, "{out}");
     let new = f.h.store.queue(TEAM, 200, None).unwrap().rows[0].id;
     assert_ne!(old, new);

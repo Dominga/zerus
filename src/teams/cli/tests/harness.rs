@@ -60,6 +60,27 @@ fn export_scale_teams() {
     std::fs::write(destination.join("preview"), "on\n").unwrap();
 }
 
+/// The new positive policy model cannot alter the production CLI lane,
+/// including an exact UUID already used by its admitted writer.
+#[test]
+fn native_fixture_does_not_admit_the_bare_person_command_or_its_repeat() {
+    let h = Harness::new();
+    h.create();
+    let before = h.revision();
+    let input = serde_json::json!({"request_id":uid(0xff01),"team":TEAM,
+        "expected_revision":before,"name":"Native modeled rename"})
+    .to_string();
+    let (refused, exit) = h.cli(&Caller::Person, "rename-team", &input);
+    assert_eq!((exit, code(&refused)), (1, "person_gesture_required"));
+    assert_eq!(h.revision(), before);
+    let (accepted, exit) = h.native_command("rename-team", &input);
+    assert_eq!(exit, 0, "{accepted}");
+    assert_eq!(h.revision(), before + 1);
+    let (refused, exit) = h.cli(&Caller::Person, "rename-team", &input);
+    assert_eq!((exit, code(&refused)), (1, "person_gesture_required"));
+    assert_eq!(h.revision(), before + 1);
+}
+
 /// A fixed request ID per seed step, so every reply and fixture is stable.
 pub(super) fn uid(step: u32) -> String {
     format!("00000000-0000-4000-8000-{:012x}", 0x9000 + step)
@@ -169,14 +190,16 @@ impl Harness {
     pub fn apply_at(&self, actor: &Actor, operation: Operation, now: i64) -> Reply {
         let request = self.request_for(TEAM, operation);
         let mut store = self.store();
-        ops::apply(&mut store, actor, &request, now).expect("the seed operation succeeds")
+        ops::tests::apply_fixture(&mut store, actor, &request, now)
+            .expect("the explicitly modeled native seed operation succeeds")
     }
 
     /// One operation on `team`.
     pub fn apply_for(&self, team: &str, actor: &Actor, operation: Operation) -> Reply {
         let request = self.request_for(team, operation);
         let mut store = self.store();
-        ops::apply(&mut store, actor, &request, NOW).expect("the seed operation succeeds")
+        ops::tests::apply_fixture(&mut store, actor, &request, NOW)
+            .expect("the explicitly modeled native seed operation succeeds")
     }
 
     pub fn request(&self, operation: Operation) -> Request {
@@ -203,6 +226,50 @@ impl Harness {
         }
         let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
         super::super::run(&self.config, caller, &words, Some(input))
+    }
+
+    /// Explicit policy/parser model of an admitted native Person writer.
+    /// This does not call the CLI or claim that a native dialog ran. Tests of
+    /// caller proof and bare-Person refusal keep calling `cli` unchanged.
+    pub fn native_command(&self, line: &str, input: &str) -> (Value, i32) {
+        let result = (|| {
+            let mut store = self.store();
+            let words: Vec<String> = line.split_whitespace().map(str::to_owned).collect();
+            let command = words.first().expect("a fixture command");
+            let request = if matches!(command.as_str(), "create" | "start-planning") {
+                let options =
+                    super::super::input::Options::parse(&words[1..], &["--template"], &[])?;
+                options.nothing_else(command)?;
+                let template = options.get("--template").expect("the modeled template");
+                super::super::create::prepare(
+                    &self.config,
+                    &store,
+                    template,
+                    Some(input),
+                    command == "start-planning",
+                )?
+            } else {
+                assert_eq!(words.len(), 1, "the model accepts one write command");
+                let variant =
+                    super::super::commands::variant(command).expect("a typed write command");
+                super::super::commands::build(variant, input)?
+            };
+            let actor = crate::teams::ops::tests::person();
+            let reply = ops::apply_with_native_context(
+                &mut store,
+                &actor,
+                &request,
+                NOW,
+                Some(&self.config),
+                &|team| crate::desktop::teams::repository(&self.config, team),
+                crate::desktop::teams::person_actions::kernel::Permit::fixture(&actor, &request),
+            )?;
+            super::super::commands::reply_view(&actor, &request.team, &reply)
+        })();
+        match result {
+            Ok(reply) => (reply, 0),
+            Err(problem) => super::super::refusal(problem),
+        }
     }
 
     pub fn create(&self) {

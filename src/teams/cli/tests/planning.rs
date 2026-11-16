@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 //! Only input requests are authored here; every row is produced by the CLI.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
@@ -9,11 +11,7 @@ fn input() -> Value {
         "home":MACHINE,"integration_branch":"zerus/team/planned-release","base_commit":COMMIT})
 }
 fn start(h: &Harness) -> Value {
-    let (reply, exit) = h.cli(
-        &Caller::Person,
-        "start-planning --template bugfix",
-        &input().to_string(),
-    );
+    let (reply, exit) = h.native_command("start-planning --template bugfix", &input().to_string());
     assert_eq!(exit, 0, "{reply}");
     reply
 }
@@ -75,11 +73,7 @@ fn planning_cli_replay_keeps_the_original_bundle_after_the_catalog_changes() {
     );
     assert_eq!(exit, 0, "{saved}");
     assert_eq!(start(&h), first);
-    let (wrong, exit) = h.cli(
-        &Caller::Person,
-        "create --template bugfix",
-        &input().to_string(),
-    );
+    let (wrong, exit) = h.native_command("create --template bugfix", &input().to_string());
     assert_eq!(exit, 1);
     assert_eq!(code(&wrong), "duplicate");
     assert_eq!(h.store().inbox(TEAM, 200, None).unwrap().rows.len(), 1);

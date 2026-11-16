@@ -12,13 +12,17 @@ fn start() -> Operation {
 fn planning_creation_is_replayed_without_tasks_or_member_effects() {
     let mut h = Harness::empty();
     let original = request(0, start());
-    let first = apply(&mut h.store, &person(), &original, 1).unwrap();
+    let first =
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &original, 1).unwrap();
     let t = h.store.team(TEAM).unwrap().unwrap();
     assert_eq!(t.status, TeamStatus::Planning);
     assert!(h.store.planning(TEAM).unwrap().is_some_and(|p| !p.paused));
     assert!(h.store.launch_allowed(&t, &t.lead).unwrap());
     assert!(!h.store.launch_allowed(&t, "m1").unwrap());
-    assert_eq!(apply(&mut h.store, &person(), &original, 2).unwrap(), first);
+    assert_eq!(
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &original, 2).unwrap(),
+        first
+    );
     let db = h.store.db.as_ref().unwrap();
     for table in [
         "nodes",
@@ -49,7 +53,7 @@ fn planning_creation_is_replayed_without_tasks_or_member_effects() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT
+        store::SCHEMA_VERSION
     );
     let reopened = Store::open(h.temp.path()).unwrap();
     assert_eq!(
@@ -78,7 +82,7 @@ fn only_a_person_can_start_planning_and_an_empty_goal_is_refused() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT,
+        store::SCHEMA_VERSION,
         "a refused plan leaves the already established native writer fence unchanged"
     );
 }
@@ -143,7 +147,7 @@ fn ordinary_create_keeps_its_wire_shape_and_status_at_the_current_schema() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        store::NATIVE_PERSON_LAYOUT
+        store::SCHEMA_VERSION
     );
     assert_eq!(serde_json::to_value(create()).unwrap(), before);
 }
@@ -191,13 +195,13 @@ fn ordinary_planning_notices_keep_their_own_authority_without_task_cards() {
 fn changed_replay_and_existing_team_refuse_planning_without_a_second_notice() {
     let mut h = Harness::empty();
     let original = request(0, start());
-    apply(&mut h.store, &person(), &original, 1).unwrap();
+    crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &original, 1).unwrap();
     let mut changed = original.clone();
     if let Operation::StartPlanning { goal, .. } = &mut changed.operation {
         goal.push_str(" Changed.");
     }
     assert_eq!(
-        apply(&mut h.store, &person(), &changed, 2)
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &changed, 2)
             .unwrap_err()
             .code,
         code::DUPLICATE
@@ -257,13 +261,13 @@ fn export_planning_compatibility_fixture() {
             integration_branch.push_str("-compat-base");
         }
     }
-    apply(&mut store, &person(), &req, 1234).unwrap();
+    crate::teams::ops::tests::apply_fixture(&mut store, &person(), &req, 1234).unwrap();
     let version: u32 = store
         .db
         .as_ref()
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, store::NATIVE_PERSON_LAYOUT);
+    assert_eq!(version, store::SCHEMA_VERSION);
     println!("compatibility fixture {mode}, schema {version}");
 }

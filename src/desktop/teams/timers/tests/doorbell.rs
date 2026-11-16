@@ -163,8 +163,13 @@ fn a_pause_between_the_reservation_and_the_spawn_starts_nothing() {
     w.effects.before_spawn = Some(Box::new(move || {
         let mut store = Store::open(&path).unwrap();
         let rev = store.team(TEAM).unwrap().unwrap().revision;
-        crate::teams::ops::apply(&mut store, &person(), &request(rev, Operation::Pause), T0)
-            .unwrap();
+        crate::teams::ops::tests::apply_fixture(
+            &mut store,
+            &person(),
+            &request(rev, Operation::Pause),
+            T0,
+        )
+        .unwrap();
     }));
     w.pass(T0);
     assert!(w.effects.rang.is_empty());

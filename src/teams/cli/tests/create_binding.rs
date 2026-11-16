@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 use super::harness::*;
 use crate::teams::{catalog, cli::actor::Caller};
 use serde_json::{json, Value};
@@ -40,11 +42,7 @@ fn custom() -> Template {
     t
 }
 fn create(h: &Harness, id: &str, value: &Value) -> (Value, i32) {
-    h.cli(
-        &Caller::Person,
-        &format!("create --template {id}"),
-        &value.to_string(),
-    )
+    h.native_command(&format!("create --template {id}"), &value.to_string())
 }
 fn refused_changed(h: &Harness, id: &str, digest: &str) -> Value {
     let mut request = input(1);

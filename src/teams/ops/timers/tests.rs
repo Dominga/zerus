@@ -16,7 +16,7 @@ pub(super) const MINUTE: i64 = 60_000;
 /// Apply at an exact time with a fresh revision, as a service pass does.
 pub(super) fn at(h: &mut Harness, actor: &Actor, op: Operation, now: i64) -> Result<Reply> {
     let rev = h.store.team(TEAM).unwrap().map_or(0, |t| t.revision);
-    crate::teams::ops::apply(&mut h.store, actor, &request(rev, op), now)
+    crate::teams::ops::tests::apply_fixture(&mut h.store, actor, &request(rev, op), now)
 }
 pub(super) fn timer(
     kind: TimerKind,

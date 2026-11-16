@@ -546,6 +546,7 @@
   "Configuration digest: %1": "Хеш конфигурации: %1",
   "Configuration was not confirmed saved. Reload to check; no connector restart was requested.": "Сохранение настроек не подтверждено. Перезагрузите настройки, чтобы проверить; перезапуск коннектора не запрашивался.",
   "Confirm folder trust": "Подтверждать доверие к папке",
+  "Confirm team action": "Подтвердить действие команды",
   "Conflicts": "Конфликты",
   "Connect an output port to a task's input port to add a dependency. Select an arrow and press Delete to remove it.": "Соедините выходной порт с входным портом задачи, чтобы добавить зависимость. Выберите стрелку и нажмите Delete, чтобы убрать её.",
   "Connecting…": "Подключение…",

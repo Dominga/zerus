@@ -59,7 +59,16 @@ pub(crate) fn apply_with_gesture(
     now: i64,
     admission: Option<crate::desktop::teams::person_gesture::Admission>,
 ) -> Result<Reply> {
-    // This closed V1 intent is only DecideCard. It never resolves a repository.
+    apply_with_native(store, actor, request, now, admission.map(Into::into))
+}
+
+pub(crate) fn apply_with_native(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    admission: Option<crate::desktop::teams::person_actions::kernel::Permit<'_>>,
+) -> Result<Reply> {
     apply_inputs(
         store,
         actor,
@@ -75,6 +84,28 @@ pub(crate) fn apply_with_gesture(
     )
 }
 
+/// Configuration and a trusted reader supply data; only the sealed original
+/// supplies Person admission. All effects still enter the common writer.
+pub(crate) fn apply_with_native_context(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+    config: Option<&crate::config::Config>,
+    repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
+    admission: crate::desktop::teams::person_actions::kernel::Permit<'_>,
+) -> Result<Reply> {
+    apply_inputs(
+        store,
+        actor,
+        request,
+        now,
+        config,
+        repository,
+        Some(admission),
+    )
+}
+
 fn apply_inputs(
     store: &mut Store,
     actor: &Actor,
@@ -82,14 +113,15 @@ fn apply_inputs(
     now: i64,
     config: Option<&crate::config::Config>,
     repository: &dyn Fn(&Team) -> Result<crate::teams::integrate::Repo>,
-    admission: Option<crate::desktop::teams::person_gesture::Admission>,
+    mut admission: Option<crate::desktop::teams::person_actions::kernel::Permit<'_>>,
 ) -> Result<Reply> {
     validate_request(request, now)?;
-    if matches!(actor, Actor::Person { .. })
-        && matches!(request.operation, Operation::DecideCard { .. })
-        && admission.is_none()
-    {
-        return Err(crate::desktop::teams::person_gesture::required());
+    if matches!(actor, Actor::Person { .. }) && admission.is_none() {
+        return Err(crate::desktop::teams::person_actions::required());
+    }
+    if let Some(original) = &mut admission {
+        original.preflight(actor, request)?;
+        original.prepare_store(store.state())?;
     }
     store.refresh()?;
     prepare_first(store, actor, request)?;
@@ -101,23 +133,36 @@ fn apply_inputs(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(crate::teams::store::begin_error)?;
     store::execution_fence(&tx)?;
-    let gesture = admission
+    let mut gesture = admission
         .map(|admission| admission.consume(&tx, &state, actor, request))
         .transpose()?;
     if let Some(intent) = &gesture {
         if let Some(saved) = replay(&tx, actor, request)? {
-            crate::desktop::teams::person_gesture::original(&tx, intent)?;
+            intent.original(&tx)?;
             return saved;
         }
         // Bound the native point-read bodies before the common kernel reads
         // its team. The snapshot cannot change under this writer transaction.
-        crate::desktop::teams::person_gesture::fresh(&tx, intent)?;
+        intent.fresh(&tx)?;
     }
+    let own_observations = gesture
+        .as_mut()
+        .map(|original| original.before_run(&tx, &state))
+        .transpose()?
+        .unwrap_or(0);
     let current = rows::team(&tx, &request.team)?;
     let team = current
         .clone()
         .map_or_else(|| validation::creation_team(request, actor), Ok)?;
     verify_actor(&tx, actor, &team)?;
+    if store::person_actions::reserved(&tx, &request.request_id)?
+        && !gesture.as_ref().is_some_and(|original| original.intake())
+    {
+        return Err(Problem::new(
+            code::DUPLICATE,
+            "This UUID belongs to an original native task intake. Read its original result.",
+        ));
+    }
     if let Some(saved) = replay(&tx, actor, request)? {
         return saved;
     }
@@ -142,15 +187,29 @@ fn apply_inputs(
         superseded: None,
         timing: None,
     };
-    let result = run(&mut ctx, request, current.is_some(), config, repository);
+    // Only a sealed live intake can have applied its continuing cancellation
+    // observation. Advance by that exact own write, never by the live team's
+    // arbitrary current revision or a renderer-provided offset.
+    let mut execution_request = request.clone();
+    execution_request.expected_revision = execution_request
+        .expected_revision
+        .checked_add(own_observations)
+        .ok_or_else(stale)?;
+    let result = run(
+        &mut ctx,
+        &execution_request,
+        current.is_some(),
+        config,
+        repository,
+    );
     // A storage failure is not a saved decision. Dropping the transaction
     // rolls back partial work; the same request ID can be processed again.
     if matches!(&result, Err(problem) if problem.code == code::STORAGE_FAILED) {
         return result;
     }
     save(&tx, actor, request, &result)?;
-    if let Some(intent) = &gesture {
-        crate::desktop::teams::person_gesture::record(&tx, intent)?;
+    if let Some(intent) = gesture {
+        intent.record(&tx, &result)?;
     }
     tx.commit().map_err(storage)?;
     result
@@ -377,4 +436,65 @@ fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Re
         Operation::TellPausedStarted { .. } => members::tell_paused_started(ctx),
         Operation::ClosePausedStarted { .. } => members::close_paused_started(ctx),
     }
+}
+
+/// The compound native original supplies an observation read while retaining
+/// the project lock. Service authority comes from the canonical team, and this
+/// writer shares the original transaction, policy, journal and receipt code.
+pub(crate) fn observe_native_intake(
+    db: &Connection,
+    state: &std::path::Path,
+    original: &Request,
+    node: u32,
+    observation: TaskObservation,
+    now: i64,
+) -> Result<()> {
+    if db.is_autocommit() {
+        return Err(invalid(
+            "An intake observation needs the held Teams writer.",
+        ));
+    }
+    let team = rows::team(db, &original.team)?.ok_or_else(missing)?;
+    if team.revision != original.expected_revision {
+        return Err(stale());
+    }
+    let actor = Actor::Service {
+        person: team.owner.clone(),
+        team: team.id.clone(),
+    };
+    let request = Request {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: team.id.clone(),
+        expected_revision: team.revision,
+        operation: Operation::ObserveTask { node, observation },
+    };
+    authority(&actor, &request.operation, &team)?;
+    db.execute_batch("SAVEPOINT operation;").map_err(storage)?;
+    let mut ctx = Context {
+        db,
+        state,
+        actor: &actor,
+        team: &team,
+        op: &request.operation,
+        request_id: &request.request_id,
+        now,
+        reply: Reply {
+            ok: true,
+            revision: 0,
+            member: None,
+            node: None,
+            item: None,
+        },
+        event: None,
+        superseded: None,
+        timing: None,
+    };
+    let result = run(&mut ctx, &request, true, None, &|_| {
+        Err(invalid("No repository read in task observation."))
+    });
+    if matches!(&result,Err(problem) if problem.code==code::STORAGE_FAILED) {
+        return result.map(|_| ());
+    }
+    save(db, &actor, &request, &result)?;
+    result.map(|_| ())
 }

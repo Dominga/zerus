@@ -353,6 +353,17 @@ pub(crate) fn apply_fixture(
     request: &Request,
     now: i64,
 ) -> Result<Reply> {
+    if matches!(actor, Actor::Person { .. })
+        && !matches!(request.operation, Operation::DecideCard { .. })
+    {
+        return super::apply_with_native(
+            store,
+            actor,
+            request,
+            now,
+            Some(crate::desktop::teams::person_actions::kernel::Permit::fixture(actor, request)),
+        );
+    }
     let admission = if matches!(
         actor,
         Actor::Person {

@@ -56,6 +56,7 @@ pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
 pub(crate) mod team_person;
+pub(crate) mod team_person_actions;
 // Its one caller, the task editor's Service-mode routing, lands together with
 // attachments by reference (zerus-5wmh.66.4.4.2); until then it is unused.
 /// A question card's answer handed to the service (zerus-5wmh.66.4.7,

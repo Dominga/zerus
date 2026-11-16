@@ -3,9 +3,9 @@ use super::*;
 fn create_and_add_replay_the_first_reply_and_one_journal_entry() {
     let mut h = Harness::empty();
     let r = request(0, create());
-    let first = super::super::apply(&mut h.store, &person(), &r, 1).unwrap();
+    let first = super::apply_fixture(&mut h.store, &person(), &r, 1).unwrap();
     assert_eq!(
-        super::super::apply(&mut h.store, &person(), &r, 2).unwrap(),
+        super::apply_fixture(&mut h.store, &person(), &r, 2).unwrap(),
         first
     );
     assert_eq!(h.store.members(TEAM, 200, None).unwrap().rows.len(), 4);
@@ -17,9 +17,9 @@ fn create_and_add_replay_the_first_reply_and_one_journal_entry() {
             pipeline: None,
         },
     );
-    let first = super::super::apply(&mut h.store, &person(), &r, 1).unwrap();
+    let first = super::apply_fixture(&mut h.store, &person(), &r, 1).unwrap();
     assert_eq!(
-        super::super::apply(&mut h.store, &person(), &r, 2).unwrap(),
+        super::apply_fixture(&mut h.store, &person(), &r, 2).unwrap(),
         first
     );
     assert_eq!(h.store.journal(TEAM, 200, None).unwrap().rows.len(), 2);
@@ -28,19 +28,19 @@ fn create_and_add_replay_the_first_reply_and_one_journal_entry() {
 fn replay_compares_actor_and_full_content() {
     let mut h = Harness::new();
     let r = request(1, Operation::Pause);
-    super::super::apply(&mut h.store, &person(), &r, 1).unwrap();
+    super::apply_fixture(&mut h.store, &person(), &r, 1).unwrap();
     let other = Actor::Person {
         person: "local".into(),
         origin: PersonOrigin::CliInterim,
     };
     refused(
-        super::super::apply(&mut h.store, &other, &r, 2),
+        super::apply_fixture(&mut h.store, &other, &r, 2),
         code::DUPLICATE,
     );
     let mut changed = r;
     changed.operation = Operation::Resume;
     refused(
-        super::super::apply(&mut h.store, &person(), &changed, 2),
+        super::apply_fixture(&mut h.store, &person(), &changed, 2),
         code::DUPLICATE,
     );
 }
@@ -49,12 +49,12 @@ fn stale_revision_refusal_is_durable_and_rolls_back_the_operation() {
     let mut h = Harness::new();
     let r = request(0, Operation::Pause);
     refused(
-        super::super::apply(&mut h.store, &person(), &r, 1),
+        super::apply_fixture(&mut h.store, &person(), &r, 1),
         code::STALE_REVISION,
     );
     h.run(&person(), Operation::Pause).unwrap();
     refused(
-        super::super::apply(&mut h.store, &person(), &r, 2),
+        super::apply_fixture(&mut h.store, &person(), &r, 2),
         code::STALE_REVISION,
     );
     assert_eq!(h.store.journal(TEAM, 200, None).unwrap().rows.len(), 2);
@@ -67,10 +67,10 @@ fn exact_receipt_replay_is_read_only_after_delegation_revocation() {
         h.store.team(TEAM).unwrap().unwrap().revision,
         Operation::Accept { node },
     );
-    let first = super::super::apply(&mut h.store, &lead, &r, 1).unwrap();
+    let first = super::apply_fixture(&mut h.store, &lead, &r, 1).unwrap();
     h.settings(|s| s.delegations.accept_results = false);
     assert_eq!(
-        super::super::apply(&mut h.store, &lead, &r, 2).unwrap(),
+        super::apply_fixture(&mut h.store, &lead, &r, 2).unwrap(),
         first
     );
     refused(h.run(&lead, Operation::Accept { node }), code::NOT_ALLOWED);
@@ -164,7 +164,7 @@ fn round2_settle_requests_with_null_and_empty_reasons_decode_and_replay_exactly(
                 reason: reason.clone(),
             },
         );
-        let first = crate::teams::ops::apply(&mut h.store, &service(), &settle, 1234).unwrap();
+        let first = super::apply_fixture(&mut h.store, &service(), &settle, 1234).unwrap();
         let saved = content(&h, &settle.request_id);
         match &reason {
             None => assert!(saved.contains("\"reason\":null"), "{reason:?}: {saved}"),
@@ -174,7 +174,7 @@ fn round2_settle_requests_with_null_and_empty_reasons_decode_and_replay_exactly(
             serde_json::from_str(&saved).expect("the round-2 content decodes");
         assert_eq!(decoded, settle, "{reason:?}: the decoded request is exact");
         let journal = h.store.journal(TEAM, 200, None).unwrap();
-        let replay = crate::teams::ops::apply(&mut h.store, &service(), &decoded, 1235).unwrap();
+        let replay = super::apply_fixture(&mut h.store, &service(), &decoded, 1235).unwrap();
         assert_eq!(replay, first, "{reason:?}: exact receipt replay");
         assert_eq!(content_rows(&h, &settle.request_id), 1, "{reason:?}");
         assert_eq!(
@@ -223,7 +223,7 @@ fn a_new_settle_request_without_the_reason_key_decodes_and_applies() {
             reason: None,
         }
     );
-    let reply = crate::teams::ops::apply(&mut h.store, &service(), &request, 1234).unwrap();
+    let reply = super::apply_fixture(&mut h.store, &service(), &request, 1234).unwrap();
     assert_eq!(reply.revision, rev + 1);
     assert!(
         content(&h, &id).contains("\"reason\":null"),

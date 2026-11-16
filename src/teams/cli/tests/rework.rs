@@ -1,7 +1,7 @@
 //! Rework UI contexts come from the same CLI, named-task, document and
 //! archival writers as publication. No application row is inserted by hand.
 use super::harness::*;
-use crate::teams::{cli::actor::Caller, ops::Operation};
+use crate::teams::ops::Operation;
 use serde_json::{json, Value};
 use zerus_replica::{Actor, ProjectStore, Stage};
 
@@ -19,7 +19,7 @@ pub(super) fn from_waiting(
         );
         body.insert("team".into(), json!(TEAM));
         body.insert("expected_revision".into(), json!(h.revision()));
-        let (v, exit) = h.cli(&Caller::Person, name, &Value::Object(body).to_string());
+        let (v, exit) = h.native_command(name, &Value::Object(body).to_string());
         assert_eq!(exit, 0, "{v}");
     };
     command(

@@ -230,6 +230,7 @@ fn version_two_migrates_atomically_without_changing_existing_team_or_card_rows()
     let before = h.store.card(TEAM, card).unwrap();
     // Named legacy-layout fixture: rows are product-written, then only the
     // new empty schema leaf is removed to model the pre-cutover version.
+    crate::teams::store::person_actions::migration_tests::native_four(&h);
     h.store.db.as_ref().unwrap().execute_batch("DROP TRIGGER person_gesture_store_kept; DROP TRIGGER person_gesture_store_immutable; DROP TRIGGER person_gestures_immutable; DROP TABLE person_gestures; DROP TABLE person_gesture_store; PRAGMA user_version=2;").unwrap();
     assert!(Store::person_evidence(h.temp.path()).is_err());
     h.store = Store::open(h.temp.path()).unwrap();
@@ -240,7 +241,7 @@ fn version_two_migrates_atomically_without_changing_existing_team_or_card_rows()
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        crate::teams::store::NATIVE_PERSON_LAYOUT
+        crate::teams::store::versions::CORE_NATIVE_FLOOR
     );
     h.store = Store::open(h.temp.path()).unwrap();
     assert_eq!(

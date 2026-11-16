@@ -17,6 +17,9 @@ type Result<T> = std::result::Result<T, Problem>;
 mod creation;
 mod header;
 mod intake;
+#[cfg(all(test, unix))]
+pub(crate) mod models;
+pub(crate) mod native;
 mod policy;
 pub(crate) mod timing;
 pub(crate) use intake::{preflight, send};

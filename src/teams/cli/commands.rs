@@ -105,7 +105,7 @@ pub(super) fn create(
 
 /// The request is the operation's own fields plus the envelope; it never names
 /// its actor and never chooses the operation.
-fn build(variant: &str, text: &str) -> Result<Request, Problem> {
+pub(super) fn build(variant: &str, text: &str) -> Result<Request, Problem> {
     let mut fields = input::object(text)?;
     refuse_operation_word(&fields)?;
     fields.insert("op".into(), json!(variant));

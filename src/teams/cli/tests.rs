@@ -16,6 +16,8 @@ mod harness;
 mod hosted;
 mod lanes;
 mod member_sessions;
+#[cfg(unix)]
+mod phase_controls;
 mod phase_metrics;
 mod phases;
 mod planning;

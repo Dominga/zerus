@@ -38,7 +38,7 @@ fn comment(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn controls(a: &Phase, b: &Phase) -> bool {
+pub(crate) fn controls(a: &Phase, b: &Phase) -> bool {
     a.n == b.n
         && a.order == b.order
         && a.kind == b.kind

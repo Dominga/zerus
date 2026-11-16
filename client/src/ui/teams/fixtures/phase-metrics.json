@@ -34,6 +34,51 @@
       "default_pipeline": "reviewed"
     },
     "draft": {
+      "controls": {
+        "version": 1,
+        "scope": {
+          "kind": "draft",
+          "phase": 1,
+          "generation": 1
+        },
+        "pause": {
+          "state": "running"
+        },
+        "unstarted": {
+          "allowed": true,
+          "reason": null
+        },
+        "barrier": {
+          "allowed": true,
+          "reason": null
+        },
+        "pause_change": {
+          "allowed": true,
+          "reason": null
+        },
+        "resume": {
+          "allowed": false,
+          "reason": "The phase is not paused."
+        },
+        "acceptance": {
+          "allowed": true,
+          "reason": null
+        },
+        "earlier": {
+          "target": null,
+          "availability": {
+            "allowed": false,
+            "reason": "There is no neighboring planned phase in that direction."
+          }
+        },
+        "later": {
+          "target": null,
+          "availability": {
+            "allowed": false,
+            "reason": "There is no neighboring planned phase in that direction."
+          }
+        }
+      },
       "phase": {
         "n": 1,
         "order": 1,

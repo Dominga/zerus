@@ -1,0 +1,3278 @@
+{
+  "approved_unstarted": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 1,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 15,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [
+            {
+              "admitted": true,
+              "assignee": "",
+              "decided_by": "",
+              "deps_editable": true,
+              "held": false,
+              "holder": null,
+              "implementer": "",
+              "integrated": false,
+              "kind": "task",
+              "node": 1,
+              "pending_decision": null,
+              "pending_replaceable": false,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "V",
+              "role": "developer",
+              "round": 1,
+              "rounds": 3,
+              "stages": [],
+              "state": "pending",
+              "task": {
+                "project": "example-project",
+                "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+              },
+              "title": "Task 1"
+            }
+          ],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000de2c",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
+          "editable": false,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "pending",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 15
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "barrier": true,
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "state": "approved",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-00000000de2c",
+            "reason": null,
+            "state": "published",
+            "total": 1
+          },
+          "rejection": null,
+          "revision": 15,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 15,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "barrier": true,
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "state": "approved",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 15,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "awaiting": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 1,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 18,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": true,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000de2c",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "version": 1
+          },
+          "editable": false,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 18
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "barrier": true,
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "state": "awaiting_acceptance",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-00000000de2c",
+            "reason": null,
+            "state": "published",
+            "total": 1
+          },
+          "rejection": null,
+          "revision": 18,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 18,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "barrier": true,
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "state": "awaiting_acceptance",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 18,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "correction": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 1,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 21,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "episode": {
+                "created_ms": 1700000000000,
+                "id": "00000000-0000-4000-8000-00000000900b",
+                "owner": {
+                  "kind": "person",
+                  "person": "local"
+                },
+                "reason": "Pause only new correction hand-outs."
+              },
+              "state": "paused"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": true,
+              "reason": null
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000de2c",
+              "rework": {
+                "approval": null,
+                "generation": 2,
+                "id": "00000000-0000-4000-8000-00000000de32"
+              }
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "version": 1
+          },
+          "editable": false,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 21
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 5,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "barrier": true,
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "paused": true,
+            "state": "awaiting_acceptance",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-00000000de2c",
+            "reason": null,
+            "state": "published",
+            "total": 1
+          },
+          "rejection": null,
+          "revision": 21,
+          "rework": {
+            "base_publication": "00000000-0000-4000-8000-00000000de2c",
+            "comment": "Retain the gate; add an explicit correction.",
+            "draft": {
+              "accept_available": false,
+              "complete": true,
+              "editable": true,
+              "generation": 2,
+              "graph": {
+                "complete": true,
+                "edges": [],
+                "nodes": [
+                  {
+                    "id": 4,
+                    "layer": 0,
+                    "phase": 1
+                  }
+                ]
+              },
+              "live": null,
+              "metrics": {
+                "average_parallelism_tenths": 10,
+                "critical_path_minutes": 30,
+                "external_dependencies": 0,
+                "known_estimates": 1,
+                "total_nodes": 1,
+                "unavailable": null,
+                "warnings": []
+              },
+              "next_node": 5,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 4,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 4",
+                  "writes": [
+                    "src/part4.rs"
+                  ]
+                }
+              ],
+              "phase": {
+                "acceptance": "person",
+                "barrier": true,
+                "kind": "plan",
+                "n": 1,
+                "order": 2,
+                "paused": true,
+                "state": "draft",
+                "title": "Foundation"
+              },
+              "previous": null,
+              "publication": null,
+              "rejection": null,
+              "revision": 21,
+              "rework_available": false,
+              "unknown_fields": false
+            },
+            "id": "00000000-0000-4000-8000-00000000de32",
+            "state": "review"
+          },
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 5,
+          "next_phase": 4,
+          "revision": 21,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "barrier": true,
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "paused": true,
+              "state": "awaiting_acceptance",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 21,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "correction_publishing": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 1,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 22,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "episode": {
+                "created_ms": 1700000000000,
+                "id": "00000000-0000-4000-8000-00000000900b",
+                "owner": {
+                  "kind": "person",
+                  "person": "local"
+                },
+                "reason": "Pause only new correction hand-outs."
+              },
+              "state": "paused"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": true,
+              "reason": null
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000de2c",
+              "rework": {
+                "approval": "00000000-0000-4000-8000-00000000de35",
+                "generation": 2,
+                "id": "00000000-0000-4000-8000-00000000de32"
+              }
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "version": 1
+          },
+          "editable": false,
+          "generation": 1,
+          "graph": {
+            "complete": false,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": false,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "accepted",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 22
+          },
+          "metrics": {
+            "average_parallelism_tenths": null,
+            "critical_path_minutes": null,
+            "external_dependencies": 0,
+            "known_estimates": 0,
+            "total_nodes": 0,
+            "unavailable": "incomplete_phase",
+            "warnings": []
+          },
+          "next_node": 5,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "barrier": true,
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "paused": true,
+            "state": "awaiting_acceptance",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-00000000de2c",
+            "reason": null,
+            "state": "published",
+            "total": 1
+          },
+          "rejection": null,
+          "revision": 22,
+          "rework": {
+            "base_publication": "00000000-0000-4000-8000-00000000de2c",
+            "comment": "Retain the gate; add an explicit correction.",
+            "draft": {
+              "accept_available": false,
+              "complete": true,
+              "editable": false,
+              "generation": 2,
+              "graph": {
+                "complete": true,
+                "edges": [],
+                "nodes": [
+                  {
+                    "id": 4,
+                    "layer": 0,
+                    "phase": 1
+                  }
+                ]
+              },
+              "live": null,
+              "metrics": {
+                "average_parallelism_tenths": 10,
+                "critical_path_minutes": 30,
+                "external_dependencies": 0,
+                "known_estimates": 1,
+                "total_nodes": 1,
+                "unavailable": null,
+                "warnings": []
+              },
+              "next_node": 5,
+              "nodes": [
+                {
+                  "assignee": null,
+                  "criteria": [
+                    "The targeted checks pass"
+                  ],
+                  "deps": [],
+                  "estimate_minutes": 30,
+                  "id": 4,
+                  "kind": "task",
+                  "pipeline": "reviewed",
+                  "role": "developer",
+                  "text": "Implement the reviewed work.",
+                  "title": "Task 4",
+                  "writes": [
+                    "src/part4.rs"
+                  ]
+                }
+              ],
+              "phase": {
+                "acceptance": "person",
+                "barrier": true,
+                "kind": "plan",
+                "n": 1,
+                "order": 2,
+                "paused": true,
+                "state": "draft",
+                "title": "Foundation"
+              },
+              "previous": null,
+              "publication": {
+                "blocked": 0,
+                "created": 0,
+                "generation": 2,
+                "id": "00000000-0000-4000-8000-00000000de35",
+                "reason": null,
+                "state": "reserved",
+                "total": 1
+              },
+              "rejection": null,
+              "revision": 22,
+              "rework_available": false,
+              "unknown_fields": false
+            },
+            "id": "00000000-0000-4000-8000-00000000de32",
+            "state": "publishing"
+          },
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 5,
+          "next_phase": 4,
+          "revision": 22,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "barrier": true,
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "paused": true,
+              "state": "awaiting_acceptance",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 22,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "draft": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 7,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
+          "editable": true,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": null,
+          "rejection": null,
+          "revision": 7,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 7,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 7,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "paused_lead": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 10,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "episode": {
+                "created_ms": 1700000000000,
+                "id": "00000000-0000-4000-8000-000000009008",
+                "owner": {
+                  "kind": "lead",
+                  "member": "lead",
+                  "person": "local",
+                  "session": {
+                    "machine": "00000000-0000-4000-8000-0000000000aa",
+                    "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+                  }
+                },
+                "reason": "Wait for the retained review."
+              },
+              "state": "paused"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": true,
+              "reason": null
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
+          "editable": true,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "paused": true,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": null,
+          "rejection": null,
+          "revision": 10,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 10,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "paused": true,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 10,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "paused_person": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 0,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 8,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": true,
+                "reason": null
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "episode": {
+                "created_ms": 1700000000000,
+                "id": "00000000-0000-4000-8000-000000009007",
+                "owner": {
+                  "kind": "person",
+                  "person": "local"
+                },
+                "reason": "Review the exact phase publication."
+              },
+              "state": "paused"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": true,
+              "reason": null
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
+          "editable": true,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": null,
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "paused": true,
+            "state": "draft",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": null,
+          "rejection": null,
+          "revision": 8,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 8,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "paused": true,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 8,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  },
+  "started": {
+    "team": {
+      "bar": {
+        "base_commit": "0123456789abcdef0123456789abcdef01234567",
+        "counts": {
+          "cards": 0,
+          "inbox": 0,
+          "members": {
+            "active": 1,
+            "not_created": 3,
+            "paused": 0,
+            "removed": 0,
+            "total": 4
+          },
+          "nodes": {
+            "accepted": 0,
+            "cancelled": 0,
+            "in_progress": 1,
+            "pending": 0,
+            "reported": 0,
+            "waiting": 0
+          }
+        },
+        "goal": "",
+        "id": "00000000-0000-4000-8000-00000000beef",
+        "integration_branch": "zerus/team/fixes",
+        "lead": "lead",
+        "name": "Fixes",
+        "project": "example-project",
+        "revision": 16,
+        "status": "running"
+      },
+      "groups": [
+        {
+          "cards": [],
+          "state": "draft"
+        },
+        {
+          "cards": [],
+          "state": "waiting"
+        },
+        {
+          "cards": [],
+          "state": "pending"
+        },
+        {
+          "cards": [
+            {
+              "admitted": true,
+              "assignee": "",
+              "decided_by": "",
+              "deps_editable": false,
+              "held": false,
+              "holder": null,
+              "implementer": "",
+              "integrated": false,
+              "kind": "task",
+              "node": 1,
+              "pending_decision": null,
+              "pending_replaceable": false,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "V",
+              "role": "developer",
+              "round": 1,
+              "rounds": 3,
+              "stages": [],
+              "state": "in_progress",
+              "task": {
+                "project": "example-project",
+                "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+              },
+              "title": "Task 1"
+            }
+          ],
+          "state": "in_progress"
+        },
+        {
+          "cards": [],
+          "state": "reported"
+        },
+        {
+          "cards": [],
+          "state": "accepted"
+        },
+        {
+          "cards": [],
+          "state": "cancelled"
+        }
+      ],
+      "member_roles": [
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "developer",
+          "model": "",
+          "name": "Developer"
+        },
+        {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "id": "reviewer",
+          "model": "",
+          "name": "Reviewer"
+        }
+      ],
+      "members": [
+        {
+          "account": "account-example",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "lead",
+          "lead": true,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "lead",
+          "session": {
+            "machine": "00000000-0000-4000-8000-0000000000aa",
+            "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+          },
+          "state": "active"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m1",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m2",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "developer",
+          "session": null,
+          "state": "not_created"
+        },
+        {
+          "account": "",
+          "account_choice": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "id": "m3",
+          "lead": false,
+          "model": null,
+          "open_work": 0,
+          "person_stopped": false,
+          "role": "reviewer",
+          "session": null,
+          "state": "not_created"
+        }
+      ],
+      "next": null,
+      "plan": {
+        "draft": {
+          "accept_available": false,
+          "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "A retained phase task or pipeline stage has already started or ended."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "A retained phase task or pipeline stage has already started or ended."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 3
+              }
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "A retained phase task or pipeline stage has already started or ended."
+              },
+              "target": {
+                "generation": 1,
+                "kind": "draft",
+                "phase": 2
+              }
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000de2c",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "A retained phase task or pipeline stage has already started or ended."
+            },
+            "version": 1
+          },
+          "editable": false,
+          "generation": 1,
+          "graph": {
+            "complete": true,
+            "edges": [],
+            "nodes": [
+              {
+                "id": 1,
+                "layer": 0,
+                "phase": 1
+              }
+            ]
+          },
+          "live": {
+            "complete": true,
+            "nodes": [
+              {
+                "admitted": true,
+                "estimate_minutes": 30,
+                "id": 1,
+                "phase": 1,
+                "pipeline": "reviewed",
+                "rank": "V",
+                "role": "developer",
+                "round": 1,
+                "state": "in_progress",
+                "task": {
+                  "project": "example-project",
+                  "uuid": "4d36c88d-c1dd-80fd-877f-c47b6931d899"
+                },
+                "title": "Task 1",
+                "writes": [
+                  "src/part1.rs"
+                ]
+              }
+            ],
+            "phase": 1,
+            "revision": 16
+          },
+          "metrics": {
+            "average_parallelism_tenths": 10,
+            "critical_path_minutes": 30,
+            "external_dependencies": 0,
+            "known_estimates": 1,
+            "total_nodes": 1,
+            "unavailable": null,
+            "warnings": []
+          },
+          "next_node": 4,
+          "nodes": [
+            {
+              "assignee": null,
+              "criteria": [
+                "The targeted checks pass"
+              ],
+              "deps": [],
+              "estimate_minutes": 30,
+              "id": 1,
+              "kind": "task",
+              "pipeline": "reviewed",
+              "role": "developer",
+              "text": "Implement the reviewed work.",
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": {
+            "acceptance": "person",
+            "barrier": true,
+            "kind": "plan",
+            "n": 1,
+            "order": 2,
+            "state": "approved",
+            "title": "Foundation"
+          },
+          "previous": null,
+          "publication": {
+            "blocked": 0,
+            "created": 1,
+            "generation": 1,
+            "id": "00000000-0000-4000-8000-00000000de2c",
+            "reason": null,
+            "state": "published",
+            "total": 1
+          },
+          "rejection": null,
+          "revision": 16,
+          "rework_available": true,
+          "unknown_fields": false
+        },
+        "draft_failure": null,
+        "epoch": 2,
+        "list": {
+          "approval_available": true,
+          "default_pipeline": "reviewed",
+          "drafts_available": true,
+          "next": null,
+          "next_node": 4,
+          "next_phase": 4,
+          "revision": 16,
+          "routes": [
+            {
+              "pipeline": "reviewed",
+              "role": "developer"
+            }
+          ],
+          "rows": [
+            {
+              "kind": "queue",
+              "mode": "free",
+              "n": 0,
+              "state": "approved",
+              "title": "Queue"
+            },
+            {
+              "acceptance": "person",
+              "barrier": true,
+              "kind": "plan",
+              "n": 1,
+              "order": 2,
+              "state": "approved",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 2,
+              "order": 3,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            {
+              "acceptance": "person",
+              "kind": "plan",
+              "n": 3,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            }
+          ],
+          "team": "00000000-0000-4000-8000-00000000beef"
+        },
+        "list_failure": null,
+        "selected": 1
+      },
+      "revision": 16,
+      "settings": {
+        "caps": {
+          "max_members": 6,
+          "max_open_questions": 3,
+          "max_open_tasks": 500,
+          "max_phase_tasks": 50
+        },
+        "delegations": {
+          "accept_results": true,
+          "answer_members": true,
+          "confirm_trust": true,
+          "merge_accepted": true,
+          "resume_exited": true
+        },
+        "integration": "none",
+        "land_allowed": false,
+        "phase_acceptance": "person",
+        "plan_approval": "review",
+        "queue": true,
+        "routing": "direct",
+        "timers": {
+          "answer_escalate_minutes": 10,
+          "inbox_interval_seconds": 120,
+          "lead_stall_minutes": 20,
+          "remind_lead_minutes": 15,
+          "remind_person_minutes": 60,
+          "report_timeout_seconds": 120,
+          "resume_limit_per_hour": 3,
+          "start_timeout_seconds": 180
+        }
+      },
+      "truncated": false
+    }
+  }
+}

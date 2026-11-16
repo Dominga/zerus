@@ -3,6 +3,7 @@
 use super::completion::ended;
 use super::*;
 use zerus_team_plan::{Acceptance, Integration, PhaseState};
+mod controls;
 
 fn waiting(
     policy: Acceptance,
@@ -1428,8 +1429,16 @@ fn rework_publication_refuses_an_incompatible_header_instead_of_weakening_a_hard
         .is_err());
     assert!(f.h.store.node(TEAM, next).unwrap().is_none());
     assert_eq!(
-        f.h.store.phase_draft(TEAM, 1).unwrap().phase.acceptance,
+        crate::teams::store::phase_controls::phase(f.h.store.db.as_ref().unwrap(), TEAM, 1)
+            .unwrap()
+            .acceptance,
         Acceptance::Person
+    );
+    // The incompatible injected header also makes the selected control
+    // read unavailable; it cannot supply a safe editable/readable scope.
+    assert_eq!(
+        f.h.store.phase_draft(TEAM, 1).unwrap_err().code,
+        zerus_team_plan::problem::code::STORAGE_FAILED
     );
     f.h.store
         .db

@@ -150,6 +150,51 @@
       "draft": {
         "accept_available": false,
         "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": true,
+            "reason": null
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 1,
+            "kind": "draft",
+            "phase": 1
+          },
+          "unstarted": {
+            "allowed": true,
+            "reason": null
+          },
+          "version": 1
+        },
         "editable": true,
         "generation": 1,
         "graph": {
@@ -576,6 +621,53 @@
       "draft": {
         "accept_available": false,
         "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": false,
+            "reason": "A retained task has prior attempts, delivery, stage, decision or integration history, or lacks a current unstarted observation."
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 1,
+            "kind": "published",
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-000000015350",
+            "rework": null
+          },
+          "unstarted": {
+            "allowed": false,
+            "reason": "A retained task has prior attempts, delivery, stage, decision or integration history, or lacks a current unstarted observation."
+          },
+          "version": 1
+        },
         "editable": false,
         "generation": 1,
         "graph": {
@@ -1216,6 +1308,53 @@
       "draft": {
         "accept_available": false,
         "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": false,
+            "reason": "A retained phase task or pipeline stage has already started or ended."
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 2,
+            "kind": "published",
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-00000000900f",
+            "rework": null
+          },
+          "unstarted": {
+            "allowed": false,
+            "reason": "A retained phase task or pipeline stage has already started or ended."
+          },
+          "version": 1
+        },
         "editable": false,
         "generation": 2,
         "graph": {
@@ -1858,6 +1997,57 @@
       "draft": {
         "accept_available": false,
         "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": false,
+            "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 1,
+            "kind": "published",
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-000000015350",
+            "rework": {
+              "approval": "00000000-0000-4000-8000-00000000900f",
+              "generation": 2,
+              "id": "00000000-0000-4000-8000-00000000900c"
+            }
+          },
+          "unstarted": {
+            "allowed": false,
+            "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+          },
+          "version": 1
+        },
         "editable": false,
         "generation": 1,
         "graph": {

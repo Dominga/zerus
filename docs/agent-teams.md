@@ -919,3 +919,29 @@ task states or delivery/report events are present. Estimates are not phase
 elapsed time, an ETA, or a completion promise. Hiding or changing the selected
 scope drops the derived page; a failed or mismatched read cannot retain its
 numbers.
+
+## Controlling a planned phase
+
+The phase header's **More** menu offers a barrier, pause/resume, movement and
+acceptance policy. These controls retain the phase's stable ID, task membership
+and history. The person or exact current lead can set a barrier or pause a
+nonterminal planned phase. A pause requires a reason; its owner and reason stay
+visible. The lead can remove or replace only the pause owned by that same lead
+session. A person's pause, a predecessor's pause and an unattributed legacy pause
+require the person. Existing reports and work already in hand continue, while
+the pause blocks new ordinary hand-outs.
+
+**Move earlier/later** uses the exact neighboring identity returned by the
+phase read, not a visible row position. The source, target and all crossed
+phases must be positively unstarted. Publishing, awaiting, terminal, incomplete
+or previously attempted work cannot move. Changing the phase's acceptance
+policy is Person-only and uses the same positive unstarted check; it never
+changes the team default or softens a waiting gate. Current task documents are
+checked as well as retained live/archive history, so an unobserved send
+reservation cannot be mistaken for an unused Todo task.
+
+Unavailable controls show their reason. Missing, stale or partial reads do not
+enable an action. An unknown result retains the exact original request for
+**Check**; it never automatically sends a replacement. During corrections,
+permitted barrier/pause changes preserve the BASE/proposal/NEW identities and
+all acceptance, approval, title, order and historical publication facts.

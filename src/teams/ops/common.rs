@@ -8,6 +8,7 @@ pub(super) struct Context<'a> {
     pub team: &'a Team,
     pub op: &'a Operation,
     pub request_id: &'a str,
+    pub task_custody: Option<&'a Result<store::phase_controls::task_custody::TaskCustody>>,
     pub now: i64,
     pub reply: Reply,
     pub event: Option<&'static str>,

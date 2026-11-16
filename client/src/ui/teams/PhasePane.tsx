@@ -12,6 +12,7 @@ import { PhaseActions } from "./PhaseActions";
 import { PhaseLiveLayers } from "./PhaseLiveLayers";
 import { PhaseLayers } from "./PhaseDraftLayers";
 import { PhaseRework } from "./PhaseRework";
+import { PhaseControls } from "./PhaseControls";
 export { PhaseLayers } from "./PhaseDraftLayers";
 import "../styles/team-phases.css";
 
@@ -80,7 +81,7 @@ export function PhasePane(props: {
           <Show when={phaseHeader(d().phase).barrier}><span class="dim">{phaseHeader(d().phase).barrier}</span></Show>
           <Show when={phaseHeader(d().phase).paused}><span class="dim">{phaseHeader(d().phase).paused}</span></Show>
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>
-
+          <PhaseControls draft={d()} view={props.view} busy={props.busy} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         </header>
         <ObservedPanel team={team.id} phase={d().phase.n} pane={pane()?.observed} estimates={pane()?.estimates} readFailed={!!failed()} />
         <PhaseActions draft={d()} view={props.view} busy={props.busy} available={!!metadata().approval_available} readFailed={!!failed()} onChanged={() => follower.select(selected())} />

@@ -336,6 +336,35 @@ pub(super) fn validate(
     if graph.iter().any(|n| !phases.contains_key(&n.phase)) {
         return Err(invalid("A plan node names an unknown phase."));
     }
+    write_sets(&graph, &phases, &BTreeSet::from([phase.n]))?;
+    Ok(next)
+}
+
+/// Reuse the draft graph's bounded writer validation after an S5 control
+/// change in the operation savepoint. No task or frozen draft is rewritten.
+pub(super) fn revalidate_controls(ctx: &Context<'_>, changed: &BTreeSet<u32>) -> Result<()> {
+    let mut graph = other_drafts(ctx, u32::MAX)?;
+    let input = DraftInput {
+        title: String::new(),
+        barrier: false,
+        nodes: Vec::new(),
+    };
+    graph_scope::extend(ctx, &mut graph, &input)?;
+    let phases = store::phase_controls::phases(ctx.db, &ctx.team.id)?
+        .into_iter()
+        .map(|p| (p.n, p))
+        .collect();
+    write_sets(&graph, &phases, changed)
+}
+
+fn write_sets(
+    graph: &[Node],
+    phases: &BTreeMap<u32, Phase>,
+    changed: &BTreeSet<u32>,
+) -> Result<()> {
+    if graph.iter().any(|n| !phases.contains_key(&n.phase)) {
+        return Err(invalid("A plan node names an unknown phase."));
+    }
     let index: BTreeMap<_, _> = graph.iter().map(|n| (n.id, n)).collect();
     // Bound work under the writer lock, including long path components. The
     // request's byte limit alone permits a quadratic number of path pairs.
@@ -351,8 +380,11 @@ pub(super) fn validate(
         .collect();
     let mut write_work = 0u64;
     let mut ancestry = BTreeMap::new();
-    for a in graph.iter().filter(|n| n.phase == phase.n) {
-        for b in graph.iter().filter(|n| n.phase != phase.n || n.id > a.id) {
+    for (i, a) in graph.iter().enumerate() {
+        for b in &graph[i + 1..] {
+            if !changed.contains(&a.phase) && !changed.contains(&b.phase) {
+                continue;
+            }
             if matches!(a.state, NodeState::Accepted | NodeState::Cancelled)
                 || matches!(b.state, NodeState::Accepted | NodeState::Cancelled)
             {
@@ -398,7 +430,7 @@ pub(super) fn validate(
             }
         }
     }
-    Ok(next)
+    Ok(())
 }
 
 fn phase_order(phase: &Phase) -> (u32, u32) {

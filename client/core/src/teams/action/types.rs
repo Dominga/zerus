@@ -43,6 +43,28 @@ pub struct CreateDelegations {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamAction {
+    SetPhaseBarrier {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        barrier: bool,
+    },
+    PausePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+        reason: String,
+    },
+    ResumePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+    },
+    MovePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        relative_to: zerus_team_plan::phase_control::PhaseControlScope,
+        placement: zerus_team_plan::phase_control::PhasePlacement,
+    },
+    SetPhaseAcceptance {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        acceptance: zerus_team_plan::Acceptance,
+    },
     SendBackPhase {
         phase: u32,
         publication: String,

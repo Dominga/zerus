@@ -10,6 +10,51 @@
     "draft": {
       "accept_available": false,
       "complete": true,
+      "controls": {
+        "acceptance": {
+          "allowed": true,
+          "reason": null
+        },
+        "barrier": {
+          "allowed": true,
+          "reason": null
+        },
+        "earlier": {
+          "availability": {
+            "allowed": false,
+            "reason": "There is no neighboring planned phase in that direction."
+          },
+          "target": null
+        },
+        "later": {
+          "availability": {
+            "allowed": false,
+            "reason": "There is no neighboring planned phase in that direction."
+          },
+          "target": null
+        },
+        "pause": {
+          "state": "running"
+        },
+        "pause_change": {
+          "allowed": true,
+          "reason": null
+        },
+        "resume": {
+          "allowed": false,
+          "reason": "The phase is not paused."
+        },
+        "scope": {
+          "generation": 1,
+          "kind": "draft",
+          "phase": 1
+        },
+        "unstarted": {
+          "allowed": true,
+          "reason": null
+        },
+        "version": 1
+      },
       "editable": true,
       "generation": 1,
       "live": null,

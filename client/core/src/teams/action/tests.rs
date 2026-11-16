@@ -1379,7 +1379,12 @@ fn every_action_the_view_sends_is_still_read() {
 fn action_kinds() -> Vec<String> {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
-            TeamAction::SendBackPhase { .. }
+            TeamAction::SetPhaseBarrier { .. }
+            | TeamAction::PausePhase { .. }
+            | TeamAction::ResumePhase { .. }
+            | TeamAction::MovePhase { .. }
+            | TeamAction::SetPhaseAcceptance { .. }
+            | TeamAction::SendBackPhase { .. }
             | TeamAction::SubmitPhaseCorrections { .. }
             | TeamAction::EditPhaseCorrections { .. }
             | TeamAction::ApprovePhaseCorrections { .. }
@@ -1423,7 +1428,36 @@ fn action_kinds() -> Vec<String> {
         }
     }
     let member = || "m1".to_owned();
+    let scope = || zerus_team_plan::phase_control::PhaseControlScope::Draft {
+        phase: 1,
+        generation: 1,
+    };
     let samples = vec![
+        TeamAction::SetPhaseBarrier {
+            scope: scope(),
+            barrier: true,
+        },
+        TeamAction::PausePhase {
+            scope: scope(),
+            pause: None,
+            reason: "Review".into(),
+        },
+        TeamAction::ResumePhase {
+            scope: scope(),
+            pause: None,
+        },
+        TeamAction::MovePhase {
+            scope: scope(),
+            relative_to: zerus_team_plan::phase_control::PhaseControlScope::Draft {
+                phase: 3,
+                generation: 1,
+            },
+            placement: zerus_team_plan::phase_control::PhasePlacement::Before,
+        },
+        TeamAction::SetPhaseAcceptance {
+            scope: scope(),
+            acceptance: zerus_team_plan::Acceptance::Person,
+        },
         TeamAction::SendBackPhase {
             phase: 1,
             publication: TEAM.into(),

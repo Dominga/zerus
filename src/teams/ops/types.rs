@@ -210,6 +210,28 @@ pub enum PublicationProblemKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    SetPhaseBarrier {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        barrier: bool,
+    },
+    PausePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+        reason: String,
+    },
+    ResumePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+    },
+    MovePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        relative_to: zerus_team_plan::phase_control::PhaseControlScope,
+        placement: zerus_team_plan::phase_control::PhasePlacement,
+    },
+    SetPhaseAcceptance {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        acceptance: Acceptance,
+    },
     RecordTimingFact {
         node: u32,
         observation: Box<super::observed_timing::TimingInput>,

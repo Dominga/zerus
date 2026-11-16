@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use zerus_team_plan::{draft::DraftNode, model::Phase};
 
+mod controls;
 mod rework;
 mod snapshot;
 use super::graph::{self, PlanGraph};
@@ -62,6 +63,7 @@ pub struct PreviousDraft {
 
 #[derive(Deserialize)]
 struct DraftRead {
+    controls: Option<Value>,
     phase: Phase,
     revision: u64,
     generation: Option<u64>,
@@ -82,6 +84,8 @@ struct DraftRead {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PhaseDraft {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controls: Option<zerus_team_plan::phase_control::PhaseControls>,
     pub phase: Phase,
     pub revision: u64,
     pub generation: Option<u64>,
@@ -158,7 +162,7 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
 }
 
 fn draft_value(data: &Value, wanted: u32, allow_rework: bool) -> Result<PhaseDraft, String> {
-    if !allow_rework && data.get("rework").is_some() {
+    if !allow_rework && (data.get("rework").is_some() || data.get("controls").is_some()) {
         return Err("Correction proposals cannot contain another rework episode.".into());
     }
     let mut frozen = data.clone();
@@ -256,6 +260,11 @@ fn draft_value(data: &Value, wanted: u32, allow_rework: bool) -> Result<PhaseDra
         .as_ref()
         .map(|r| rework::read(r, &out))
         .transpose()?;
+    let controls = out
+        .controls
+        .as_ref()
+        .map(|value| controls::read(value, &out, rework.as_ref()))
+        .transpose()?;
     let live = out
         .live
         .map(|value| snapshot::read(value, wanted, out.revision))
@@ -302,6 +311,7 @@ fn draft_value(data: &Value, wanted: u32, allow_rework: bool) -> Result<PhaseDra
         && live.as_ref().is_some_and(|s| s.complete)
         && out.phase.state == zerus_team_plan::PhaseState::AwaitingAcceptance;
     Ok(PhaseDraft {
+        controls: if unknown.is_empty() { controls } else { None },
         phase: out.phase,
         revision: out.revision,
         generation: out.generation,

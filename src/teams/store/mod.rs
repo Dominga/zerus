@@ -15,6 +15,7 @@ pub(crate) mod drafts;
 pub(crate) mod editing;
 mod holder;
 pub(crate) mod layout;
+pub(crate) mod phase_controls;
 mod phase_read;
 pub(crate) mod phase_snapshot;
 pub(crate) mod planning;
@@ -424,6 +425,7 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     planning::extend(db)?;
     publication::extend(db)?;
     rework::validate(db)?;
+    phase_controls::extend(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }

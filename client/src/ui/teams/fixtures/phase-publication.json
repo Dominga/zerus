@@ -157,6 +157,53 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "Only a nonterminal planned phase of an active team can change controls."
+            },
+            "barrier": {
+              "allowed": false,
+              "reason": "Only a nonterminal planned phase of an active team can change controls."
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": false,
+              "reason": "Only a nonterminal planned phase of an active team can change controls."
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "Only a nonterminal planned phase of an active team can change controls."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000938b",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "Only a nonterminal planned phase of an active team can change controls."
+            },
+            "version": 1
+          },
           "editable": false,
           "generation": 2,
           "graph": {
@@ -585,6 +632,53 @@
         "draft": {
           "accept_available": true,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000938b",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+            },
+            "version": 1
+          },
           "editable": false,
           "generation": 2,
           "graph": {
@@ -1034,6 +1128,51 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
           "editable": true,
           "generation": 1,
           "graph": {
@@ -1384,6 +1523,53 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "A published phase is not in its unstarted approved state."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000938b",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "A published phase is not in its unstarted approved state."
+            },
+            "version": 1
+          },
           "editable": false,
           "generation": 2,
           "graph": {
@@ -1829,6 +2015,53 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000938b",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
           "editable": false,
           "generation": 2,
           "graph": {
@@ -2257,6 +2490,53 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": false,
+              "reason": "A published phase is not in its unstarted approved state."
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "published",
+              "phase": 1,
+              "publication": "00000000-0000-4000-8000-00000000938b",
+              "rework": null
+            },
+            "unstarted": {
+              "allowed": false,
+              "reason": "A published phase is not in its unstarted approved state."
+            },
+            "version": 1
+          },
           "editable": false,
           "generation": 2,
           "graph": {
@@ -2641,6 +2921,51 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 1,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
           "editable": true,
           "generation": 1,
           "graph": {
@@ -2974,6 +3299,51 @@
         "draft": {
           "accept_available": false,
           "complete": true,
+          "controls": {
+            "acceptance": {
+              "allowed": true,
+              "reason": null
+            },
+            "barrier": {
+              "allowed": true,
+              "reason": null
+            },
+            "earlier": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "later": {
+              "availability": {
+                "allowed": false,
+                "reason": "There is no neighboring planned phase in that direction."
+              },
+              "target": null
+            },
+            "pause": {
+              "state": "running"
+            },
+            "pause_change": {
+              "allowed": true,
+              "reason": null
+            },
+            "resume": {
+              "allowed": false,
+              "reason": "The phase is not paused."
+            },
+            "scope": {
+              "generation": 2,
+              "kind": "draft",
+              "phase": 1
+            },
+            "unstarted": {
+              "allowed": true,
+              "reason": null
+            },
+            "version": 1
+          },
           "editable": true,
           "generation": 2,
           "graph": {

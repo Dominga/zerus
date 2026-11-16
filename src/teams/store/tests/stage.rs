@@ -51,7 +51,10 @@ fn a_version_two_store_gets_empty_pipeline_storage_on_open_without_a_migration()
         .db
         .as_ref()
         .unwrap()
-        .execute_batch("DROP TABLE verdicts; DROP TABLE stage_tasks; DROP TABLE pipeline_runs;")
+        // This synthetic pre-extension copy must omit the correlated S5
+        // leaf too. Keeping its marker while dropping its stage index is
+        // an incomplete current layout, not a store an older writer made.
+        .execute_batch("DROP TRIGGER phase_pause_identity; DROP TABLE phase_pause_episodes; DROP TABLE phase_controls_layout; DROP TABLE verdicts; DROP TABLE stage_tasks; DROP TABLE pipeline_runs;")
         .unwrap();
     h.store = Store::open(h.temp.path()).unwrap();
     let version: u32 = h

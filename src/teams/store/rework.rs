@@ -162,6 +162,7 @@ pub(crate) fn view(
             return Err(storage("The correction proposal has no complete draft."));
         }
         Some(Box::new(drafts::PhaseDraft {
+            controls: None,
             phase: phase.clone(),
             revision,
             generation: row.generation,

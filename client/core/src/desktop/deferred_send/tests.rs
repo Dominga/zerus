@@ -584,7 +584,11 @@ fn exact_native_queue_receipt_is_recorded_without_reinterpreting_unknown_routes(
     receipt["transport"] = json!("codex_queue");
     assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
     receipt["native_queued_message_id"] = json!("11111111-1111-4111-8111-111111111111");
-    assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).unwrap().matches(plan));
+    assert!(
+        Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap())
+            .unwrap()
+            .matches(plan)
+    );
     receipt["native_queued_message_id"] = json!("unknown");
     assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
     receipt["native_queued_message_id"] = json!("00000000-0000-0000-0000-000000000000");

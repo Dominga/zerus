@@ -717,7 +717,10 @@ impl Outcome {
             && receipt.digest == plan.input_sha256
             && (receipt.transport == "terminal"
                 || (receipt.transport == "codex_queue"
-                    && receipt.native_queued_message_id.as_deref().is_some_and(uuid)));
+                    && receipt
+                        .native_queued_message_id
+                        .as_deref()
+                        .is_some_and(uuid)));
         if !exact || receipt.refusal_schema.is_some() {
             return Err(RECEIPT_MISMATCH);
         }

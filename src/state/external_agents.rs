@@ -104,10 +104,13 @@ fn provider(event: &Value) -> Option<&'static str> {
 /// An unidentified inherited SessionStart cannot replace an established parent.
 /// Keep legacy startup hooks and verified interactive /new and /clear events.
 pub(super) fn main_start(record: &Value, event: &Value) -> bool {
-    if event["session_id"] == record["conversation_id"] { return true; }
+    if event["session_id"] == record["conversation_id"] {
+        return true;
+    }
     if record["agent"] == "codex"
         && (codex_tasks::known(record, string(event, "session_id"))
-            || codex_tasks::unresolved(record)) {
+            || codex_tasks::unresolved(record))
+    {
         return false;
     }
     match provider(event).or_else(|| caller(record).map(|source| source.provider)) {
@@ -154,8 +157,9 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
         }
         let source = caller(record);
         let agent = provider(event).or_else(|| source.map(|source| source.provider))?;
-        let headless = agent == "codex" && (codex_exec(event)
-            || source.is_some_and(|source| source.provider == "codex" && source.headless));
+        let headless = agent == "codex"
+            && (codex_exec(event)
+                || source.is_some_and(|source| source.provider == "codex" && source.headless));
         if agent == string(record, "agent") && !headless && !native_task {
             return None;
         }

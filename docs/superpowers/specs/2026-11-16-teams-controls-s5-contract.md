@@ -221,13 +221,16 @@ finds the same exhaustive production Phase writers:
 | `ops/rework.rs` proposal/approval/promotion | Clone actual controls and compare retained header controls under custody; no default reconstruction or alternate policy authority. |
 
 No earlier ResumePhase or pause companion writer exists in those sources.
-Team/member resume do not change Phase.paused. Old readiness and final ordinary
-native hand-out admission already honor the bit under writer custody. A paused
-phase cannot be freed by an older permitted edit. Core6's common writer and
-native admission recheck their execution fence inside custody; actual native7
-fences older Person writers. Existing cached Phase data is not an input to
-these writes. The new companion must be preserved byte-for-byte by real older
-opens/writes, not merely ignored in a fabricated connection test.
+Team/member resume do not change Phase.paused. Old readiness honors that bit;
+the earlier final ordinary reservation omission is the prerequisite described
+above, not a passing older-engine control. The corrected admitted7 must recheck
+readiness at that final point under custody. The enumerated older phase writers
+preserve the pause bit when editing a phase. Core6's common writer and native
+admission recheck their execution fence inside custody; final native7
+qualification must prove older Person writers remain fenced. Existing cached
+Phase data is not an input to these writes. The new companion must be preserved
+byte-for-byte by real older opens/writes, not merely ignored in a fabricated
+connection test.
 
 This source audit is not a claim that candidate7 is admitted or qualified.
 Coordinator clarification (2026-11-16): old7 compatibility covers states real

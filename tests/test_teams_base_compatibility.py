@@ -24,6 +24,18 @@ def module():
 
 
 class Native4EntryPoint(unittest.TestCase):
+    def require_sources(self, *commits):
+        for commit in commits:
+            result = subprocess.run(
+                ["git", "-C", str(ROOT), "cat-file", "-e", commit + "^{commit}"],
+                capture_output=True,
+            )
+            if result.returncode:
+                self.skipTest("local native4 probe requires the pinned Git source objects; no image built")
+
+    def setUp(self):
+        self.require_sources(PREVIOUS, CURRENT)
+
     def test_inspection_reports_both_actual_native4_sources_without_building(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / "unused-target"
@@ -44,6 +56,7 @@ class Native4EntryPoint(unittest.TestCase):
             self.assertFalse(target.exists(), "inspection must not prepare or build an image")
 
     def test_actual_historical_core2_is_refused_as_a_native4_substitute(self):
+        self.require_sources("34c231f26399229828f869dfdfbac1cb4ab0cd4e")
         entry = module()
         with self.assertRaisesRegex(entry.ContractError, "native4"):
             entry.audit_source(ROOT, "34c231f26399229828f869dfdfbac1cb4ab0cd4e")
@@ -56,7 +69,8 @@ class Native4EntryPoint(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "executable shared wrappers use POSIX argv")
     def test_explicit_steps_honor_the_shared_wrapper_before_running_a_worker(self):
-        with tempfile.TemporaryDirectory() as directory:
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
             root = Path(directory)
             marker = root / "called.json"
             wrapper = root / "wrapper"
@@ -69,7 +83,8 @@ class Native4EntryPoint(unittest.TestCase):
             cargo = root / "cargo"
             cargo.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(74)\n")
             cargo.chmod(0o700)
-            env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"]}
+            env = {**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                   "CARGO_TARGET_DIR": str(root / "unused-target")}
             for step in ["build-previous", "build-current", "run", "lint-current"]:
                 with self.subTest(step=step):
                     marker.unlink(missing_ok=True)
@@ -85,11 +100,13 @@ class Native4EntryPoint(unittest.TestCase):
                     self.assertNotIn("--heavy-wrapper", command, "one lease per worker; no nested wrapper")
 
     def test_run_refuses_absent_image_seals_without_a_fallback_build(self):
-        with tempfile.TemporaryDirectory() as directory:
+        (ROOT / "target").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as directory:
             evidence = Path(directory) / "evidence"
+            env = {**os.environ, "CARGO_TARGET_DIR": str(Path(directory) / "unused-target")}
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "--step", "run", "--evidence", str(evidence)],
-                cwd=ROOT, capture_output=True, text=True,
+                cwd=ROOT, env=env, capture_output=True, text=True,
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Build both native4 images before run", result.stderr)

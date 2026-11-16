@@ -11,7 +11,7 @@ capability. Inspect those source facts without building anything:
 python3 scripts/ci/check-teams-base-compatibility.py --inspect
 ```
 
-With Rust 1.99.1 and the two Git commits available locally, run:
+With Python 3.12+, Rust 1.99.1 and the two Git commits available locally, run:
 
 ```sh
 # Set ZERUS_HEAVY_WRAPPER to this computer's configured shared heavy wrapper.
@@ -79,3 +79,7 @@ a new core allocation or migration.
 When qualifying a newer pair, update the pinned actual sources, fixture and
 contract together. An ordinary newer-core refusal is not a missing-function SQL
 refusal. This command is local evidence, with no hosted workflow or release gate.
+
+The entry-point unit controls skip explicitly when their pinned Git objects are
+unavailable in a shallow/source-archive checkout. A skip is no real-image
+evidence; the actual command refuses missing sources without a fallback.

@@ -46,6 +46,10 @@ bash scripts/ci/cli.sh
 (cd client && npm ci && npm run check && npm test)
 ```
 
+For base advances and store-version work, run the maintained
+[local Teams native4 compatibility checks](docs/testing-teams-base.md). They
+separate real predecessor/current interoperability from SQL fault-seam guards.
+
 After editing `client/src/i18n.next-ru.json`, run
 `python3 client/scripts/generate-i18n-catalog.py`. It sorts the supplement and
 refreshes the generated catalog; `--check` verifies both without writing.

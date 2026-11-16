@@ -546,7 +546,11 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
       if (entry.key.startsWith("team:")) {
         const id = entry.key.slice("team:".length);
         if (entry.kind === "team") {
-          const view = entry.payload as TeamView;
+          const incoming = entry.payload as TeamView;
+          // The existing Teams poller emits ComputerId::local() (empty ID).
+          // A different read target cannot retain this derived page/estimate.
+          const view = (!visible() || entry.computer !== "") && (incoming.plan?.observed || incoming.plan?.estimates)
+            ? { ...incoming, plan: { ...incoming.plan, observed: null, estimates: null } } : incoming;
           // A view is shown only for the followed team; a late view after
           // unfollow is dropped. A decision waiting for this team's revision
           // takes it without showing it.
@@ -554,8 +558,8 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
           settleViews(view.bar.id, view);
         } else if (entry.kind === "failed") {
           const shown = team();
-          if (shown?.bar.id === id && shown.plan?.observed) {
-            setTeam({ ...shown, plan: { ...shown.plan, observed: null } });
+          if (shown?.bar.id === id && (shown.plan?.observed || shown.plan?.estimates)) {
+            setTeam({ ...shown, plan: { ...shown.plan!, observed: null, estimates: null } });
           }
           if (payload.code !== "cursor_reset") settleViews(id, null);
         } else if (entry.kind === "ended") {
@@ -572,6 +576,13 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
     if (!waiters) return;
     pendingViews.delete(id);
     for (const settle of waiters) settle(view);
+  }
+
+  function clearObservedEstimates() {
+    const shown = team();
+    if (shown?.plan && (shown.plan.observed || shown.plan.estimates)) {
+      setTeam({ ...shown, plan: { ...shown.plan, observed: null, estimates: null } });
+    }
   }
 
   // ------------------------------------------------- discovery and scope
@@ -604,7 +615,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   async function hidden(hiddenNow: boolean) {
     setVisible(!hiddenNow);
     try {
-      if (hiddenNow) { hiddenAt = Date.now(); await transport.hidden(true); return; }
+      if (hiddenNow) { clearObservedEstimates(); hiddenAt = Date.now(); await transport.hidden(true); return; }
       const was = hiddenAt;
       hiddenAt = undefined;
       if (was !== undefined && Date.now() - was >= HIDDEN_RECHECK_MS) { await recheck(); return; }
@@ -616,6 +627,7 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
   /** A Team tab follows its team beside the list and the waiting read. With
    * Teams off nothing is followed: only the application's recheck restarts. */
   async function openTeam(id: string) {
+    if (followed() !== id) clearObservedEstimates();
     setFollowed(id);
     if (stopped) return;
     await follow(scope());

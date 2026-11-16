@@ -10,6 +10,28 @@ fn codex_wrapped_native_title_is_an_empty_composer() {
     assert!(codex_wrapped_columns(&record, FRAME, 2, 19).is_some());
 }
 
+#[test]
+fn transcript_hyperlinks_do_not_hide_an_empty_wrapped_composer() {
+    // Native tmux styled captures retain OSC-8 link targets in history. Those
+    // bytes are not displayed columns and say nothing about the live footer.
+    let link = format!(
+        "\x1b]8;id=fixture;https://example.invalid/{}\x1b\\Review\x1b]8;;\x1b\\",
+        "a".repeat(160)
+    );
+    let linked = replace_row(FRAME, 0, &link);
+    assert!(codex_wrapped_empty(&record(), &linked, 2, 19, 80));
+    assert!(codex_wrapped_columns(&record(), &linked, 2, 19).is_some());
+
+    for changed in [
+        replace_row(&linked, 19, "› Preserve this actual draft"),
+        replace_row(&linked, 20, "  Preserve this continuation"),
+        replace_row(&linked, 19, "› 1. Approve this command?"),
+    ] {
+        assert!(codex_wrapped_columns(&record(), &changed, 2, 19).is_none());
+        assert!(!codex_wrapped_empty(&record(), &changed, 2, 19, 80));
+    }
+}
+
 fn record() -> Value {
     json!({"agent":"codex","model":"gpt-6.1-sol","cwd":"/fixture/root/fixture-project"})
 }

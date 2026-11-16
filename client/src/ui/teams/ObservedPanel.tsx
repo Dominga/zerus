@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import "../styles/observed-timing.css";
 import { tr } from "../../i18n";
 import { observedFollower, type ObservedFollow, type ObservedPane } from "../../store/observed-timing";
+import { PhaseEstimates } from "./PhaseEstimates";
+import type { EstimatePaneView } from "../../store/phase-estimates";
 const time = (value: number | null) => value === null ? tr("Unavailable") : new Date(value).toLocaleString();
 const category = (value: string) => {
   switch (value) {
@@ -14,7 +16,7 @@ const category = (value: string) => {
     case "gap": return tr("Observation gap"); default: return tr("Observed point");
   }
 };
-export function ObservedPanel(props: { team: string; phase: number; pane?: ObservedPane | null; follow?: ObservedFollow }) {
+export function ObservedPanel(props: { team: string; phase: number; pane?: ObservedPane | null; estimates?: EstimatePaneView | null; readFailed?: boolean; follow?: ObservedFollow }) {
   const follower = observedFollower(props.team, props.follow);
   const [open, setOpen] = createSignal(false), [mode, setMode] = createSignal<"time" | "members">("time"), [error, setError] = createSignal("");
   createEffect(() => follower.select(props.phase, open()));
@@ -28,6 +30,7 @@ export function ObservedPanel(props: { team: string; phase: number; pane?: Obser
       <p class="dim">{tr("Recorded delivery and sampled task states. Implementation time is unavailable.")}</p>
       <Show when={follower.error() || error()}>{(message) => <p role="status">{message()}</p>}</Show>
       <Show when={pane()} fallback={<p role="status">{tr("Observation coverage is unavailable.")}</p>}>{(selected) => <>
+        <PhaseEstimates value={!props.readFailed && !follower.error() && !error() && props.estimates?.epoch === selected().epoch ? props.estimates : null} />
         <p>{tr("Last verified observation: %1", time(selected().page.as_of_ms))}</p>
         <Show when={selected().page.more || selected().page.truncated}><p role="status">{tr("Partial observation window. This page does not cover the whole phase.")}</p></Show>
         <Show when={selected().page.reasons.includes("clock_discontinuity") || selected().page.reasons.includes("observer_restart") || selected().page.rows.some((f) => f.category === "gap")}><p role="status">{tr("Observation continuity is interrupted. No duration is inferred across the gap.")}</p></Show>

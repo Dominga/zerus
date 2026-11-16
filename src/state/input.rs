@@ -826,9 +826,20 @@ fn codex_shortcuts_footer(plain: &str) -> bool {
 pub(super) fn codex_wrapped_columns(record: &Value, screen: &str, x: usize, y: usize) -> Option<usize> {
     use unicode_width::UnicodeWidthStr;
     if record["agent"] != "codex" { return None; }
-    let columns = screen.lines().map(|line| {
-        styled_row(line).iter().map(|(ch, _)| ch).collect::<String>().width()
-    }).max()?;
+    // History can contain OSC hyperlink targets, which are not display cells.
+    // Only the live composer/footer can hint at its wrapping; the selected
+    // backend must still supply the authoritative width before input is allowed.
+    let columns = screen
+        .lines()
+        .skip(y)
+        .map(|line| {
+            styled_row(line)
+                .iter()
+                .map(|(ch, _)| ch)
+                .collect::<String>()
+                .width()
+        })
+        .max()?;
     codex_wrapped_empty(record, screen, x, y, columns).then_some(columns)
 }
 

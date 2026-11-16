@@ -1066,7 +1066,7 @@
   "Notification settings must be changed through the background service.": "Настройки уведомлений нужно менять через фоновую службу.",
   "OK": "ОК",
   "Observation continuity is interrupted. No duration is inferred across the gap.": "Непрерывность наблюдений нарушена. Длительность через пробел не вычисляется.",
-  "Observation coverage is unavailable while this page is read.": "Пока страница читается, данные о полноте наблюдений недоступны.",
+  "Observation coverage is unavailable.": "Данные о полноте наблюдений недоступны.",
   "Observation gap": "Пробел в наблюдениях",
   "Observed Time": "Наблюдаемое время",
   "Observed WebKit state": "Наблюдаемое состояние WebKit",

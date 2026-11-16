@@ -610,3 +610,5 @@ fn current_writer_reopens_after_older_canonical_write_without_changing_companion
         .unwrap();
     assert_eq!(layout, 4);
 }
+
+mod published;

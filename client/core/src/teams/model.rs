@@ -236,6 +236,7 @@ impl TeamsModel {
             self.phase_epoch = self.phase_epoch.saturating_add(1);
             if let Some(old) = &previous.team {
                 self.selected.remove(&team_key("phases", old));
+                self.selected.remove(&team_key("observed", old));
                 self.retire(&team_key("team", old), &mut out);
             }
             self.parts = None;
@@ -766,7 +767,7 @@ impl TeamsModel {
         self.send(team_key("team", team), update, out);
         if matches!(read, TeamRead::Status { .. }) {
             if matches!(out.last(), Some((_, TeamsUpdate::Failed { .. }))) {
-                out.extend(self.retire_observed(now));
+                self.retire_observed_state(now);
             } else {
                 out.extend(self.check_observed_scope(now));
             }

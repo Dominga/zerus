@@ -193,6 +193,7 @@ fn synthetic_native_receipt_drives_real_task_source_but_late_sample_cannot_rewri
     let old = selected(&h, &reference, &epoch);
     let stale = old.sample.clone();
     let node = old.node;
+    append(&mut h, &old, 1_700_000_000_000);
     drop(old);
     let executor = match h.bind("m1") {
         ops::Actor::Session { session, .. } => zerus_replica::SessionKey {
@@ -270,7 +271,15 @@ fn synthetic_native_receipt_drives_real_task_source_but_late_sample_cannot_rewri
         .store
         .observed_timing(TEAM, 0, None, DEFAULT_WINDOW_MS, 200, None)
         .unwrap();
-    assert_eq!(page.rows.len(), 1);
-    assert_eq!(page.rows[0].key.attempt.as_ref().unwrap().id, id);
+    assert_eq!(page.rows.len(), 2);
+    assert_eq!(
+        page.cohort.units.len(),
+        2,
+        "one node retains distinct exact source/attempt keys"
+    );
+    assert_eq!(
+        page.rows.last().unwrap().key.attempt.as_ref().unwrap().id,
+        id
+    );
     assert!(page.rows[0].implementation_observed_ms.is_none());
 }

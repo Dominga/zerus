@@ -229,6 +229,7 @@ fn valid_but_wrong_home_and_retired_phase_generation_cannot_publish_coverage() {
         "syntactically valid but wrong source home"
     );
     assert_absent(model.apply(&read, checked(&read, wrong), now));
+    assert!(model.page(&format!("observed:{TEAM}"), None));
     let late = model.next(now).unwrap();
     model.follow_phases(TEAM, Some(1), true, now).unwrap();
     assert!(model
@@ -362,5 +363,93 @@ fn unsupported_older_engine_and_failed_read_retire_without_a_tight_retry_loop() 
                 .next(now + std::time::Duration::from_secs(1))
                 .is_none());
         }
+    }
+}
+
+#[test]
+fn reopening_identical_selection_rejects_old_read_and_old_cleanup_lease() {
+    let (mut model, now) = ready();
+    let (old_lease, _) = model
+        .follow_observed(TEAM, 0, Some(1), DEFAULT_WINDOW_MS, true, None, now)
+        .unwrap();
+    let old = model.next(now).unwrap();
+    let (new_lease, _) = model
+        .follow_observed(TEAM, 0, Some(1), DEFAULT_WINDOW_MS, true, None, now)
+        .unwrap();
+    assert!(new_lease > old_lease);
+    assert!(
+        model.apply(&old, checked(&old, fixture()), now).is_empty(),
+        "an identical argument list is not a current read generation"
+    );
+    let (kept, updates) = model
+        .follow_observed(
+            TEAM,
+            0,
+            Some(1),
+            DEFAULT_WINDOW_MS,
+            false,
+            Some(old_lease),
+            now,
+        )
+        .unwrap();
+    assert_eq!(kept, new_lease);
+    assert!(updates.is_empty());
+    let fresh = model.next(now).unwrap();
+    assert!(!model
+        .apply(&fresh, checked(&fresh, fixture()), now)
+        .is_empty());
+}
+
+#[test]
+fn published_phase_source_reaches_actual_pane_and_batch_without_membership_backfill() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/team-plan/fixtures/cli-observed-phase.json");
+    let source: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let now = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(
+        TeamsFollow {
+            team: Some(TEAM.into()),
+            ..Default::default()
+        },
+        now,
+    );
+    for key in ["status", "queue"] {
+        let read = model.next(now).unwrap();
+        model.apply(&read, checked(&read, source["context"][key].clone()), now);
+    }
+    model.follow_phases(TEAM, Some(1), true, now).unwrap();
+    for key in ["phases", "draft"] {
+        let read = model.next(now).unwrap();
+        model.apply(&read, checked(&read, source["context"][key].clone()), now);
+    }
+    model
+        .follow_observed(TEAM, 1, None, DEFAULT_WINDOW_MS, true, None, now)
+        .unwrap();
+    let read = model.next(now).unwrap();
+    let updates = model.apply(&read, checked(&read, source), now);
+    let mut coalescer = Coalescer::new();
+    for (key, update) in updates {
+        coalescer.push(Change::teams(ComputerId::local(), key, update));
+    }
+    let frame = serde_json::to_value(coalescer.take()).unwrap();
+    let view = &frame["teams"][0]["payload"];
+    let pane = &view["plan"]["observed"];
+    assert_eq!(pane["page"]["scope"]["phase"], 1);
+    assert!(pane["page"]["scope"]["publication"].is_object());
+    assert!(pane["page"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|f| f["key"]["publication"].is_null() && f["implementation_observed_ms"].is_null()));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/teams/fixtures/observed-phase-view.json");
+    if std::env::var_os("ZERUS_UPDATE_OBSERVED_PHASE_CORE_FIXTURE").is_some() {
+        std::fs::write(path, serde_json::to_string_pretty(view).unwrap() + "\n").unwrap();
+    } else {
+        assert_eq!(
+            view,
+            &serde_json::from_str::<Value>(&std::fs::read_to_string(path).unwrap()).unwrap()
+        );
     }
 }

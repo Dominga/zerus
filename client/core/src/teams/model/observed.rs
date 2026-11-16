@@ -236,3 +236,6 @@ impl TeamsModel {
         self.observed_update()
     }
 }
+
+#[cfg(test)]
+mod tests;

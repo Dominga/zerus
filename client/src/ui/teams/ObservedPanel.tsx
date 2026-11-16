@@ -27,7 +27,7 @@ export function ObservedPanel(props: { team: string; phase: number; pane?: Obser
       <nav aria-label={tr("Observed timing")}><button type="button" class="btn small" aria-pressed={mode() === "time"} onClick={() => setMode("time")}>{tr("Observed Time")}</button><button type="button" class="btn small" aria-pressed={mode() === "members"} onClick={() => setMode("members")}>{tr("Members")}</button></nav>
       <p class="dim">{tr("Recorded delivery and sampled task states. Implementation time is unavailable.")}</p>
       <Show when={follower.error() || error()}>{(message) => <p role="status">{message()}</p>}</Show>
-      <Show when={pane()} fallback={<p role="status">{tr("Observation coverage is unavailable while this page is read.")}</p>}>{(selected) => <>
+      <Show when={pane()} fallback={<p role="status">{tr("Observation coverage is unavailable.")}</p>}>{(selected) => <>
         <p>{tr("Last verified observation: %1", time(selected().page.as_of_ms))}</p>
         <Show when={selected().page.more || selected().page.truncated}><p role="status">{tr("Partial observation window. This page does not cover the whole phase.")}</p></Show>
         <Show when={selected().page.reasons.includes("clock_discontinuity") || selected().page.reasons.includes("observer_restart") || selected().page.rows.some((f) => f.category === "gap")}><p role="status">{tr("Observation continuity is interrupted. No duration is inferred across the gap.")}</p></Show>

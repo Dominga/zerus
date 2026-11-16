@@ -52,19 +52,115 @@ fn take(queue: &Queue) -> Value {
 }
 fn stage(runtime: &mut Runtime, plan: &wire::Plan) {
     let body = serde_json::to_vec(plan).unwrap();
-    let piece = wire::Piece::from_bytes(
-        uuid::Uuid::new_v4().to_string(),
-        runtime.scope.clone(),
-        plan.reference().unwrap(),
-        0,
-        &body,
+    let mut complete = false;
+    for (ordinal, bytes) in body.chunks(wire::PIECE_BYTES).enumerate() {
+        let piece = wire::Piece::from_bytes(
+            uuid::Uuid::new_v4().to_string(),
+            runtime.scope.clone(),
+            plan.reference().unwrap(),
+            ordinal as u16,
+            bytes,
+        )
+        .unwrap();
+        let result = runtime.stage(Validated::fixture(
+            &json!({"op":"team_person_plan_piece","piece":piece}),
+        ));
+        assert_eq!(result["ok"], true, "{result}");
+        complete = result["complete"] == true;
+    }
+    assert!(complete);
+}
+
+#[test]
+fn native_v2_review_keeps_every_field_of_a_valid_dependency_heavy_draft() {
+    use crate::teams::ops::tests::person;
+    use zerus_team_plan::{
+        draft::{DraftInput, DraftNode},
+        model::{Dep, DepKind, NodeKind},
+    };
+
+    let (mut h, mut runtime, _, _owner) = sample();
+    h.settings(|settings| settings.caps.max_phase_tasks = 200);
+    let draft = DraftInput {
+        title: "Reviewed graph boundary".into(),
+        barrier: false,
+        nodes: (1..=200)
+            .map(|id| DraftNode {
+                id,
+                title: format!("Task {id}"),
+                text: String::new(),
+                criteria: vec!["Tests pass".into(); 32],
+                role: "developer".into(),
+                pipeline: "reviewed".into(),
+                deps: (1..id.min(66))
+                    .map(|node| Dep {
+                        node,
+                        kind: DepKind::Hard,
+                    })
+                    .collect(),
+                assignee: None,
+                writes: vec![],
+                estimate_minutes: 1,
+                kind: NodeKind::Task,
+            })
+            .collect(),
+    };
+    assert!(serde_json::to_vec(&draft).unwrap().len() < 250_000);
+    assert!(serde_json::to_vec_pretty(&draft).unwrap().len() > 64 * 8192);
+    // Prove that this is accepted data through the real operation writer,
+    // using only the explicit native-admission fixture for the seed action.
+    h.run(
+        &person(),
+        ops::Operation::SubmitDraftPhase {
+            phase: 1,
+            draft: draft.clone(),
+        },
     )
     .unwrap();
-    let result = runtime.stage(Validated::fixture(
-        &json!({"op":"team_person_plan_piece","piece":piece}),
-    ));
-    assert_eq!(result["ok"], true, "{result}");
-    assert_eq!(result["complete"], true);
+    let plan = wire::Plan {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: TEAM.into(),
+        expected_revision: h.store.team(TEAM).unwrap().unwrap().revision,
+        action: wire::Action::Team {
+            change: Box::new(TeamAction::EditDraftPhase {
+                phase: 1,
+                generation: 1,
+                draft: draft.clone(),
+            }),
+        },
+    };
+    assert!(plan.valid());
+    stage(&mut runtime, &plan);
+    let queue = Arc::new(Queue::default());
+    runtime.query(&json!({"op":"team_person_action_prepare","scope":runtime.scope,"plan":plan.reference()}),queue.clone(),1).unwrap();
+    let value = take(&queue)["value"].clone();
+    assert_eq!(
+        value["ok"], true,
+        "valid draft must reach native review: {value}"
+    );
+    let review: wire::Review = serde_json::from_value(value["review"].clone()).unwrap();
+    assert!(review.valid());
+    let displayed = review
+        .details
+        .iter()
+        .filter(|(key, _)| key.starts_with("draft ("))
+        .map(|(_, text)| text.as_str())
+        .collect::<String>();
+    assert_eq!(
+        serde_json::from_str::<DraftInput>(&displayed).unwrap(),
+        draft
+    );
+    let queue = Arc::new(Queue::default());
+    runtime
+        .action(
+            Validated::fixture(&json!({"op":"team_person_action","intent":review.intent})),
+            queue.clone(),
+            2,
+        )
+        .unwrap();
+    let result = take(&queue)["value"].clone();
+    assert_eq!(result["reply"]["ok"], true, "{result}");
+    assert_eq!(h.store.phase_draft(TEAM, 1).unwrap().generation, Some(2));
 }
 
 #[test]

@@ -25,7 +25,10 @@ use std::{
     },
     thread::{self, JoinHandle},
 };
-use zerus_client_core::desktop::{creation_clone::Scope, team_person_actions as wire};
+use zerus_client_core::{
+    desktop::{creation_clone::Scope, team_person_actions as wire},
+    teams::action::TeamAction,
+};
 use zerus_team_plan::{problem::code, Problem};
 
 const WORKERS: usize = 8;
@@ -264,9 +267,42 @@ fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value
     let wire::Action::Team { change } = &plan.action else {
         return Err(required());
     };
+    let details = review_details(change, true)?;
+    let mut review = wire::Review {
+        intent: wire::Intent {
+            scope: scope.clone(),
+            machine: original::machine(config)?,
+            store: binding,
+            facts,
+            request: wire::digest(&prepared.request).ok_or_else(required)?,
+            plan: plan.reference().ok_or_else(required)?,
+        },
+        team_name,
+        title: "Confirm team action".into(),
+        subject: change.op().replace('-', " "),
+        details,
+    };
+    // Pretty whitespace can expand a valid dependency-rich draft beyond the
+    // fixed review envelope. Compact only its display encoding, preserving
+    // the complete payload and all the existing byte/part/identity bounds.
+    if !review.valid() {
+        review.details = review_details(change, false)?;
+    }
+    if !review.valid() {
+        return Err(required());
+    }
+    Ok(json!({"ok":true,"review":review}))
+}
+
+fn review_details(change: &TeamAction, pretty: bool) -> Result<Vec<(String, String)>> {
     let mut details = Vec::new();
     for (key, value) in change.input() {
-        let text = serde_json::to_string_pretty(&value).map_err(store::storage)?;
+        let text = if pretty {
+            serde_json::to_string_pretty(&value)
+        } else {
+            serde_json::to_string(&value)
+        }
+        .map_err(store::storage)?;
         // The complete bounded payload is displayed; no truncation can hide
         // a permission, dependency or phase node from native confirmation.
         let mut start = 0;
@@ -284,33 +320,14 @@ fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value
             part += 1;
         }
     }
-    if let zerus_client_core::teams::action::TeamAction::Create { template, .. }
-    | zerus_client_core::teams::action::TeamAction::StartPlanning { template, .. } =
-        change.as_ref()
+    if let TeamAction::Create { template, .. } | TeamAction::StartPlanning { template, .. } = change
     {
         details.push((
             "Template".into(),
             serde_json::to_string(template).map_err(store::storage)?,
         ));
     }
-    let review = wire::Review {
-        intent: wire::Intent {
-            scope: scope.clone(),
-            machine: original::machine(config)?,
-            store: binding,
-            facts,
-            request: wire::digest(&prepared.request).ok_or_else(required)?,
-            plan: plan.reference().ok_or_else(required)?,
-        },
-        team_name,
-        title: "Confirm team action".into(),
-        subject: change.op().replace('-', " "),
-        details,
-    };
-    if !review.valid() {
-        return Err(required());
-    }
-    Ok(json!({"ok":true,"review":review}))
+    Ok(details)
 }
 
 fn lookup(config: &Config, scope: &Scope, intent: &wire::Intent) -> Result<Value> {

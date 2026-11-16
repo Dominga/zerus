@@ -130,7 +130,7 @@ pub(super) fn context(h: &Harness) -> Value {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert!(matches!(core, 5 | 6));
+    assert_eq!(core, crate::teams::store::SCHEMA_VERSION);
     page
 }
 pub(super) fn fixture_source() -> Harness {

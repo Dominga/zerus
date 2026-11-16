@@ -269,3 +269,51 @@ fn native_seven_late_storage_failure_rolls_back_floor_objects_and_native_receipt
     super::super::native_floor::validate(db).unwrap();
     assert_eq!(kept(db), before);
 }
+
+#[test]
+fn native_seven_preserves_raw_publication_requests_from_schema_five_and_complete_six() {
+    for from in [versions::CORE_PUBLICATION, versions::CORE_REWORK] {
+        let mut h = Harness::new();
+        native_receipt(&mut h);
+        crate::teams::ops::publication::tests::reserved(&mut h, &[1]);
+        publication_five(&h);
+        let db = h.store.db.as_ref().unwrap();
+        if from == versions::CORE_REWORK {
+            // Explicit schema-only complete-six projection: install the actual
+            // prerequisite metadata, never invent a SendBack episode. Genuine
+            // older executable/episode controls are a separate campaign.
+            let tx = db.unchecked_transaction().unwrap();
+            rework::activate(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        let raw = |db: &Connection| {
+            [
+                "SELECT json_array(id,team,phase,generation,snapshot,initial,state,created_ms) FROM phase_publications ORDER BY id",
+                "SELECT json_array(publication,node,team,task_uuid,request,state,reason,cleared,failures,clear_failures,clear_outcome) FROM phase_publication_nodes ORDER BY publication,node",
+            ].map(|sql| db.prepare(sql).unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap())
+        };
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            from
+        );
+        let before = (kept(db), raw(db));
+        assert_eq!(before.1[0].len(), 1);
+        assert_eq!(before.1[1].len(), 1);
+        let opened = Store::open(h.temp.path()).unwrap();
+        let db = opened.db.as_ref().unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
+                .unwrap(),
+            versions::CORE_NATIVE_FLOOR
+        );
+        super::super::native_floor::validate(db).unwrap();
+        assert_eq!((kept(db), raw(db)), before);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM phase_reworks", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+    }
+}

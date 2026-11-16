@@ -60,9 +60,7 @@ pub(crate) fn view(
     };
     let earlier = neighbor(index.checked_sub(1).and_then(|i| all.get(i)))?;
     let later = neighbor(all.get(index + 1))?;
-    let resume = if !active {
-        capability.clone()
-    } else if matches!(pause, PhasePause::Paused { .. }) {
+    let resume = if !active || matches!(pause, PhasePause::Paused { .. }) {
         capability.clone()
     } else {
         blocked("The phase is not paused.")

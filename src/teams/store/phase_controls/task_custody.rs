@@ -237,6 +237,23 @@ impl TaskCustody {
     }
 }
 
+pub(crate) fn availability(
+    custody: Option<&Result<TaskCustody>>,
+    db: &Connection,
+    team: &Team,
+    phase: &Phase,
+) -> Result<Availability> {
+    match custody {
+        Some(Ok(held)) => held.check(db, team, phase),
+        Some(Err(problem)) => Ok(blocked(match problem.code.as_str() {
+            code::STORE_BUSY => "The phase task store is busy; its current facts are unavailable.",
+            code::OVER_CAP => "The phase task scope exceeds the control proof bounds.",
+            _ => "The current phase task documents are unavailable. Read again.",
+        })),
+        None => Ok(blocked("The exact phase task custody is unavailable.")),
+    }
+}
+
 /// A thread-local test rendezvous, never an environment-controlled product
 /// pause. It holds only the private fixture's already-acquired resources.
 #[cfg(test)]
@@ -252,22 +269,5 @@ pub(crate) mod fixture {
         if let Some(hook) = hook {
             hook();
         }
-    }
-}
-
-pub(crate) fn availability(
-    custody: Option<&Result<TaskCustody>>,
-    db: &Connection,
-    team: &Team,
-    phase: &Phase,
-) -> Result<Availability> {
-    match custody {
-        Some(Ok(held)) => held.check(db, team, phase),
-        Some(Err(problem)) => Ok(blocked(match problem.code.as_str() {
-            code::STORE_BUSY => "The phase task store is busy; its current facts are unavailable.",
-            code::OVER_CAP => "The phase task scope exceeds the control proof bounds.",
-            _ => "The current phase task documents are unavailable. Read again.",
-        })),
-        None => Ok(blocked("The exact phase task custody is unavailable.")),
     }
 }

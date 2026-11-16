@@ -50,7 +50,7 @@ authority for an agent benchmark process and never replaces an existing store.
 ## Opt-in ordinary session listing
 
 `listing-metadata.py` owns a real-file 20k/50k saved-session fixture (roughly
-258 KB per canonical record, 24 bounded shell jobs and 100 projects). It records
+262 KB per canonical record, 24 bounded shell jobs and 100 projects). It records
 paired durable canonical writes with and without advisory publication, bounded
 background migration, immutable metadata pages and index size. It requires an
 explicit scratch parent with 18 GiB free and removes only its own fixture.
@@ -71,3 +71,6 @@ An already compiled same-source unit-test executable may be supplied through
 Cargo jobs. Agents must use their normal shared heavy lease for each step and
 retain source/binary seals alongside the output. No native agent, user tmux
 server, deployment, account or installed host is used.
+
+Final enabled/disabled cold-file, warm, publication and pinned-reader results:
+[ordinary listing qualification](../../docs/benchmarks/2026-11-16-listing-reader.md).

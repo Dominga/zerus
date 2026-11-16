@@ -210,7 +210,7 @@ mod tests {
     use crate::teams::ops::tests::{Harness, TEAM};
     use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
     use zerus_replica::{Actor as TaskActor, Position, ProjectStore, Stage, Target};
-    fn task(h: &Harness) -> TaskRef {
+    fn task(h: &mut Harness) -> TaskRef {
         let store = ProjectStore::open(&h.temp.path().join("replica"), "example-project").unwrap();
         let mut document = store
             .new_task(
@@ -229,11 +229,20 @@ mod tests {
         };
         store.save(&mut document).unwrap();
         drop(store);
+        // Independently bound Session producer, not an unproved Person seed.
+        let ops::Actor::Session { session, .. } = h.bind("lead") else {
+            unreachable!()
+        };
+        let actor = TaskActor::Agent(zerus_replica::SessionKey {
+            machine: session.machine,
+            session_id: session.session_id,
+            session: "codex/private-observation-source".into(),
+        });
         crate::teams::tasks::send(
             &crate::teams::tasks::Caller {
                 state: h.temp.path(),
                 machine: &h.store.team(TEAM).unwrap().unwrap().home,
-                actor: TaskActor::Person,
+                actor,
             },
             &task,
             TEAM,
@@ -247,7 +256,7 @@ mod tests {
     fn retained_actor_request_recovers_status_before_same_uuid_apply_without_canonical_dependency()
     {
         let mut h = Harness::new();
-        let task = task(&h);
+        let task = task(&mut h);
         let home = h.store.team(TEAM).unwrap().unwrap().home;
         let mut runtime = Runtime::open(h.temp.path(), &home).unwrap();
         let read =

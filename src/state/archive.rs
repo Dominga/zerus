@@ -335,7 +335,18 @@ pub(super) fn reconcile_locked(snapshot: &Snapshot) -> Result<(Vec<Value>, Vec<V
 /// Active polling never opens every archived record or its conversation journal.
 /// Only bindings that might need reconciliation consult the metadata index.
 pub(super) fn reconcile_active_locked(snapshot: &Snapshot) -> Result<Vec<Value>> {
-    let bindings = super::storage::records()?;
+    reconcile_active_records_locked(snapshot, super::storage::records()?)
+}
+
+/// A display worker may schedule an exact canonical binding, but supplies no
+/// authority: every existing archive/process/run guard below is retained.
+pub(super) fn reconcile_selected_locked(snapshot: &Snapshot, record: Value) -> Result<()> {
+    reconcile_active_records_locked(snapshot, vec![record]).map(drop)
+}
+fn reconcile_active_records_locked(
+    snapshot: &Snapshot,
+    bindings: Vec<Value>,
+) -> Result<Vec<Value>> {
     let mut result = Vec::new();
     let mut catalog = None;
     let mut archive_unavailable = false;

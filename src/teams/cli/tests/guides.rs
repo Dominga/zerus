@@ -8,6 +8,7 @@ use std::cell::Cell;
 
 const MEMBER_PAGE: &str = include_str!("../../../agent_guide/team.md");
 const LEAD_PAGE: &str = include_str!("../../../agent_guide/team-lead.md");
+const REWORK_PAGE: &str = include_str!("../../../agent_guide/team-rework.md");
 const PLANNING_PAGE: &str = include_str!("../../../agent_guide/team-planning.md");
 const M2_SESSION: &str = "launch_id:00000000-0000-4000-8000-000000000032";
 mod planning;
@@ -231,6 +232,7 @@ fn the_pages_keep_their_bounds_and_name_the_new_commands() {
         ("team", MEMBER_PAGE),
         ("team-lead", LEAD_PAGE),
         ("team-planning", PLANNING_PAGE),
+        ("team-rework", REWORK_PAGE),
     ] {
         assert!(page.len() <= 2400, "{name} has {} bytes", page.len());
         assert!(page.is_ascii(), "{name}");
@@ -248,4 +250,39 @@ fn the_pages_keep_their_bounds_and_name_the_new_commands() {
     assert!(lead.contains(&"return".to_owned()));
     assert!(lead.contains(&"reassign".to_owned()));
     assert!(lead.contains(&"reply".to_owned()));
+}
+
+/// This guide example runs inside the real operation-written rework fixture,
+/// in the exact bound lead's scope, before its correction is approved.
+#[cfg(unix)]
+pub(super) fn correction_edit(h: &Harness, base: &str, rework: &str, generation: u64) {
+    let read = h.store().phase_draft(TEAM, 1).unwrap();
+    let proposal = read.rework.unwrap().draft.unwrap();
+    let examples = examples(REWORK_PAGE);
+    assert_eq!(examples.len(), 1);
+    let example = &examples[0];
+    assert_eq!(example.args[0], "edit-phase-corrections");
+    let mut body: Value = serde_json::from_str(example.input.as_deref().unwrap()).unwrap();
+    body["request_id"] = json!(uid(11_000 + h.revision() as u32));
+    body["team"] = json!(TEAM);
+    body["expected_revision"] = json!(h.revision());
+    body["publication"] = json!(base);
+    body["rework"] = json!(rework);
+    body["generation"] = json!(generation);
+    body["draft"]["barrier"] = json!(read.phase.barrier);
+    for (i, node) in body["draft"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        node["id"] = json!(proposal.nodes[i].id);
+    }
+    body["draft"]["nodes"][1]["deps"][0]["node"] = json!(proposal.nodes[0].id);
+    let (result, exit) = h.cli(
+        &Caller::Session(key(LEAD_SESSION)),
+        &line(example),
+        &body.to_string(),
+    );
+    assert_eq!(exit, 0, "lead correction guide: {result}");
 }

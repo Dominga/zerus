@@ -17,6 +17,7 @@ mod integration;
 mod journal;
 pub(crate) mod lead_queue;
 mod members;
+pub(crate) mod observed_timing;
 mod phase_review;
 mod pipeline;
 mod planning;
@@ -26,6 +27,7 @@ mod queue;
 #[cfg(test)]
 pub(crate) use queue::injected;
 mod readiness;
+pub(crate) mod rework;
 mod stage_task;
 mod talk;
 mod team;

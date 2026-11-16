@@ -19,7 +19,13 @@ export interface PhaseList {
   next_node: number; next_phase: number; drafts_available: boolean; approval_available?: boolean;
   routes: DraftRoute[]; default_pipeline: string;
 }
+export interface PhaseRework {
+  id: string; base_publication: string; comment: string;
+  state: "drafting" | "review" | "rejected" | "publishing" | "published";
+  draft: PhaseDraft | null;
+}
 export interface PhaseDraft {
+  rework_available?: boolean; rework?: PhaseRework | null;
   metrics?: import("./phase-metrics").PhaseMetricsView;
   phase: PhaseRecord; revision: number; generation: number | null; next_node: number;
   nodes: DraftNode[]; complete: boolean; editable: boolean; unknown_fields: boolean;
@@ -54,6 +60,7 @@ export function takePhaseFocus(team: string): number | null {
 }
 
 export interface PhasePane {
+  observed?: import("./observed-timing").ObservedPane | null;
   epoch: number; list: PhaseList | null; draft: PhaseDraft | null; selected: number | null;
   list_failure: { code: string; message: string } | null;
   draft_failure: { code: string; message: string } | null;

@@ -30,6 +30,8 @@ impl TeamsModel {
         if self.watched() != Some(team) {
             return None;
         }
+        self.observed_selection = None;
+        let mut observed_updates = self.retire_observed(now);
         self.phase_epoch = self.phase_epoch.checked_add(1)?;
         self.phases_enabled = enabled;
         self.phase_selected = if enabled { phase } else { None };
@@ -66,7 +68,8 @@ impl TeamsModel {
                 &mut updates,
             );
         }
-        Some((self.phase_epoch, updates))
+        observed_updates.extend(updates);
+        Some((self.phase_epoch, observed_updates))
     }
 
     pub(super) fn issue_phase(&mut self, slot: Slot) {
@@ -168,6 +171,7 @@ impl TeamsModel {
                 &mut updates,
             );
         }
+        updates.extend(self.check_observed_scope(now));
         updates
     }
 }

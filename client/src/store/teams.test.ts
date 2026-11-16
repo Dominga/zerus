@@ -1,3 +1,4 @@
+import observedPhaseView from "../../core/src/teams/fixtures/observed-phase-view.json";
 import { describe, expect, it } from "vitest";
 import { createTeams, newRequestId, type TeamCall, type TeamCatalogTemplate, type TeamFollow, type TeamOutcome, type TeamsTransport, type TeamView } from "./teams";
 import { catalog, teamView, TEAM_ID } from "../ui/teams/fixtures";
@@ -240,4 +241,29 @@ it("restores a retained browser page after the native reader has ended", async (
   calls.pages.length = 0;
   await teams.firstListPage();
   expect(calls.pages).toEqual([["list", null]]);
+});
+
+it("drops an observed page from the actual team batch when the core retires it", async () => {
+  const { transport } = fake(); const store = createTeams(transport);
+  await store.openTeam(TEAM_ID);
+  const view = structuredClone(teamView);
+  const producer = (await import("../../core/src/teams/fixtures/observed-pane.json")).default;
+  view.plan = { epoch: 1, list: null, draft: null, selected: 0, list_failure: null, draft_failure: null, observed: producer as unknown as import("./observed-timing").ObservedPane };
+  store.apply([entry(`team:${TEAM_ID}`, "team", view)]); expect(store.team()?.plan?.observed).toBeDefined();
+  store.apply([entry(`team:${TEAM_ID}`, "team", { ...view, plan: { ...view.plan, observed: undefined } })]);
+  expect(store.team()?.plan?.observed).toBeUndefined();
+});
+
+// Product Root -> Core/Batch fixture, synthetic failed transport response.
+it("a failed team read clears observation eligibility while retaining the shown team", async () => {
+  const { transport } = fake();
+  const teams = createTeams(transport);
+  const view = structuredClone(observedPhaseView) as unknown as TeamView;
+  await teams.openTeam(view.bar.id);
+  teams.apply([entry(`team:${view.bar.id}`, "team", view)]);
+  expect(teams.team()?.plan?.observed).not.toBeNull();
+  teams.apply([entry(`team:${view.bar.id}`, "failed", { code: "storage_error", message: "Selected source unavailable" })]);
+  expect(teams.team()?.bar.id).toBe(view.bar.id);
+  expect(teams.team()?.plan?.observed).toBeNull();
+  expect(teams.failure()?.message).toBe("Selected source unavailable");
 });

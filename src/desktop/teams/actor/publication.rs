@@ -71,10 +71,11 @@ impl Runtime {
             return Ok(());
         }
         for (phase, id) in store.publications_pending(&team.id)? {
-            let p = store.phase_draft(&team.id, phase)?;
+            let p = store.db.as_ref().map_or(Ok(None), |db| {
+                crate::teams::store::publication::by_id(db, &team.id, &id)
+            })?;
             if allowed
-                && p.publication
-                    .as_ref()
+                && p.as_ref()
                     .is_some_and(|p| p.total > 0 && p.created == p.total && p.blocked == 0)
             {
                 write(
@@ -101,6 +102,7 @@ impl Runtime {
                 if phase.kind != PhaseKind::Plan {
                     continue;
                 }
+                self.correction_review(store, &fresh, phase.n, now)?;
                 let key = format!("phase-auto:{}", phase.n);
                 if phase.state != PhaseState::Draft {
                     self.recovered(store, &fresh, &key, now)?;

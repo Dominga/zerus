@@ -35,7 +35,7 @@ pub(super) fn references(request: &Request) -> Result<Vec<String>, Problem> {
     Ok(refs)
 }
 
-pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
+pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<u64> {
     let kind = ctx
         .event
         .map(str::to_owned)
@@ -88,6 +88,7 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         refs.push(format!("decision:{}", new.0));
     }
     ctx.db.execute("INSERT INTO journal(team,at_ms,actor,kind,request_id,text,refs) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![ctx.team.id,ctx.now,encode(ctx.actor)?,kind,request.request_id,body,encode(&refs)?]).map_err(storage)?;
+    let source_seq = ctx.db.last_insert_rowid() as u64;
     let cutoff: Option<u64> = ctx
         .db
         .query_row(
@@ -105,7 +106,7 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
     {
         archive(ctx, None)?;
     }
-    Ok(())
+    Ok(source_seq)
 }
 /// A hand-out's outcome as the journal says it: its name, then its reason,
 /// cleaned as outside text is where the service takes it

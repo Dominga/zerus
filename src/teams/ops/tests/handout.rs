@@ -701,6 +701,7 @@ fn readiness_view_contains_only_live_nodes_and_their_archived_direct_leaves() {
         },
         event: None,
         superseded: None,
+        timing: None,
     };
     let nodes = super::super::handout::kernel_nodes(&ctx).unwrap();
     assert_eq!(nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![3, 4]);

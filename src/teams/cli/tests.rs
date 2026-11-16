@@ -25,6 +25,8 @@ mod providers;
 mod publication;
 mod reads;
 mod recorded_timings;
+#[cfg(unix)]
+mod rework;
 mod session_groups;
 mod status_items;
 mod storage_failure;
@@ -32,3 +34,5 @@ mod teams_followup;
 mod teams_screen;
 mod verdict;
 mod writes;
+
+mod observed_timing;

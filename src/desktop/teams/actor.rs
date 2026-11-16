@@ -31,8 +31,10 @@ mod retry;
 mod schedule;
 mod tasks;
 mod publication;
+mod rework;
 mod project_limit;
 mod terminal;
+mod timing;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

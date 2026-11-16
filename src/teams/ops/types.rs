@@ -210,6 +210,54 @@ pub enum PublicationProblemKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    RecordTimingFact {
+        node: u32,
+        observation: Box<super::observed_timing::TimingInput>,
+    },
+    SendBackPhase {
+        phase: u32,
+        publication: String,
+        comment: String,
+    },
+    SubmitPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    ApprovePhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
+    RejectPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        comment: String,
+    },
+    UndoPhaseCorrectionRejection {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        rejection: String,
+    },
+    ReconcileCorrectionReview {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
     ReconcilePhaseReview {
         phase: u32,
         generation: u64,

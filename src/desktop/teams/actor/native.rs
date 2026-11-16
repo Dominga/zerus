@@ -265,6 +265,19 @@ impl Ports for Native {
     fn observe(&mut self, _: &mut Store, task: &TaskRef) -> Result<()> {
         crate::teams::tasks::observe(&self.config.state, task)
     }
+    fn timing_supported(&self) -> bool {
+        true
+    }
+    fn observe_timing(
+        &mut self,
+        _: &mut Store,
+        task: &TaskRef,
+        epoch: &str,
+        generation: Option<String>,
+        offset: Option<u64>,
+    ) -> Result<Option<crate::teams::tasks::timing::TimingRead>> {
+        crate::teams::tasks::timing::observe(&self.config.state, task, epoch, generation, offset)
+    }
     fn report(&mut self, task: &TaskRef) -> Result<Option<String>> {
         crate::teams::tasks::report(&self.config.state, task)
     }

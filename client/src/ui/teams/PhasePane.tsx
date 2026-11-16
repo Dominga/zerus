@@ -6,32 +6,14 @@ import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow, take
 import { PhaseDraftEditor, type DraftSnapshot } from "./PhaseDraftEditor";
 import { phaseHeader } from "./phaseHeader";
 import { PlanningNotice } from "./PlanningStart";
+import { ObservedPanel } from "./ObservedPanel";
 import { PhaseMetrics } from "./PhaseMetrics";
 import { PhaseActions } from "./PhaseActions";
 import { PhaseLiveLayers } from "./PhaseLiveLayers";
+import { PhaseLayers } from "./PhaseDraftLayers";
+import { PhaseRework } from "./PhaseRework";
+export { PhaseLayers } from "./PhaseDraftLayers";
 import "../styles/team-phases.css";
-
-/** Layers groups the core's layer numbers. It computes no dependency order. */
-export function PhaseLayers(props: { draft: PhaseDraft }) {
-  const [open, setOpen] = createSignal<number | null>(null);
-  const layers = createMemo(() => [...new Set(props.draft.graph.nodes.map((n) => n.layer))].sort((a, b) => a - b));
-  return <div class="phase-layers" data-phase-layers>
-    <Show when={!props.draft.graph.complete}><p class="dim">{tr("Only part of this phase has been read.")}</p></Show>
-    <For each={layers()}>{(layer) => <section class="phase-layer" aria-label={tr("Layer %1", layer + 1)}>
-      <h3>{tr("Layer %1", layer + 1)}</h3>
-      <For each={props.draft.graph.nodes.filter((n) => n.layer === layer)}>{(placed) => {
-        const node = () => props.draft.nodes.find((n) => n.id === placed.id);
-        return <Show when={node()} fallback={<p>{tr("Task #%1 is not available in this phase", placed.id)}</p>}>{(n) => <article class="phase-node" data-phase-node={n().id}>
-          <button type="button" class="phase-node-title" aria-expanded={open() === n().id} onClick={() => setOpen(open() === n().id ? null : n().id)}>{n().title}</button>
-          <span class="dim">{tr("Draft task #%1", n().id)}</span>
-          <Show when={open() === n().id}><p class="phase-description">{n().text}</p><b>{tr("Acceptance criteria")}</b><ul><For each={n().criteria}>{(criterion) => <li>{criterion}</li>}</For></ul>
-            <For each={props.draft.graph.edges.filter((edge) => edge.to === n().id)}>{(edge) => <p class="dim">{edge.external ? tr("Depends on task #%1 outside this phase", edge.from) : tr("Depends on task #%1", edge.from)} <span>{edge.kind === "hard" ? tr("Hard") : tr("Soft")}</span></p>}</For>
-          </Show>
-        </article>}</Show>;
-      }}</For>
-    </section>}</For>
-  </div>;
-}
 
 export function PhasePane(props: {
   view: TeamView; busy: boolean; follow?: PhaseFollow;
@@ -100,7 +82,9 @@ export function PhasePane(props: {
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>
 
         </header>
+        <ObservedPanel team={team.id} phase={d().phase.n} pane={pane()?.observed} />
         <PhaseActions draft={d()} view={props.view} busy={props.busy} available={!!metadata().approval_available} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
+        <PhaseRework view={props.view} draft={d()} routes={routes()} busy={props.busy} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         <Show when={d().unknown_fields}><p class="notice" role="status">{tr("This draft has fields this window cannot edit.")}</p></Show>
         <Show when={d().complete} fallback={<p class="dim">{tr("This phase has no editable draft. Open the Board to see its tasks.")}</p>}><Show when={d().live} fallback={<PhaseLayers draft={d()} />}>{(live) => <PhaseLiveLayers team={team.id} draft={d()} live={live()} />}</Show></Show>
       </>}</Show>

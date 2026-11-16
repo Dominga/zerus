@@ -553,6 +553,10 @@ export function createTeams(transport: TeamsTransport = tauriTeams()) {
           if (view.bar.id === followed()) { batch(() => { setTeam(view); setAvailable(true); }); readSucceeded(entry.key); }
           settleViews(view.bar.id, view);
         } else if (entry.kind === "failed") {
+          const shown = team();
+          if (shown?.bar.id === id && shown.plan?.observed) {
+            setTeam({ ...shown, plan: { ...shown.plan, observed: null } });
+          }
           if (payload.code !== "cursor_reset") settleViews(id, null);
         } else if (entry.kind === "ended") {
           const shown = team();

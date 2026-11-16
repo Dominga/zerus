@@ -424,6 +424,12 @@ impl<N: Native + 'static> Engine<'_, N> {
         );
         let row = json!({"id":machine,"machine_id":machine,"name":name,"host":snapshot["host"],"online":true,"snapshot":snapshot,"via":via,"encrypted_transport":{"gateway_id":profile.identity.device.device_id,"route_id":route,"machine_id":machine}});
         let plain = encoded(&row)?;
+        // The opt-in accounting control stops here, before journal or delivery.
+        // Production builds contain neither this seam nor its input reader.
+        #[cfg(all(test, unix))]
+        if tests::capture_accounting_plaintext(&plain) {
+            return Err(Failure::Retry);
+        }
         if plain.len() > 1024 * 1024 {
             return Err(Failure::Retry);
         }
@@ -1093,6 +1099,13 @@ mod tests {
     const DISPATCH_CALLS: usize = if cfg!(windows) { 2 } else { 1 };
     #[cfg(unix)]
     mod listing_control;
+    #[cfg(unix)]
+    mod payload_accounting;
+
+    #[cfg(unix)]
+    pub(super) fn capture_accounting_plaintext(plain: &[u8]) -> bool {
+        payload_accounting::capture(plain)
+    }
 
     #[derive(Default)]
     struct NativeFixture {

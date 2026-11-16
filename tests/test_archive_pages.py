@@ -293,6 +293,25 @@ class ArchivePages(unittest.TestCase):
         self.assertNotIn('read',explicit,'Explicit pages retain their existing row projection')
         for key in ('archive_id','archived_at','run_id','conversation_id','state','resumable','allowed_actions','action_reasons','notification_preferences'):
             self.assertEqual(row[key],explicit[key],key)
+
+    def test_selected_archive_keeps_complete_model_choices_and_source(self):
+        home=self.root/'codex-home';home.mkdir()
+        choices=[dict(id='fixture-a',label='Fixture A',effort_options=['low','high'])]
+        cache=dict(models=[dict(
+            slug='fixture-a',display_name='Fixture A',
+            supported_reasoning_levels=[dict(effort='low'),dict(effort='high')])])
+        (home/'models_cache.json').write_text(json.dumps(cache))
+        record=self.record(0,agent_home=str(home),model='fixture-a',effort='high')
+        path=self.archives/(record['archive_id']+'.json');original=path.read_bytes()
+        self.refresh()
+        result=subprocess.run([str(HGS),'inspect',record['name'],'--archive',record['archive_id'],
+                               '--skip-processes'],env=self.env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);selected=json.loads(result.stdout)
+        self.assertEqual(selected.get('model_options'),choices)
+        self.assertEqual(selected['effort_options'],['low','high'])
+        self.assertEqual((selected['model'],selected['effort']),('fixture-a','high'))
+        self.assertEqual(path.read_bytes(),original)
+
     def test_archived_preferences_follow_the_original_journal_and_current_store(self):
         owner='session:00000000-0000-4000-8000-000000000050'
         row=self.record(0,journal_name=owner)

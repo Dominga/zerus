@@ -114,6 +114,7 @@ mod provider_messages;
 mod provider_binding;
 mod processes;
 mod prompt_suggestion;
+mod public_listing;
 mod question_terminal;
 mod questions;
 mod codex_questions;
@@ -711,6 +712,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     waits::decorate(sessions);
     parent_link::decorate(sessions);
     crate::accounts::marks::decorate(sessions);
+    public_listing::project(sessions);
 }
 
 /// The rows a terminal listing starts from, before `merge_listing` adds what

@@ -8,11 +8,13 @@ person's display. --build and --output are caller-owned directories.
 """
 import argparse
 import functools
+import hashlib
 import http.server
 import json
 import pathlib
 import sys
 import threading
+from urllib.parse import urlsplit
 
 import gi
 gi.require_version("Gtk", "3.0")
@@ -28,7 +30,16 @@ args = parser.parse_args()
 root = args.output.resolve()
 root.mkdir(parents=True, exist_ok=True)
 name, scope = args.name, args.scope
+resources = {}
 class Quiet(http.server.SimpleHTTPRequestHandler):
+    def send_head(self):
+        stream = super().send_head()
+        if stream:
+            data = stream.read()
+            stream.seek(0)
+            resources[urlsplit(self.path).path] = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+        return stream
+
     def log_message(self, *_args):
         pass
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(args.build.resolve())))
@@ -62,6 +73,7 @@ try:
 finally:
     window.destroy()
     server.shutdown()
+outcome["loadedResources"] = resources
 (root / f"{name}-result.json").write_text(json.dumps(outcome, indent=2) + "\n")
 print(json.dumps({"ok": outcome["ok"], "checks": len(outcome.get("checks", [])), "failures": outcome["failures"]}))
 sys.exit(0 if outcome["ok"] else 1)

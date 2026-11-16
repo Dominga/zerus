@@ -99,8 +99,33 @@ import ZerusReplica
             let ids = await removed.ids; XCTAssertEqual(ids, [file.id])
         }
     }
+    func testCapabilityLostDuringPrivateReadRefusesBeforeLocalApply() async throws {
+        try await fixture { replicas, files, context in
+            let capability = ContentCapabilityGate(); var completed = 0
+            let model = TaskContentController(replicas: replicas, files: files, read: { _ in capability.disable(); return Data([1]) }, remove: { _, _ in },
+                                              upload: { _, _ in capability.available }, changed: { _, _ in completed += 1 }, text: { $0 })
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Kept"))
+            try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
+            let id = model.state!.id; var ticket: TaskContentPicker?
+            model.preparePicker(id) { ticket = $0 }; try await wait(model, "picker open") { _ in ticket != nil }
+            let file = Attachment(id: UUID().uuidString.lowercased(), name: "a.txt", mime: "text/plain", bytes: 1, sha256: String(repeating: "ab", count: 32))
+            model.picked(ticket!, imports: [{ _ in file }]); try await wait(model, "private bytes retained") { !$0.busy && $0.draft?.form.files.count == 1 }
+            model.save(id); try await wait(model, "late refusal settled") { !$0.busy }
+            XCTAssertEqual(completed, 0); XCTAssertEqual(model.state?.held, false)
+            XCTAssertEqual(model.state?.draft?.form.files.count, 1)
+            XCTAssertTrue(try replicas.store(key, name: "Fixture").list().tasks.isEmpty)
+        }
+    }
+
 }
 private actor ContentRemovedFiles {
     var ids: [String] = []
     func append(_ id: String) { ids.append(id) }
+}
+
+private final class ContentCapabilityGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = true
+    var available: Bool { lock.lock(); defer { lock.unlock() }; return enabled }
+    func disable() { lock.lock(); enabled = false; lock.unlock() }
 }

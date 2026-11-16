@@ -106,4 +106,23 @@ class TaskContentModelTest {
             assertEquals("Kept", model.state!!.draft!!.form.text)
         } finally { owner.cancel() }
     }
+
+    @Test fun capabilityLostWhileReadingPrivateBytesRefusesBeforeLocalApply() = runBlocking {
+        val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val replicas = TaskReplicas(folders.newFolder()); var upload = true; var completed = 0
+        val model = TaskContentModel({ "message:$it" }, owner, replicas, TaskContentDraftFiles(folders.newFolder(), { secret }),
+            read = { upload = false; byteArrayOf(1) }, remove = { _, _ -> }, upload = { _, _ -> upload }, changed = { _, _ -> completed++ })
+        try {
+            model.open(context, TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+            await(model, "draft open") { !it.loading && it.draft != null }
+            val token = model.state!!.token; var ticket: TaskContentPicker? = null
+            model.picker(token) { ticket = it }; await(model, "picker open") { ticket != null }
+            model.picked(ticket!!, listOf({ Attachment(UUID.randomUUID().toString(), "a.txt", "text/plain", 1, "ab".repeat(32)) }))
+            await(model, "private bytes retained") { !it.busy && it.draft!!.form.files.size == 1 }
+            model.save(token); await(model, "late refusal settled") { !it.busy }
+            assertEquals(0, completed); assertFalse(model.state!!.held)
+            assertEquals(1, model.state!!.draft!!.form.files.size)
+            replicas.store(key, "Fixture").use { assertTrue(it.list().tasks.isEmpty()) }
+        } finally { owner.cancel() }
+    }
 }

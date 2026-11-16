@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 //! The editing commands, projected from rows their product writers created.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
@@ -18,11 +20,11 @@ fn editing_commands_return_member_identity_and_status_keeps_pinned_choices() {
         &h,
         json!({"role":"developer","agent":"codex","model":"seat-model","effort":"high","account":{"mode":"named","account":"example-account"}}),
     );
-    let (reply, code) = h.cli(&Caller::Person, "add-member", &add);
+    let (reply, code) = h.native_command("add-member", &add);
     assert_eq!(code, 0, "{reply}");
     let member = reply["member"].as_str().unwrap();
     assert_eq!(
-        h.cli(&Caller::Person, "add-member", &add).0,
+        h.native_command("add-member", &add).0,
         reply,
         "saved request was not replayed"
     );
@@ -51,7 +53,7 @@ fn editing_commands_return_member_identity_and_status_keeps_pinned_choices() {
         ("rename-team", json!({"name":"Readable team"})),
         ("set-goal", json!({"goal":"New goal"})),
     ] {
-        let (reply, exit) = h.cli(&Caller::Person, command, &input(&h, body));
+        let (reply, exit) = h.native_command(command, &input(&h, body));
         assert_eq!(exit, 0, "{reply}");
     }
     let team = h.store().team(TEAM).unwrap().unwrap();
@@ -59,8 +61,7 @@ fn editing_commands_return_member_identity_and_status_keeps_pinned_choices() {
         (team.name.as_str(), team.goal.as_str()),
         ("Readable team", "New goal")
     );
-    let (reply, exit) = h.cli(
-        &Caller::Person,
+    let (reply, exit) = h.native_command(
         "swap-member",
         &input(&h, json!({"member":member,"agent":"claude"})),
     );
@@ -101,11 +102,7 @@ fn a_long_goal_is_projected_completely_for_editing_without_widening_the_bar() {
     let h = Harness::new();
     h.create();
     let goal = "x".repeat(9000);
-    let (reply, exit) = h.cli(
-        &Caller::Person,
-        "set-goal",
-        &input(&h, json!({"goal":goal})),
-    );
+    let (reply, exit) = h.native_command("set-goal", &input(&h, json!({"goal":goal})));
     assert_eq!(exit, 0, "{reply}");
     let (status, exit) = h.cli(&Caller::Person, &format!("status --team {TEAM}"), "");
     assert_eq!(exit, 0, "{status}");

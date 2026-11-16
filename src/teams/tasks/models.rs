@@ -50,6 +50,12 @@ pub(crate) fn send(
     };
     let value = crate::desktop::teams::person_actions::models::intake(&config, draft)?;
     let reply = &value["reply"];
+    if !reply["team"].is_object() {
+        return Err(Problem::new(
+            code::STORAGE_FAILED,
+            format!("The explicitly modeled intake did not settle: {reply}"),
+        ));
+    }
     let problem = |field: &serde_json::Value| {
         serde_json::from_value::<Problem>(field.clone()).map_err(storage)
     };

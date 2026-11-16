@@ -144,7 +144,7 @@ fn outcomes(h: &Harness, node: u32) -> u32 {
 fn stop(state: &Path) {
     let mut store = Store::open(state).unwrap();
     let revision = store.team(TEAM).unwrap().unwrap().revision;
-    crate::teams::ops::apply(
+    crate::teams::ops::tests::apply_fixture(
         &mut store,
         &person(),
         &crate::teams::ops::tests::request(revision, Operation::Stop),

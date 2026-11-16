@@ -49,7 +49,12 @@ mod cases {
         json!({"source_digest":r["source_digest"],"digest":r["digest"],"override_config":r["override_config"]})
     }
     fn save(h: &Harness, sel: serde_json::Value, caller: &Caller) -> (serde_json::Value, i32) {
-        h.cli(caller,"validation-settings",&json!({"team":TEAM,"request_id":uuid::Uuid::new_v4().to_string(),"expected_revision":h.revision(),"selection":sel}).to_string())
+        let input = json!({"team":TEAM,"request_id":uuid::Uuid::new_v4().to_string(),"expected_revision":h.revision(),"selection":sel}).to_string();
+        if matches!(caller, Caller::Person) {
+            h.native_command("validation-settings", &input)
+        } else {
+            h.cli(caller, "validation-settings", &input)
+        }
     }
     fn file(root: &std::path::Path, text: &str) {
         fs::create_dir_all(root.join(".zerus")).unwrap();
@@ -303,17 +308,17 @@ mod cases {
         let sel = selection(&read(&h, &Caller::Person, json!({})));
         let input = json!({"team":TEAM,"request_id":uid(0xe001),"expected_revision":h.revision(),"selection":sel});
         let before = h.revision();
-        let (r, e) = h.cli(&Caller::Person, "validation-settings", &input.to_string());
+        let (r, e) = h.native_command("validation-settings", &input.to_string());
         assert_eq!(e, 0, "{r}");
         assert_eq!(h.revision(), before + 1);
         file(&root, &FILE.replace("cargo-test", "changed"));
-        let (replay, e) = h.cli(&Caller::Person, "validation-settings", &input.to_string());
+        let (replay, e) = h.native_command("validation-settings", &input.to_string());
         assert_eq!(e, 0);
         assert_eq!(r, replay);
         assert_eq!(h.revision(), before + 1);
         let mut stale = input.clone();
         stale["request_id"] = json!(uid(0xe002));
-        let (r, e) = h.cli(&Caller::Person, "validation-settings", &stale.to_string());
+        let (r, e) = h.native_command("validation-settings", &stale.to_string());
         assert_eq!(
             (e, r["error"]["code"].as_str()),
             (1, Some("stale_revision"))

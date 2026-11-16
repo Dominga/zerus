@@ -45,7 +45,7 @@ impl HoldAtDelivery {
         if let Some(operation) = operation {
             let mut store = Store::open(&self.native.config.state).unwrap();
             let current = store.team(&t.id).unwrap().unwrap();
-            let r = ops::apply(
+            let r = ops::tests::apply_fixture(
                 &mut store,
                 &person(),
                 &crate::teams::ops::tests::request(current.revision, operation),

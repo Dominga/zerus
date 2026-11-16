@@ -26,7 +26,7 @@ fn change(state: &Path, node: u32, mode: &str) {
             observation: o,
         }
     };
-    ops::apply(
+    ops::tests::apply_fixture(
         &mut store,
         &if mode == "stop" { person() } else { service() },
         &crate::teams::ops::tests::request(team.revision, operation),

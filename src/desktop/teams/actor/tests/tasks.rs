@@ -118,7 +118,7 @@ impl Ports for Fake {
         if let Some((state, target)) = self.release.take() {
             let mut store = Store::open(&state).unwrap();
             let revision = store.team(&e.team).unwrap().unwrap().revision;
-            crate::teams::ops::apply(
+            crate::teams::ops::tests::apply_fixture(
                 &mut store,
                 &person(),
                 &crate::teams::ops::Request {

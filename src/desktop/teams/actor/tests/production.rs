@@ -476,7 +476,7 @@ fn pause_committed_during_tree_computation_prevents_the_ref_update() {
         *s.borrow_mut() = Some(Box::new(move || {
             let mut store = Store::open(&state).unwrap();
             let t = store.team(TEAM).unwrap().unwrap();
-            ops::apply(
+            ops::tests::apply_fixture(
                 &mut store,
                 &person(),
                 &crate::teams::ops::tests::request(t.revision, Operation::Pause),
@@ -618,7 +618,7 @@ impl ports::Ports for PauseAtDelivery {
                 member: m.id.clone(),
             }
         };
-        ops::apply(
+        ops::tests::apply_fixture(
             &mut store,
             &person(),
             &crate::teams::ops::tests::request(current.revision, operation),
@@ -701,8 +701,14 @@ fn advance_base_integration_uses_the_handouts_base_in_actor_and_native_admission
                 commit: newer.clone(),
             },
         );
-        ops::apply_with_repository(&mut h.store, &person(), &req, 100, &|_| Ok(repo.clone()))
-            .unwrap();
+        ops::tests::base_advance::apply_with_repository_fixture(
+            &mut h.store,
+            &person(),
+            &req,
+            100,
+            &|_| Ok(repo.clone()),
+        )
+        .unwrap();
         assert_eq!(
             git(&o.root, &o.empty, &["rev-parse", &plan.branch]),
             plan.base

@@ -13,7 +13,7 @@ fn a_symlinked_state_parent_supports_lazy_creation_and_reopening() {
     let mut store = Store::open(&alias).unwrap();
     assert!(store.team(TEAM).unwrap().is_none());
     assert!(!state.join("teams/teams-v1.sqlite3").exists());
-    ops::apply(&mut store, &person(), &request(0, create()), 1).unwrap();
+    ops::tests::apply_fixture(&mut store, &person(), &request(0, create()), 1).unwrap();
     assert_eq!(store.state(), crate::platform::canonical(&state).unwrap());
     drop(store);
     let reopened = Store::open(&alias).unwrap();

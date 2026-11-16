@@ -103,7 +103,8 @@ fn a_stop_committed_while_the_transition_runs_waits_for_it_and_is_captured() {
                 let mut store = Store::open(&state).unwrap();
                 let rev = store.team(TEAM).unwrap().unwrap().revision;
                 let stop = request(rev, Operation::Stop);
-                crate::teams::ops::apply(&mut store, &person(), &stop, 1234).unwrap();
+                crate::teams::ops::tests::apply_fixture(&mut store, &person(), &stop, 1234)
+                    .unwrap();
             }));
             Ok(())
         }));

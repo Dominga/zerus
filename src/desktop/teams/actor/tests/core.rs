@@ -97,7 +97,7 @@ impl super::super::ports::Ports for Fake {
             if let Some(state) = self.pause_on_recheck.take() {
                 let mut store = Store::open(&state)?;
                 let revision = store.team(TEAM)?.unwrap().revision;
-                ops::apply(
+                ops::tests::apply_fixture(
                     &mut store,
                     &person(),
                     &request(

@@ -13,7 +13,22 @@ import uuid
 import test_codex_clear_recovery as recovery
 
 
-class NativeTaskBinding(recovery.CodexClearRecovery):
+class NativeTaskBinding(unittest.TestCase):
+    setUp = recovery.CodexClearRecovery.setUp
+    tearDown = recovery.CodexClearRecovery.tearDown
+    script = recovery.CodexClearRecovery.script
+    write_record = recovery.CodexClearRecovery.write_record
+    tmux = recovery.CodexClearRecovery.tmux
+    wait_for = recovery.CodexClearRecovery.wait_for
+    received = recovery.CodexClearRecovery.received
+    payload = recovery.CodexClearRecovery.payload
+    send = recovery.CodexClearRecovery.send
+    hook = recovery.CodexClearRecovery.hook
+    inspect = recovery.CodexClearRecovery.inspect
+    poisoned = recovery.CodexClearRecovery.poisoned
+    write_header = recovery.CodexClearRecovery.write_header
+    emit = recovery.CodexClearRecovery.emit
+
     def prepare_task(self):
         self.poisoned()
         for key in ('expected_id', 'error', 'session_end', 'clear_context_request'):

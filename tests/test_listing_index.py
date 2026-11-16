@@ -26,7 +26,8 @@ def worker_leased(state):
 
 def seed_aggregate(state,generation):
     import sqlite3
-    with sqlite3.connect(f'file:{state}/listing-metadata/index.sqlite3?mode=ro',uri=True) as db:
+    from contextlib import closing
+    with closing(sqlite3.connect(f'file:{state}/listing-metadata/index.sqlite3?mode=ro',uri=True)) as db:
         return db.execute('SELECT count(*),sum(length(CAST(seed AS BLOB))),max(length(CAST(seed AS BLOB))) FROM snapshots WHERE generation=?',(generation,)).fetchone()
 
 

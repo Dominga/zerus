@@ -1736,6 +1736,9 @@ fn track(name: String, token: String, mut event: Value, output: &mut StartOutput
     }
     if codex_tasks::recover_main(&mut record, &event)? {
         write(&mut record)?;
+        // Only exact accepted text in the held original native transcript can
+        // credit the old request; this different fresh prompt cannot do so.
+        input::acceptance::reconcile_locked(&mut record)?;
     }
     if let Some(scoped) = external_agents::route(&mut record, &event) {
         if scoped["hgs_retired_external_hook"] == true { return Ok(0); }

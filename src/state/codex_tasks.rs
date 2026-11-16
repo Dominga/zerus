@@ -152,6 +152,21 @@ pub(super) fn multiple(record: &Value) -> bool {
                 .is_some_and(|rows| !rows.is_empty()))
 }
 
+/// Only the pending request frozen by the proved original-main repair may
+/// read its historical receipt in that receipt's original (mistaken) context.
+pub(super) fn recovered_pending(record: &Value) -> bool {
+    let repair = &record["codex_binding_recovery"];
+    record["agent"] == "codex"
+        && repair["source"] == "original_native_prompt"
+        && repair["run_id"] == record["run_id"]
+        && repair["to"] == record["conversation_id"]
+        && !string(repair, "from").is_empty()
+        && repair["from"] != repair["to"]
+        && !string(repair, "pending_request").is_empty()
+        && repair["pending_request"] == record["input_pending_request"]
+        && repair["pending_at"] == record["input_pending_at"]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

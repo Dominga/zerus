@@ -246,6 +246,8 @@ fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
         || receipt["name"] != record["name"]
         || receipt["run_id"] != record["run_id"]
         || (receipt["conversation_id"] != record["conversation_id"]
+            && !(codex_tasks::recovered_pending(record)
+                && receipt["conversation_id"] == record["codex_binding_recovery"]["from"])
             && !(bootstrap
                 && receipt["first_message"] == true
                 && receipt["conversation_id"].as_str() == Some("")))
@@ -299,6 +301,9 @@ pub(in crate::state) fn allows_pending(record: &Value) -> bool {
 /// A delayed old callback is not evidence for a newer pending request. Once an
 /// unknown input exists, only an unambiguous complete prompt can open its gate.
 pub(in crate::state) fn allows_hook(record: &Value, event: &Value) -> bool {
+    if codex_tasks::recovered_pending(record) && input_unconfirmed(record) {
+        return false;
+    }
     if !matches!(
         string(event, "hook_event_name"),
         "UserPromptSubmit" | "UserPromptQueued" | "TurnStarted" | "TaskStarted"
@@ -407,6 +412,9 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     record["input_acceptance"] = json!({"source":"native_user_input", "request_id":receipt["request_id"],
         "run_id":record["run_id"],"conversation_id":record["conversation_id"],"pending_at":record["input_pending_at"],
         "native_turn_id":native_id,"digest":receipt["digest"],"text_sha256":format!("{:x}",Sha256::digest(string(&receipt,"submitted_text").as_bytes())),"at":at});
+    if receipt["conversation_id"] != record["conversation_id"] {
+        record["input_acceptance"]["receipt_conversation_id"] = receipt["conversation_id"].clone();
+    }
     write(record)
 }
 

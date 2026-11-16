@@ -238,7 +238,9 @@ pub(in crate::state) fn recover_main(record: &mut Value, event: &Value) -> Resul
     for key in ["prompt", "last_message", "active_tools", "shell_jobs"] {
         record.as_object_mut().unwrap().remove(key);
     }
-    record["codex_binding_recovery"] = json!({"from":child,"to":parent,"at":now(),"source":"original_native_prompt","replayed":false});
+    record["codex_binding_recovery"] = json!({"from":child,"to":parent,"run_id":record["run_id"],
+        "pending_request":record["input_pending_request"],"pending_at":record["input_pending_at"],
+        "at":now(),"source":"original_native_prompt","replayed":false});
     // The real prompt proceeds through the ordinary hook/acceptance path.
     // Pending markers and every original input/unknown receipt are unchanged.
     Ok(true)

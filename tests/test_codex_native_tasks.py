@@ -112,7 +112,8 @@ class NativeTaskBinding(recovery.CodexClearRecovery):
         self.assertEqual(current['transcript'],str(self.parent_path))
         self.assertEqual(path.read_bytes(),original)
         self.assertEqual(current['input_pending_request'],request)
-        self.assertGreater(current['input_seen_at'],receipt['submitted_at'])
+        self.assertEqual(current['input_seen_at'],0,
+                         'a different fresh prompt cannot credit an unseen old request')
         self.assertEqual(current['codex_binding_recovery']['source'],'original_native_prompt')
         self.assertFalse(current['codex_binding_recovery']['replayed'])
         self.assertEqual(len(list((self.state/'codex-binding-repairs').glob('*.json'))),1)
@@ -124,6 +125,37 @@ class NativeTaskBinding(recovery.CodexClearRecovery):
         self.assertEqual(current['conversation_id'],self.successor)
         self.assertEqual(current['transcript'],before['transcript'])
         self.assertFalse((self.state/'codex-binding-repairs').exists())
+
+    def test_original_accepted_text_can_confirm_only_the_frozen_historical_request(self):
+        self.legacy_binding()
+        request = str(uuid.uuid4())
+        pending = time.time() - 1
+        receipt = dict(request_id=request,name=self.name,run_id=self.run_id,
+            conversation_id=self.successor,submitted_at=pending,status='submitted',
+            transport='terminal',submitted_text='Original retained message',digest='a'*64,attachments=[])
+        receipts = self.state/'input_receipts'
+        receipts.mkdir(exist_ok=True)
+        path = receipts/(request+'.json')
+        original = json.dumps(receipt).encode()
+        path.write_bytes(original)
+        self.record.update(input_pending_request=request,input_pending_at=pending,input_seen_at=0)
+        self.write_record()
+        stamp = lambda offset: datetime.fromtimestamp(pending+offset,timezone.utc).isoformat()
+        rows = [dict(type='event_msg',timestamp=stamp(.2),
+                     payload=dict(type='task_started',turn_id='exact-original-turn')),
+                dict(type='response_item',timestamp=stamp(.4),
+                     payload=dict(type='message',role='user',content=[dict(
+                         type='input_text',text=receipt['submitted_text'])]))]
+        with self.parent_path.open('a') as output:
+            for row in rows: output.write(json.dumps(row)+'\n')
+        current = self.emit(self.parent_event)
+        self.assertEqual(current['conversation_id'],self.conversation_id)
+        self.assertGreater(current['input_seen_at'],pending)
+        self.assertEqual(current['input_acceptance']['source'],'native_user_input')
+        self.assertEqual(current['input_acceptance']['request_id'],request)
+        self.assertEqual(current['input_acceptance']['receipt_conversation_id'],self.successor)
+        self.assertEqual(current['input_acceptance']['conversation_id'],self.conversation_id)
+        self.assertEqual(path.read_bytes(),original)
 
     def test_native_output_text_claim_is_not_creation_proof(self):
         self.legacy_binding()

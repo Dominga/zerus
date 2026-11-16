@@ -174,3 +174,103 @@ fn finite_sequence_lookahead_precedes_window_filter_even_for_a_long_unit_stream(
     assert_eq!(page.rows.len(), 1);
     assert!(page.more && page.truncated);
 }
+
+#[test]
+fn synthetic_native_receipt_drives_real_task_source_but_late_sample_cannot_rewrite_new_attempt() {
+    use zerus_replica::execution::{NativeRequest, Origin, Receipt};
+    use zerus_replica::Settlement;
+    let mut h = Harness::new();
+    let reference = document(&h);
+    send(
+        &caller(&h, &TaskActor::Person),
+        &reference,
+        TEAM,
+        None,
+        None,
+    )
+    .unwrap();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    let old = selected(&h, &reference, &epoch);
+    let stale = old.sample.clone();
+    let node = old.node;
+    drop(old);
+    let executor = match h.bind("m1") {
+        ops::Actor::Session { session, .. } => zerus_replica::SessionKey {
+            machine: session.machine,
+            session_id: session.session_id,
+            session: "codex/fixture-member".into(),
+        },
+        _ => unreachable!(),
+    };
+    let id = uuid::Uuid::new_v4().to_string();
+    {
+        let tasks = ProjectStore::open(&h.temp.path().join("replica"), &reference.project).unwrap();
+        let mut doc = tasks.load(&reference.uuid).unwrap();
+        doc.floor().unwrap();
+        let native = NativeRequest {
+            machine: executor.machine.clone(),
+            name: executor.session.clone(),
+            run_id: "fixture-run".into(),
+            conversation_id: "fixture-conversation".into(),
+            digest: "a".repeat(64),
+        };
+        doc.reserve_attempt(
+            &id,
+            Origin::Send,
+            &executor,
+            native.clone(),
+            &TaskActor::Person,
+            2,
+        )
+        .unwrap();
+        doc.settle_attempt(
+            &id,
+            Settlement::Receipt(&Receipt {
+                request_id: id.clone(),
+                name: native.name,
+                run_id: native.run_id,
+                conversation_id: native.conversation_id,
+                digest: native.digest,
+                submitted: true,
+                first_message: false,
+            }),
+            &TaskActor::Person,
+            3,
+        )
+        .unwrap();
+        doc.begin_attempt(&id, &TaskActor::Agent(executor), 4)
+            .unwrap();
+        tasks.save(&mut doc).unwrap();
+    }
+    let new = selected(&h, &reference, &epoch);
+    append(&mut h, &new, 1_700_000_000_001);
+    let revision = h.store.team(TEAM).unwrap().unwrap().revision;
+    let request = ops::tests::request(
+        revision,
+        Operation::RecordTimingFact {
+            node,
+            observation: Box::new(TimingInput::Task {
+                sample: Box::new(stale),
+            }),
+        },
+    );
+    assert_eq!(
+        ops::apply(
+            &mut h.store,
+            &ops::tests::service(),
+            &request,
+            1_700_000_000_002
+        )
+        .unwrap_err()
+        .code,
+        code::INVALID_STATE
+    );
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap().revision, revision);
+    let page = h
+        .store
+        .observed_timing(TEAM, 0, None, DEFAULT_WINDOW_MS, 200, None)
+        .unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].key.attempt.as_ref().unwrap().id, id);
+    assert!(page.rows[0].implementation_observed_ms.is_none());
+}

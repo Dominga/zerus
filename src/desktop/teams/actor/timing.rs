@@ -177,6 +177,33 @@ impl Runtime {
     }
 }
 
+/// Optional display contention has its own short writer wait. The original
+/// connection setting is restored before canonical lifecycle work continues.
+fn apply_optional(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    at: i64,
+) -> Result<ops::Reply> {
+    let db = store
+        .db
+        .as_ref()
+        .ok_or_else(|| problem("Timing source unavailable"))?;
+    let prior: u64 = db
+        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+        .map_err(storage)?;
+    db.busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(storage)?;
+    let result = ops::apply(store, actor, request, at);
+    store
+        .db
+        .as_ref()
+        .ok_or_else(|| problem("Timing source unavailable"))?
+        .busy_timeout(std::time::Duration::from_millis(prior))
+        .map_err(storage)?;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,19 +280,31 @@ mod tests {
         let id = pending.request.request_id;
         assert!(pending.error.is_some());
         // Unreadable status is unknown: no apply, no replacement identity.
+        let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts = starts.clone();
         h.store
             .db
             .as_ref()
             .unwrap()
-            .authorizer(Some(|c: AuthContext<'_>| match c.action {
-                AuthAction::Read { table_name, .. } if table_name == "requests" => {
-                    Authorization::Deny
+            .authorizer(Some(move |c: AuthContext<'_>| match c.action {
+                AuthAction::Read {
+                    table_name: "requests",
+                    ..
+                } => Authorization::Deny,
+                AuthAction::Transaction { .. } => {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Authorization::Allow
                 }
                 _ => Authorization::Allow,
             }));
         assert!(runtime
             .timing_read(&mut h.store, &read, 1_700_000_000_001)
             .is_err());
+        assert_eq!(
+            starts.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "unknown receipt cannot enter a write transaction"
+        );
         assert_eq!(runtime.ledger.get(TEAM, &row.key).unwrap().unwrap(), row);
         h.store
             .db
@@ -298,31 +337,4 @@ mod tests {
             .unwrap();
         assert_eq!(h.store.team(TEAM).unwrap().unwrap().revision, revision);
     }
-}
-
-/// Optional display contention has its own short writer wait. The original
-/// connection setting is restored before canonical lifecycle work continues.
-fn apply_optional(
-    store: &mut Store,
-    actor: &Actor,
-    request: &Request,
-    at: i64,
-) -> Result<ops::Reply> {
-    let db = store
-        .db
-        .as_ref()
-        .ok_or_else(|| problem("Timing source unavailable"))?;
-    let prior: u64 = db
-        .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
-        .map_err(storage)?;
-    db.busy_timeout(std::time::Duration::from_millis(250))
-        .map_err(storage)?;
-    let result = ops::apply(store, actor, request, at);
-    store
-        .db
-        .as_ref()
-        .ok_or_else(|| problem("Timing source unavailable"))?
-        .busy_timeout(std::time::Duration::from_millis(prior))
-        .map_err(storage)?;
-    result
 }

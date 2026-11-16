@@ -24,12 +24,12 @@ from gi.repository import GLib, Gtk, WebKit2
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--build", type=pathlib.Path, required=True, help="Vite build containing scripts/teams-workspace-layout-smoke.html")
 parser.add_argument("--output", type=pathlib.Path, required=True, help="Private evidence directory")
-parser.add_argument("--name", default="webkit")
+parser.add_argument("--label", default="webkit", help="Evidence prefix (avoids GTK's reserved --name option)")
 parser.add_argument("--scope", choices=["full", "baseline"], default="full")
 args = parser.parse_args()
 root = args.output.resolve()
 root.mkdir(parents=True, exist_ok=True)
-name, scope = args.name, args.scope
+name, scope = args.label, args.scope
 resources = {}
 class Quiet(http.server.SimpleHTTPRequestHandler):
     def send_head(self):

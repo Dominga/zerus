@@ -254,6 +254,7 @@ fn the_pages_keep_their_bounds_and_name_the_new_commands() {
 
 /// This guide example runs inside the real operation-written rework fixture,
 /// in the exact bound lead's scope, before its correction is approved.
+#[cfg(unix)]
 pub(super) fn correction_edit(h: &Harness, base: &str, rework: &str, generation: u64) {
     let read = h.store().phase_draft(TEAM, 1).unwrap();
     let proposal = read.rework.unwrap().draft.unwrap();

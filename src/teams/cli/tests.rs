@@ -8,6 +8,7 @@ mod dependencies;
 mod dispatch;
 mod drawer_pages;
 mod editing;
+mod estimate_preview;
 mod fixtures;
 mod guides;
 mod harness;
@@ -23,7 +24,6 @@ mod progress157;
 mod providers;
 #[cfg(unix)]
 mod publication;
-mod estimate_preview;
 mod reads;
 mod recorded_timings;
 #[cfg(unix)]

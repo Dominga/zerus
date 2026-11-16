@@ -16,19 +16,49 @@ export interface DraftInput { title: string; barrier: boolean; nodes: DraftNode[
 export interface DraftRoute { role: string; pipeline: string }
 export interface PhaseList {
   team: string; revision: number; rows: PhaseRecord[]; next: string | null;
-  next_node: number; next_phase: number; drafts_available: boolean;
+  next_node: number; next_phase: number; drafts_available: boolean; approval_available?: boolean;
   routes: DraftRoute[]; default_pipeline: string;
 }
+export interface PhaseRework {
+  id: string; base_publication: string; comment: string;
+  state: "drafting" | "review" | "rejected" | "publishing" | "published";
+  draft: PhaseDraft | null;
+}
 export interface PhaseDraft {
+  rework_available?: boolean; rework?: PhaseRework | null;
   metrics?: import("./phase-metrics").PhaseMetricsView;
   phase: PhaseRecord; revision: number; generation: number | null; next_node: number;
   nodes: DraftNode[]; complete: boolean; editable: boolean; unknown_fields: boolean;
+  accept_available?: boolean;
+  publication?: { id: string; generation: number; state: string; total: number; created: number; blocked: number; reason: string | null } | null;
+  rejection?: { id: string; generation: number; comment: string } | null;
+  previous?: { generation: number; draft: DraftInput } | null;
+  live?: PhaseNodeSnapshot | null;
   graph: {
     complete: boolean;
     nodes: { id: number; phase: number; layer: number }[];
     edges: { from: number; to: number; kind: "hard" | "soft"; external: boolean }[];
   };
 }
+export interface PhaseLiveNode {
+  id: number; phase: number; title: string; text?: string; task?: { project: string; uuid: string } | null;
+  state?: string; hold?: boolean; admitted: boolean; kind?: "task" | "stage" | "check";
+  role?: string; pipeline?: string; deps?: DraftDep[]; assignee?: string | null; implementer?: string | null;
+  writes?: string[]; estimate_minutes?: number; rank?: string; round: number;
+  integrated?: boolean; decided_by?: string | null; stage_of?: number | null; stage_index?: number;
+}
+export interface PhaseNodeSnapshot { phase: number; revision: number; nodes: PhaseLiveNode[]; complete: boolean }
+
+let focusVersion = 0;
+const [requestedPhaseFocus, setRequestedPhaseFocus] = createSignal<{ team: string; phase: number; version: number } | null>(null);
+export const phaseFocus = requestedPhaseFocus;
+export function openPhase(team: string, phase: number) { if (Number.isSafeInteger(phase) && phase > 0) setRequestedPhaseFocus({ team, phase, version: ++focusVersion }); }
+export function takePhaseFocus(team: string): number | null {
+  const focus = requestedPhaseFocus();
+  if (focus?.team !== team) return null;
+  setRequestedPhaseFocus(null); return focus.phase;
+}
+
 export interface PhasePane {
   epoch: number; list: PhaseList | null; draft: PhaseDraft | null; selected: number | null;
   list_failure: { code: string; message: string } | null;

@@ -142,3 +142,55 @@ proof; retained proposals and crash settlement; early/wrong-store replies;
 late lost peers and bounded slow-first discovery. Mutants independently remove
 root/span/store/consumer/certificate boundaries. Evidence is local Arch and a
 private headless Mac run. Hosted CI is not dispatched, polled or a merge gate.
+
+## Proof resource exhaustion (`zerus-s6pk0`)
+
+Root inspection and per-span causal validation use the same work accounting
+policy: at most 131,072 visits per scan. Root work includes each visited change
+and each inspected operation position in a change touching task metadata;
+causal work counts each visited change span. Existing identity, floor, seal,
+closure, value-size and causal checks remain mandatory. Incomplete proof never
+returns an admitted root or permits a canonical mutation.
+
+The wall clock is a last-resort resource stop at 30 seconds per scan, rather
+than a two-second scheduling sensitivity. This gives a loaded development host
+15 times the previous scheduling margin while retaining a finite safety net.
+It is not an input or admission timeout: each original request retains its own
+deadline and final admission checks. Scoped thread-local test accounting is
+available only in tests and `test-support`, with no environment or configuration
+switch in production.
+
+Both certificate and fresh-proof admission recheck the original deadline after
+their expensive reads and immediately before entering the reservation callback.
+The expected-mode load inside that callback is followed by another check before
+reservation entry. Expiry before entry refuses with no attempt. If reservation
+or its save consumes the remaining time, the result is `Uncertain`, retaining
+the original durable UUID and preventing native delivery or replay. A successful
+scan under the resource allowance is never evidence of remaining admission time.
+
+Exhaustion is typed `ErrorKind::Busy`, meaning the proof is incomplete and a
+fresh read can be tried. Invalid historical evidence remains a rule refusal.
+Busy must propagate through native load/save/import, stored-update replay and
+recovery; it cannot become a damaged copy, cached error, replacement candidate,
+schema repair, certificate, native outcome or replay permission. Teams exposes
+this as `store_busy` with a retry message, not `storage_failed`. The phone FFI
+retains its existing error variants and exposes this non-admitted result as a
+refusal with the busy/retry message. Retained original request identities,
+uncertain outcomes and no-replay protections continue to apply.
+
+Retryable proof is not proof that an earlier native request never started.
+Once durable attempt saving begins, its existing uncertain-result handling
+still retains the original request and hold. Busy does not settle it or grant
+native replay. Only the pre-reservation delivery path retains the ordinary
+busy/non-start cause.
+
+The natural-clock older-build intake failure also exposed a separate producer
+bug: clearing the stale cancellation fields of an unchanged team binding
+returned with two pending Loro operations. Change lookup reads committed Change
+metadata, while changed-container inspection implicitly commits. Depending on
+peer traversal order, the historical reader could meet the pending peer first
+and correctly refuse its missing Change. The mutator now commits its intended
+field deletion before returning, adds no team history entry, and leaves an
+unchanged binding with no mark a no-op. Root inspection remains strict and does
+not accept pending or missing history. This cause is distinct from scan-resource
+exhaustion; the natural-clock and injected-pause controls stay separate.

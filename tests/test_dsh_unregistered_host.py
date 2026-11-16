@@ -133,6 +133,17 @@ class RegisteredHostWithDamagedRecord(Hosted, unittest.TestCase):
     setUpClass = classmethod(identity_base.HostStartedByHgs.setUpClass.__func__)
     tearDownClass = classmethod(identity_base.HostStartedByHgs.tearDownClass.__func__)
 
+    def test_registered_host_can_read_its_own_native_identity(self):
+        record = json.loads((self.host_dir / 'host.identity.json').read_text())
+        self.assertTrue(record['birth'])
+        self.assertTrue(record['boot'])
+        result = self.shell(self.first, runs=[('self', [str(HGS), 'self', '--json'], None)])
+        answer = result['runs']['self']
+        self.assertEqual(answer['code'], 0, answer)
+        identity = json.loads(answer['stdout'])
+        self.assertEqual(identity['identity_source'], 'hosted_call')
+        self.assertEqual(identity['session_id'], self.first['session_id'])
+
     def test_own_hosted_proof_is_unchanged_by_an_unrelated_bad_record(self):
         ref, target = self.task(), self.launch()
         folder = self.host_dir.parent / ('f' * 16)

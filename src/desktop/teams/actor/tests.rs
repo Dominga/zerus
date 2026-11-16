@@ -78,6 +78,7 @@ mod core;
 mod fresh_members;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
+mod publication;
 #[test]
 fn disabled_actor_does_not_create_any_store() {
     let temp = tempfile::tempdir().unwrap();

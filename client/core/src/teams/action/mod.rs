@@ -38,8 +38,10 @@ mod drafts;
 pub mod editing;
 pub mod input;
 pub mod intents;
+mod phases;
 #[cfg(test)]
 mod planning;
+mod rework;
 pub mod types;
 pub mod wire;
 

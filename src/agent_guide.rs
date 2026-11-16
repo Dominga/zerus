@@ -13,8 +13,14 @@ const TOPICS: &[(&str, &str)] = &[
     ("tasks", include_str!("agent_guide/tasks.md")),
     ("team", include_str!("agent_guide/team.md")),
     ("team-lead", include_str!("agent_guide/team-lead.md")),
+    ("team-rework", include_str!("agent_guide/team-rework.md")),
+    (
+        "team-planning",
+        include_str!("agent_guide/team-planning.md"),
+    ),
 ];
-const USAGE: &str = "usage: hgs guide [send|wait|launch|stop|tasks|team|team-lead]";
+const USAGE: &str =
+    "usage: hgs guide [send|wait|launch|stop|tasks|team|team-lead|team-planning|team-rework]";
 
 pub(crate) fn dispatch(args: &[String]) -> Result<i32> {
     let text = match args {

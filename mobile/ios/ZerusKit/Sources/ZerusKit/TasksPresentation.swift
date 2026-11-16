@@ -86,10 +86,12 @@ public struct ChosenSession: Hashable, Sendable {
     public let name: String
     public let computerId: String
     public let machineId: String
-    public init(name: String, computerId: String, machineId: String) {
+    public let sessionId: String
+    public init(name: String, computerId: String, machineId: String, sessionId: String = "") {
         self.name = name
         self.computerId = computerId
         self.machineId = machineId
+        self.sessionId = sessionId
     }
 }
 
@@ -105,10 +107,12 @@ public struct SendRoute: Hashable, Sendable {
     public let computerId: String
     public let session: String
     public let direct: Bool
-    public init(computerId: String, session: String, direct: Bool = true) {
+    public let sessionId: String
+    public init(computerId: String, session: String, direct: Bool = true, sessionId: String = "") {
         self.computerId = computerId
         self.session = session
         self.direct = direct
+        self.sessionId = sessionId
     }
 }
 
@@ -142,7 +146,30 @@ public enum TasksPresentation {
 
     private static func same(_ ref: SessionRef?, _ chosen: ChosenSession?) -> Bool {
         guard let ref, let chosen else { return false }
-        return ref.machine == chosen.machineId && ref.session == chosen.name
+        return ref.machine == chosen.machineId && (ref.sessionId.isEmpty ? ref.session == chosen.name : ref.sessionId == chosen.sessionId)
+    }
+
+    /// Native keys are opaque; graph IDs, coercion and trimming never supply a key.
+    public static func nativeIdentity(_ session: Session) -> String {
+        for field in ["launch_id", "run_id"] {
+            if case .string(let value)? = session.raw[field], !value.isEmpty { return field + ":" + value }
+        }
+        return ""
+    }
+
+    public static func resolve(_ ref: SessionRef, machines: [Machine], connectionId: String, sessions: [Session]) -> Session? {
+        guard let machine = computer(ref, machines, connectionId) else { return nil }
+        let matches = sessions.filter {
+            $0.target.connectionId == connectionId && $0.target.computerId == machine.id && !SessionFilters.archived($0) &&
+                (ref.sessionId.isEmpty ? $0.target.session == ref.session : nativeIdentity($0) == ref.sessionId)
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    public static func sameSelection(_ first: ChosenSession?, _ second: ChosenSession?) -> Bool {
+        guard let first, let second else { return false }
+        return first.machineId == second.machineId && first.computerId == second.computerId &&
+            (first.sessionId.isEmpty ? first.name == second.name : first.sessionId == second.sessionId)
     }
 
     private static func pinned(_ task: TaskInfo) -> SessionRef? {
@@ -193,17 +220,17 @@ public enum TasksPresentation {
     }
 
     /// The session a task is pinned to or ran in; an Any session task names the chosen session it goes to now.
-    public static func sessionLabel(_ task: TaskInfo, chosen: ChosenSession? = nil) -> String {
-        let target = pinned(task)?.session
-        let name: String? = switch task.stage {
+    public static func sessionLabel(_ task: TaskInfo, chosen: ChosenSession? = nil, current: (SessionRef) -> String? = { _ in nil }) -> String {
+        let target = pinned(task)
+        let ref: SessionRef? = switch task.stage {
         case .todo, .backlog: target
-        default: task.session?.session ?? target
+        default: task.session ?? target
         }
-        guard let name else {
+        guard let ref else {
             if let chosen, anySession(task) { return "any · now \(shortName(chosen.name))" }
             return "any session"
         }
-        return shortName(name)
+        return shortName(current(ref) ?? ref.session)
     }
 
     public static func note(_ task: TaskInfo) -> String {
@@ -213,7 +240,8 @@ public enum TasksPresentation {
     }
 
     public static func cards(_ tasks: [TaskInfo], tab: TaskTab, chosen: ChosenSession?, onlyThisSession: Bool,
-                             send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState) -> [TaskCard] {
+                             send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState,
+                             current: (SessionRef) -> String? = { _ in nil }) -> [TaskCard] {
         // To do keeps its project-wide numbers whatever the filter hides.
         let queue = tasks.filter { $0.stage == .todo }.map(\.uuid)
         return tasks.filter { self.tab($0.stage) == tab && visible($0, chosen: chosen, onlyThisSession: onlyThisSession) }.map { task in
@@ -230,8 +258,8 @@ public enum TasksPresentation {
                 return ActionState(action, enabled: true, main: main)
             }
             var filer = ""
-            if case .agent(let session) = task.author, [.todo, .backlog].contains(task.stage) { filer = shortName(session.session) }
-            return TaskCard(uuid: task.uuid, id: task.id, text: task.text, tab: tab, sessionLabel: sessionLabel(task, chosen: chosen),
+            if case .agent(let session) = task.author, [.todo, .backlog].contains(task.stage) { filer = shortName(current(session) ?? session.session) }
+            return TaskCard(uuid: task.uuid, id: task.id, text: task.text, tab: tab, sessionLabel: sessionLabel(task, chosen: chosen, current: current),
                             highlighted: highlighted(task, chosen: chosen), note: note(task), actions: states, anySession: anySession(task),
                             queue: task.stage == .todo ? (queue.firstIndex(of: task.uuid) ?? -1) + 1 : 0, filedBy: filer, stageAt: task.stageAt)
         }
@@ -239,7 +267,8 @@ public enum TasksPresentation {
 
     /// The computer of `ref` among this connection's machines.
     private static func computer(_ ref: SessionRef, _ machines: [Machine], _ connectionId: String) -> Machine? {
-        machines.first { $0.connectionId == connectionId && !$0.machineId.isEmpty && $0.machineId == ref.machine }
+        let matches = machines.filter { $0.connectionId == connectionId && !$0.machineId.isEmpty && $0.machineId == ref.machine }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     /// A session takes tasks once its computer reports its native ID, which tasks pin.
@@ -256,7 +285,7 @@ public enum TasksPresentation {
     /// Where Send now goes, or why it cannot: the pinned session's computer, or the chosen session for an Any session task.
     public static func route(_ task: TaskInfo, chosen: ChosenSession?, machines: [Machine], connectionId: String,
                              operations: (Machine) -> Set<String>, sessions: [Session]) -> RouteState {
-        guard let ref = pinned(task) ?? chosen.map({ SessionRef(machine: $0.machineId, session: $0.name) }) else {
+        guard let ref = pinned(task) ?? chosen.map({ SessionRef(machine: $0.machineId, session: $0.name, sessionId: $0.sessionId) }) else {
             return .blocked("Choose a session for this task")
         }
         if ref.machine.isEmpty { return .blocked(outdated(ref.session)) }
@@ -265,10 +294,10 @@ public enum TasksPresentation {
         }
         if !reachable(machine) { return .blocked("\(machine.name) is offline") }
         if !operations(machine).contains("task_send") { return .blocked("\(machine.name) needs an update to send tasks") }
-        if !sessions.contains(where: { $0.target.computerId == machine.id && $0.target.session == ref.session && $0.target.archiveId.isEmpty }) {
+        guard let live = resolve(ref, machines: machines, connectionId: connectionId, sessions: sessions) else {
             return .blocked("\(ref.session) no longer exists — choose another session")
         }
-        return .ready(SendRoute(computerId: machine.id, session: ref.session))
+        return .ready(SendRoute(computerId: machine.id, session: live.target.session, sessionId: nativeIdentity(live)))
     }
 
     /// Cancel goes to the session's computer, or, while it is out of reach, to any online computer of the project, which cancels it there as hgs does.
@@ -288,7 +317,7 @@ public enum TasksPresentation {
             let online = SessionFilters.online(session, machines)
             let dot: ChipDot = SessionFilters.needsAction(session) ? .attention : SessionFilters.working(session, online) ? .working : .ready
             return SessionChip(session: ChosenSession(name: session.target.session, computerId: session.target.computerId,
-                                                      machineId: machine?.machineId ?? ""), dot: dot)
+                                                      machineId: machine?.machineId ?? "", sessionId: nativeIdentity(session)), dot: dot)
         }
     }
 

@@ -199,9 +199,101 @@ pub enum CancelState {
     Released,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationProblemKind {
+    Refused,
+    Uncertain,
+    Deferred,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    SendBackPhase {
+        phase: u32,
+        publication: String,
+        comment: String,
+    },
+    SubmitPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    ApprovePhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
+    RejectPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        comment: String,
+    },
+    UndoPhaseCorrectionRejection {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        rejection: String,
+    },
+    ReconcileCorrectionReview {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
+    ReconcilePhaseReview {
+        phase: u32,
+        generation: u64,
+    },
+    ApprovePhase {
+        phase: u32,
+        generation: u64,
+        #[serde(default)]
+        confirm_initial: bool,
+    },
+    RejectPhase {
+        phase: u32,
+        generation: u64,
+        comment: String,
+    },
+    UndoRejectPhase {
+        phase: u32,
+        generation: u64,
+        rejection: String,
+    },
+    ReconcilePublication {
+        phase: u32,
+        publication: String,
+    },
+    PublicationTaskProblem {
+        publication: String,
+        node: u32,
+        reason: String,
+        kind: PublicationProblemKind,
+        #[serde(default)]
+        clear: bool,
+    },
+    ReconcilePhase {
+        phase: u32,
+        publication: String,
+    },
+    AcceptPhase {
+        phase: u32,
+        publication: String,
+    },
     SubmitDraftPhase {
         phase: u32,
         draft: zerus_team_plan::draft::DraftInput,

@@ -113,9 +113,10 @@ struct TaskEditorSheet: View {
 struct TaskMediaButton: View {
     @Environment(AppModel.self) private var app
     let key: ProjectKey, task: String, file: TaskMediaInfo
+    var entry: String? = nil
     let action: () -> Void
     var body: some View {
-        let state = app.viewer.rows[JSON([key.connectionId, key.swarmId, key.id, task, file.token]).compact]
+        let state = app.viewer.rows[JSON([key.connectionId, key.swarmId, key.id, task, entry ?? "", file.token]).compact]
         VStack(alignment: .leading) {
             Button(action: action) { HStack { Text(file.name); if state?.loading == true { ProgressView() } } }.disabled(state?.loading == true)
             if let error = state?.error, !error.isEmpty { Text(error).font(.caption).foregroundStyle(.red) }

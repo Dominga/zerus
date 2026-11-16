@@ -146,6 +146,13 @@ fn pre_spawn_refusal_returns_the_same_pair_and_never_retires_its_row() {
         probe(case);
     }
 }
+
+#[test]
+fn actual_native_scope_companion_survives_wrapper_drop_and_original_output_or_input_workers() {
+    for case in ["companion-held", "companion-drop", "companion-input"] {
+        probe(case);
+    }
+}
 #[test]
 fn handed_off_source_and_row_cannot_be_replaced_by_a_different_writer_or_budget() {
     probe("foreign-writer");
@@ -248,24 +255,41 @@ fn private_probe() {
         assert_eq!(pending(&scope(), end()).unwrap().len(), 1);
         return;
     }
+    let companion = Arc::new(());
+    let companion_probe = Arc::downgrade(&companion);
+    let companion: Option<Arc<dyn Send + Sync>> = if case.starts_with("companion-") {
+        Some(companion)
+    } else {
+        drop(companion);
+        None
+    };
     let admission = original
-        .into_io(&writer)
+        .into_io_holding(&writer, companion)
         .unwrap_or_else(|(_, why)| panic!("{why:?}"));
     assert_eq!(
         source.strong_count(),
         2,
         "wrapper and original Core charge keep the SAME source"
     );
-    if matches!(case.as_str(), "held-output" | "drop-output" | "held-input") {
+    if matches!(
+        case.as_str(),
+        "held-output"
+            | "drop-output"
+            | "held-input"
+            | "companion-held"
+            | "companion-drop"
+            | "companion-input"
+    ) {
+        let held_input = matches!(case.as_str(), "held-input" | "companion-input");
         let (read, write) = io::pipe().unwrap();
         let mut read = Some(read);
         let mut write = Some(write);
-        let mut cmd = command(if case == "held-input" {
+        let mut cmd = command(if held_input {
             "exec /bin/sleep 30"
         } else {
             "read line"
         });
-        if case == "held-input" {
+        if held_input {
             cmd.stdin(Stdio::from(read.as_ref().unwrap().try_clone().unwrap()));
         } else {
             cmd.stdout(Stdio::from(write.as_ref().unwrap().try_clone().unwrap()));
@@ -273,14 +297,14 @@ fn private_probe() {
         let mut child = cmd.spawn().unwrap();
         let pid = child.id();
         let birth = platform::process_identity(pid).unwrap().birth;
-        if case == "held-input" {
+        if held_input {
             child.stdin = Some(OwnedFd::from(write.take().unwrap()).into());
         } else {
             child.stdout = Some(OwnedFd::from(read.take().unwrap()).into());
         }
         drop(cmd);
         let mut exchange = admission.attach(child);
-        if case == "held-input" {
+        if held_input {
             exchange
                 .send(&writer, vec![b'x'; 1 << 20], |_, until| until == deadline)
                 .unwrap();
@@ -297,7 +321,11 @@ fn private_probe() {
         gate(true);
         assert_eq!(pending(&scope(), end()).unwrap().len(), 1);
         assert_eq!(source.strong_count(), 2);
-        if case == "drop-output" {
+        assert_eq!(
+            companion_probe.strong_count(),
+            usize::from(case.starts_with("companion-"))
+        );
+        if matches!(case.as_str(), "drop-output" | "companion-drop") {
             drop(exchange);
             assert_eq!(
                 source.strong_count(),
@@ -308,19 +336,24 @@ fn private_probe() {
             // The remaining local pipe end is released below, before waiting
             // for source/lease release. No PID or replacement Child is adopted.
             drop(write.take());
-            wait(|| source.strong_count() == 0 && loan.strong_count() == 0);
+            wait(|| {
+                source.strong_count() == 0
+                    && loan.strong_count() == 0
+                    && companion_probe.strong_count() == 0
+            });
             gate(false);
             assert_eq!(pending(&scope(), end()).unwrap().len(), 1);
             return;
         }
-        if case == "held-input" {
+        if held_input {
             drop(read.take());
         } else {
             drop(write.take());
         }
         let mut settled = finish(&mut exchange);
         assert_eq!(source.strong_count(), 1);
-        if case == "held-input" {
+        assert_eq!(companion_probe.strong_count(), 0);
+        if held_input {
             assert_eq!(settled.report().failure, Some(Failure::Cancelled));
             assert!(!settled.report().input_written);
         } else {
@@ -396,11 +429,13 @@ fn private_probe() {
                 && !matches!(case.as_str(), "foreign-writer" | "expired" | "withheld")
         )
     );
-    assert!(exchange
-        .send(&writer, b"replay".to_vec(), |_, _| panic!(
-            "second input check"
-        ))
-        .is_err());
+    assert!(
+        exchange
+            .send(&writer, b"replay".to_vec(), |_, _| panic!(
+                "second input check"
+            ))
+            .is_err()
+    );
     let mut settled = finish(&mut exchange);
     assert_eq!(settled.report().input_written, success);
     assert_eq!(

@@ -77,6 +77,8 @@ export interface ListInput {
   parentKey?: (s: Session) => string | undefined;
   /** A parent whose child sessions are collapsed. */
   teamCollapsed?: (key: string) => boolean;
+  /** Favorites bypass collapse only, after every ordinary filter. */
+  favorite?: (s: Session) => boolean;
   /**
    * Keep an ended parent as a container of its listed children (zerus-sa9qn.17):
    * the live list only. Archive rows never use it.
@@ -178,7 +180,7 @@ export function groupRows(input: ListInput): Row[] {
   const teamParents = agentTeamParents(input.agentTeams ?? new Map());
   const parentKey = teamParents.size ? (s: Session) => teamParents.get(s.key) ?? input.parentKey?.(s) : input.parentKey;
   const out: Row[] = [];
-  const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
+  const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}, showChildren = true) => {
       const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
       const kids = roster.filter((child) =>
@@ -191,18 +193,20 @@ export function groupRows(input: ListInput): Row[] {
       // sessions (owner, 2026-11-07, zerus-sa9qn.16): the toggle shows or
       // hides both, and is remembered across relaunches (zerus-sa9qn.15).
       const team = withSubagents(extra.team, kids, !!input.teamCollapsed?.(s.key));
-      const expanded = kids.length > 0 && !team?.collapsed;
+      const expanded = showChildren && kids.length > 0 && !team?.collapsed;
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const member = input.agentTeams?.get(s.key);
       const presentation = agentTeamSession(s, member, input.online(s));
       const shown = changed ? { ...presentation, subagents: kids } : presentation;
-      out.push({ type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, ...extra, team });
+      const row: Extract<Row, { type: "card" }> = { type: "card", id: s.key, session: shown, expandable: false, expanded, compactRow: input.compact(s.key), agentTeamRole: member?.role, agentTeamName: member?.lead ? member.name : undefined, agentTeamSummary: member?.lead && member.summary?.progress ? member.summary : undefined, ...extra, team };
+      out.push(row);
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
+      return row;
   };
   // One project group's visible cards in rank order, child sessions nested
   // under a parent shown in the same list. Nesting never hides a row: a loop
   // or a parent elsewhere leaves the card at top level.
-  const ordinaryCards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) => {
+  const ordinaryCards = (listed: readonly Session[], project = "", all: readonly Session[] = listed, favoritesOnly = false) => {
     const resolved = input.containers ? withContainers(listed, all, { ...input, parentKey }) : undefined;
     const list = resolved?.ordered ?? listed;
     const containers = resolved?.containers;
@@ -216,8 +220,9 @@ export function groupRows(input: ListInput): Row[] {
     }
     if (!parentOf.size) {
       for (const s of list) {
+        if (favoritesOnly && !input.favorite?.(s)) continue;
         const from = s.parent && parentKey ? parentKey(s) : undefined;
-        card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {});
+        card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {}, !favoritesOnly);
       }
       return;
     }
@@ -278,25 +283,49 @@ export function groupRows(input: ListInput): Row[] {
       sum.needsYou += (!s.muted && (asks ? !s.quiet : !s.quiet && needsAttention(s, up)) ? 1 : 0) + (below?.needsYou ?? 0);
       teams.set(parent, sum);
     }
+    // Retain only favorite paths through collapsed ancestors, in one reverse
+    // pass. Counts still cover the ordinary filtered hierarchy above.
+    const retained = new Set<string>();
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const { s, parent } = nodes[i];
+      if (input.favorite?.(s) || retained.has(s.key)) {
+        retained.add(s.key);
+        if (parent) retained.add(parent);
+      }
+    }
     const hidden = new Set<string>();
+    // A connector ends at the last *shown* sibling, even when later siblings
+    // stayed collapsed. The previous sibling's row is still local to this pass.
+    const lastShown = new Map<string, Extract<Row, { type: "card" | "container" }>>();
+    const connect = (row: Extract<Row, { type: "card" | "container" }>, parent?: string) => {
+      if (!parent) return;
+      const previous = lastShown.get(parent);
+      if (previous) previous.lastChild = false;
+      row.lastChild = true;
+      lastShown.set(parent, row);
+    };
     for (const { s, depth, parent, last } of nodes) {
-      // Hidden with a collapsed parent; never promoted to top level.
-      if (parent && hidden.has(parent)) { hidden.add(s.key); continue; }
+      const onlyFavorites = favoritesOnly || !!parent && hidden.has(parent);
+      if (onlyFavorites) {
+        hidden.add(s.key);
+        if (!retained.has(s.key)) continue;
+      }
       const counts = teams.get(s.key);
       const collapsed = !!counts && !!input.teamCollapsed?.(s.key);
       if (collapsed) hidden.add(s.key);
       const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: parentKey?.(s) } } : {};
       const container = containers?.get(s.key);
       if (container) {
-        out.push({ type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
-                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
+        const row: Extract<Row, { type: "container" }> = { type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
+                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from };
+        out.push(row); connect(row, parent);
         continue;
       }
-      card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
+      connect(card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites), parent);
     }
   };
-  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed) =>
-    ordinaryCards(orderTeamSessions(listed, input.agentTeams), project, all);
+  const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed, favoritesOnly = false) =>
+    ordinaryCards(orderTeamSessions(listed, input.agentTeams), project, all, favoritesOnly);
   const wanted = (id: string) => !input.projects.length || input.projects.includes(id);
   const headers = input.grouping.loaded ? input.grouping.headers : [];
   if (headers.length <= 1) {
@@ -322,7 +351,7 @@ export function groupRows(input: ListInput): Row[] {
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
                collapsed: h.collapsed, total: list.length, attention, unread, working });
-    if (!h.collapsed) cards(list, h.id, all);
+    cards(list, h.id, all, h.collapsed);
   }
   return out;
 }

@@ -25,6 +25,8 @@ mod owned;
 pub(super) use owned::spawn as spawn_owned;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use owned::CreationSource;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use owned::appearance::{Appearance, Producer as AppearanceProducer};
 
 mod sealed {
     pub trait Status {}
@@ -32,6 +34,10 @@ mod sealed {
 }
 /// Startup observers borrow status, never an owned-mode raw Child or handle.
 pub(super) trait ChildStatus: sealed::Status {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn appearance(&mut self, _record: &Value, _request: &str) -> Result<Option<Appearance>> {
+        Ok(None)
+    }
     fn id(&self) -> u32;
     fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>>;
     fn wait(&mut self) -> std::io::Result<ExitStatus>;

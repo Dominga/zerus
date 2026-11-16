@@ -172,7 +172,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
     // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
     private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
-    private val taskSync by lazy { TaskSync({ api }, taskReplicas) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas, mediaUnavailable = getApplication<Application>().getString(R.string.task_media_exchange_update), heldSend = getApplication<Application>().getString(R.string.task_send_unknown_hold), capabilities = { machineFeatures }) }
     private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
     private var taskDigestsAt = 0L
     private var taskSyncRunning = false
@@ -971,6 +971,69 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     private val taskEditor by lazy {
         TaskEditorModel(getApplication(), viewModelScope, { api }, taskReplicas, store.taskEditDrafts, attachmentStore, ::refreshEditedTask)
     }
+    private val taskContent by lazy {
+        TaskContentModel({ getApplication<Application>().getString(it) }, viewModelScope, taskReplicas, store.taskContentDrafts,
+            read = { java.util.Base64.getDecoder().decode(attachmentStore.readForWire(it).getString("data_base64")) },
+            remove = { id, protected -> attachmentStore.remove(id, protected); Unit }, upload = ::taskContentUpload,
+            changed = { context, _ ->
+                if (tasksKey == context.key) refreshTasks()
+                launchProjectSync(context.key)
+            })
+    }
+    internal val taskContentState get() = taskContent.state
+    internal fun closeTaskContent() = taskContent.dismiss()
+    internal fun changeTaskContent(token: String, change: (TaskEditForm) -> TaskEditForm) = taskContent.change(token, change)
+    internal fun removeTaskContentFile(token: String, id: String) = taskContent.removeFile(token, id)
+    internal fun saveTaskContent(token: String) = taskContent.save(token)
+    internal fun discardTaskContent(token: String) = taskContent.discard(token)
+    internal fun taskContentPicker(token: String, ready: (TaskContentPicker) -> Unit) = taskContent.picker(token, ready)
+    internal fun taskContentPicked(ticket: TaskContentPicker, uris: List<Uri>) {
+        val imports = uris.map { uri ->
+            val importer: suspend (List<Attachment>) -> Attachment = { current -> attachmentStore.importDocument(uri, current) }
+            importer
+        }
+        taskContent.picked(ticket, imports)
+    }
+    private fun taskContentUpload(context: TaskEditContext, target: TaskTarget) =
+        TaskContentCapabilities.upload(context, target, connections, machines, machineFeatures)
+    private fun taskContentContext(key: ProjectKey, target: TaskTarget): TaskEditContext? {
+        val connection = connections.singleOrNull { it.id == key.connectionId } ?: return null
+        val bound = (target as? TaskTarget.Session)?.session?.machine
+        val computer = machines.singleOrNull { it.connectionId == key.connectionId &&
+            (if (bound != null) it.machineId == bound else it.id == tasksChosen?.computerId) } ?: return null
+        return TaskEditContext(connection, key, taskProjectName(key), computer, machineFeatures.toMap())
+    }
+    internal fun openTaskContent(key: ProjectKey, task: TaskInfo) {
+        if (tasksKey != key || !task.writable || task.schema > 2 || task.stage !in setOf(TaskStage.TODO, TaskStage.BACKLOG)) return
+        val context = taskContentContext(key, task.target) ?: run { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }
+        taskContent.open(context, TaskContentDraft.existing(key, context.computer.id, context.computer.machineId, task))
+    }
+    internal fun newTaskContent() {
+        val key = tasksKey ?: return
+        val chosen = tasksChosen
+        TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
+        val context = taskContentContext(key, target) ?: return
+        if (!taskContentUpload(context, target)) { taskNotice = getApplication<Application>().getString(R.string.task_content_upload); return }
+        taskContent.open(context, TaskContentDraft.new(key, context.computer.id, context.computer.machineId,
+            if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO, target))
+    }
+    internal fun taskContentTargetLabel(state: TaskContentState): String {
+        val target = state.draft?.form?.let { it.target ?: it.originalTarget } as? TaskTarget.Session
+            ?: return getApplication<Application>().getString(R.string.task_edit_any)
+        return TasksPresentation.resolve(target.session, machines, state.context.key.connectionId, projectSessions(state.context.key))
+            ?.target?.session ?: target.session.session
+    }
+    internal fun chooseTaskContentSession(token: String, session: Session) {
+        val state = taskContent.state?.takeIf { it.token == token } ?: return
+        if (session !in taskEditorSessions(state.context.key)) return
+        val machine = machines.singleOrNull { it.connectionId == state.context.key.connectionId && it.id == session.target.computerId } ?: return
+        changeTaskContent(token) { it.copy(target = TaskTarget.Session(SessionRef(machine.machineId, session.target.session, taskSessionIdentity(session)))) }
+    }
+    internal suspend fun taskCommentFiles(key: ProjectKey, uuid: String, entry: String) = withContext(Dispatchers.IO) {
+        require(entry.isNotEmpty())
+        taskReplicas.store(key, taskProjectName(key)).use { it.media(uuid, entry) }
+    }
     /** Completion reads the exact edited host despite an unchanged heartbeat; it never repeats the edit. */
     private fun refreshEditedTask(context: TaskEditContext, task: String, token: String) {
         val job = viewModelScope.launch {
@@ -998,13 +1061,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val machine = machines.singleOrNull { it.connectionId == key.connectionId && it.id == session.target.computerId }
         machine?.machineId?.isNotEmpty() == true && taskSessionIdentity(session).isNotEmpty()
     }
-    private fun taskSessionIdentity(session: Session): String {
-        for (field in listOf("launch_id", "run_id")) {
-            val value = session.raw.opt(field)
-            if (value is String && value.isNotEmpty()) return "$field:$value"
-        }
-        return ""
-    }
+    private fun taskSessionIdentity(session: Session) = TasksPresentation.nativeIdentity(session)
+
     internal fun chooseTaskEditorAny(token: String) = changeTaskEditor(token) { it.copy(target = TaskTarget.AnySession) }
     internal fun chooseTaskEditorSession(token: String, session: Session) {
         val state = taskEditor.state?.takeIf { it.token == token } ?: return
@@ -1033,16 +1091,14 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     }
     internal fun previewTaskDraftMedia(file: Attachment) = attachments.open(null,
         DisplayedAttachment(file.name, file.mime, file.bytes, localId = file.id, sha256 = file.sha256))
-    internal fun taskMediaKey(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) =
-        org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, file.token)).toString()
-    internal fun taskMediaState(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) = attachments.taskState(taskMediaKey(key, task, file))
-    internal fun previewTaskMedia(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo) {
+    internal fun taskMediaKey(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) =
+        org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, entry.orEmpty(), file.token)).toString()
+    internal fun taskMediaState(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) = attachments.taskState(taskMediaKey(key, task, file, entry))
+    internal fun previewTaskMedia(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) {
         val name = taskProjectName(key)
-        attachments.openTask(taskMediaKey(key, task, file), file) {
+        attachments.openTask(taskMediaKey(key, task, file, entry), file) {
             withContext(Dispatchers.IO) { taskReplicas.store(key, name).use { store ->
-                val index = store.media(task, null).indexOfFirst { it.token == file.token }
-                check(index >= 0)
-                store.readMedia(task, null, index.toUInt(), file.token)
+                TaskMediaSelection(task, entry, file.token).read(store)
             } }
         }
     }
@@ -2805,6 +2861,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun taskProject(session: Session) = session.projectKey?.takeIf { key -> projects.any { it.key == key && it.catalogued } }
     fun projectSessions(key: ProjectKey) = sessions.filter { it.projectKey == key && it.target.archiveId.isBlank() && it.target.agentId.isBlank() }
     fun taskChips(key: ProjectKey) = TasksPresentation.chips(projectSessions(key), machines)
+    fun taskCurrentSession(ref: SessionRef): String? {
+        val key = tasksKey ?: return null
+        return TasksPresentation.resolve(ref, machines, key.connectionId, projectSessions(key))?.target?.session
+    }
+    fun displayedTaskChosen(): ChosenSession? {
+        val chosen = tasksChosen ?: return null
+        return chosen.copy(name = taskCurrentSession(SessionRef(chosen.machineId, chosen.name, chosen.sessionId)) ?: chosen.name)
+    }
+    fun taskSessionLabel(task: TaskInfo) = TasksPresentation.sessionLabel(task, displayedTaskChosen(), ::taskCurrentSession)
+
     /** An operation counts when both the relay and the computer offer it. */
     private fun taskOperations(machine: Machine) =
         machineOperations[MachineKey(machine.connectionId, machine.id)].orEmpty() intersect relayOperations[machine.connectionId].orEmpty()
@@ -2816,7 +2882,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun sendRoute(task: TaskInfo): RouteState {
         val key = tasksKey ?: return RouteState.Blocked("No project")
         if (taskBusy) return RouteState.Blocked("Another task action is running")
-        if (task.uuid in heldSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        if (task.uuid in heldSends) return RouteState.Blocked(getApplication<Application>().getString(R.string.task_send_unknown_hold))
         return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
     }
     fun cancelRoute(task: TaskInfo): RouteState {
@@ -2828,7 +2894,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun openTasks(session: Session) {
         val key = taskProject(session) ?: return
         val machine = machines.firstOrNull { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
-        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()))
+        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty(), taskSessionIdentity(session)))
     }
     /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
     fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
@@ -2919,7 +2985,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val chosen = tasksChosen
         TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
         val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
-        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name))
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
         editTasks { it.add(text, stage, target, TaskPosition.End) }
     }
     private fun computerName(key: ProjectKey, computerId: String) =
@@ -2984,7 +3050,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session,
-                    computerName(key, route.computerId))) {
+                    computerName(key, route.computerId), sessionId = route.sessionId)) {
                     TaskOutcome.Done -> "Sent to ${route.session}"
                     is TaskOutcome.Refused -> outcome.reason
                     is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
@@ -3033,10 +3099,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         // The first page may already hold older tasks; showing them needs no read.
         if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
         doneExpanded = more || keepExpanded && doneExpanded
-        val chosen = tasksChosen
+        val chosen = displayedTaskChosen()
         val session = if (!tasksOnlyThisSession) null else {
             TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
-            SessionRef(chosen!!.machineId, chosen.name)
+            SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId)
         }
         val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
         val connection = connections.find { it.id == key.connectionId } ?: return
@@ -3063,8 +3129,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 taskSync.exchangeNow(connection, key, taskProjectName(key), machine.id, fetch = listOf(row.uuid))
                 val task = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.get(row.uuid) } }
-                refreshTasks()
-                opened(task)
+                if (tasksKey == key) { refreshTasks(); opened(task) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be opened." } }
             finally { taskBusy = false }

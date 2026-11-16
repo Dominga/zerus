@@ -50,6 +50,8 @@ import { loadMarkCatalogs } from "../../store/accounts";
 import { clearFolderScope } from "../../store/folderFilter";
 import { compactNewChildren } from "../../store/childRowsWatch";
 import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
+import { favorite, favoriteIdentity, setFavorite } from "../../store/favorites";
+import { FavoriteMark } from "./FavoriteMark";
 import { leaf, native } from "./paths";
 import { appendAccountChoices, bindingState, type AccountChoice } from "./scope-filters";
 import type { ClearControl, SessionRef } from "../../types";
@@ -242,8 +244,14 @@ export function sessionMenu(s: Session, inspected?: import("../../types").Detail
   const cp = copyEntries(s, details);
   const mute = muteEntry(s), mark = markEntry(s), fresh = freshActionEntry(s);
   const archived = s.state === "archived";
+  const favoriteKey = favoriteIdentity(s), wasFavorite = favorite(s);
   return [
     ...(archived ? [] : [...(mark ? [mark] : []), ...(mute ? [mute] : []), { separator: true } as const]),
+    ...(archived ? [] : [{ label: wasFavorite ? tr("Remove from favorites") : tr("Add to favorites"), icon: "star", disabled: !favoriteKey,
+      action: () => {
+        const current = catalog.rows[s.key];
+        if (favoriteKey && favoriteIdentity(current) === favoriteKey) setFavorite(current, !wasFavorite);
+      } }]),
     { label: compactRows[s.key] ? tr("Expand session row") : tr("Compact session row"), icon: compactRows[s.key] ? "expand-row" : "compact-row", action: () => setRowCompact(s.key, !compactRows[s.key]) },
     { separator: true },
     ...(archived ? [] : [sessionTerminalEntry(s, details)]),
@@ -1166,6 +1174,7 @@ function StripTile(props: { row: Extract<Row, { type: "card" }> }) {
             <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}><i class="st-unread" classList={{ muted: !!s().muted }} /></Show>
           </span>
           <Show when={s().muted}><Icon name="mute" size={14} class="st-mute" /></Show>
+          <FavoriteMark session={s()} />
           <span class="st-provider">
             <AgentBadge agent={s().agent} narrow />
             <Show when={optionalCount()}><i class="st-question" classList={{ muted: !!s().muted }}>?</i></Show>

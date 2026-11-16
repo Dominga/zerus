@@ -18,7 +18,7 @@ impl Store {
             let version: u32 = db
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .map_err(storage)?;
-            if version != SCHEMA_VERSION {
+            if !layout::native(version) {
                 return Err(Problem::new(code::INVALID_STATE, MIGRATE));
             }
             as_is(db)?;
@@ -44,7 +44,7 @@ pub(super) fn as_is(db: &Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(storage)?;
-    if !matches!(version, 2 | SCHEMA_VERSION) {
+    if !layout::supported(version) {
         return Err(Problem::new(code::INVALID_STATE, MIGRATE));
     }
     timers::as_is(db)?;

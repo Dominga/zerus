@@ -7,9 +7,11 @@
     "person": "local"
   },
   "draft": {
+    "accept_available": false,
     "complete": true,
     "editable": true,
     "generation": 1,
+    "live": null,
     "next_node": 3,
     "nodes": [
       {
@@ -59,7 +61,11 @@
       "state": "draft",
       "title": "Foundation"
     },
-    "revision": 2
+    "previous": null,
+    "publication": null,
+    "rejection": null,
+    "revision": 2,
+    "rework_available": true
   },
   "ok": true,
   "team": "00000000-0000-4000-8000-00000000beef"

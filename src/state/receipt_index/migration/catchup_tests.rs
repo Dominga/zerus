@@ -302,7 +302,23 @@ fn a_rewrite_that_keeps_size_and_mtime_is_reread_near_the_walk_start() {
                 .set_times(fs::FileTimes::new().set_modified(modified))
                 .unwrap();
             fs::rename(&staged, &path).unwrap();
-            assert_eq!(file_stamp(&path).unwrap(), before_stamp);
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            let replacement = file_stamp(&path).unwrap();
+            #[cfg(unix)]
+            assert_ne!(
+                replacement, before_stamp,
+                "native identity also detects the replacement"
+            );
+            // Handwritten cache metadata models a coarse native stamp too,
+            // preserving this control of the independent recent-file guard.
+            migration
+                .catalog
+                .db
+                .execute(
+                    "UPDATE receipt_rows SET stamp=? WHERE source='terminal' AND request=?",
+                    params![replacement, uuid::Uuid::from_u128(9).to_string()],
+                )
+                .unwrap();
             rewritten = true;
         }
     });

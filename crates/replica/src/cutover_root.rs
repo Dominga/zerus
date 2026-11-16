@@ -5,7 +5,6 @@ use loro::{
     ContainerTrait, Frontiers, IdSpan, JsonMapOp, JsonOpContent, LoroDoc, LoroValue, VersionVector,
     ID,
 };
-use std::time::{Duration, Instant};
 
 pub(crate) struct HistoricalFloor {
     pub id: ID,
@@ -58,14 +57,11 @@ fn inspect_inner(doc: &LoroDoc, expected: Option<&Floor>) -> Result<HistoricalFl
             !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
         })
         .ok_or_else(refused)?;
-    let mut scanned = 0usize;
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut budget = crate::proof_budget::Budget::new();
     for (&peer, &end) in doc.oplog_vv().iter() {
         let mut next = 0;
         while next < end {
-            if Instant::now() >= deadline || scanned >= 131_072 {
-                return Err(refused());
-            }
+            budget.step()?;
             let change = doc.get_change(ID::new(peer, next)).ok_or_else(refused)?;
             let after = change
                 .id
@@ -80,10 +76,7 @@ fn inspect_inner(doc: &LoroDoc, expected: Option<&Floor>) -> Result<HistoricalFl
                 .contains(&meta)
             {
                 for counter in next..after {
-                    scanned += 1;
-                    if scanned > 131_072 || Instant::now() >= deadline {
-                        return Err(refused());
-                    }
+                    budget.step()?;
                     let op_id = ID::new(peer, counter);
                     if !doc.get_changed_containers_in(op_id, 1).contains(&meta) {
                         continue;
@@ -156,7 +149,6 @@ fn inspect_inner(doc: &LoroDoc, expected: Option<&Floor>) -> Result<HistoricalFl
                     }
                 }
             }
-            scanned += 1;
             next = after;
         }
     }
@@ -229,5 +221,41 @@ mod tests {
             .unwrap();
         doc.commit();
         assert!(inspect(&doc, &replacement).is_err());
+    }
+    #[test]
+    fn a_scheduling_pause_is_not_evidence_against_the_historical_root() {
+        let (doc, floor, prefix) = fixture();
+        let result =
+            crate::with_proof_budget_for_test(std::time::Duration::from_secs(3), 131_072, || {
+                inspect(&doc, &floor)
+            });
+        assert_eq!(result.unwrap().prefix, prefix);
+    }
+    #[test]
+    fn exhausted_root_proof_is_typed_busy_and_leaves_history_unchanged() {
+        let (doc, floor, _) = fixture();
+        let before = doc.oplog_vv();
+        for (elapsed, work) in [
+            (std::time::Duration::from_secs(31), 131_072),
+            (std::time::Duration::ZERO, 0),
+        ] {
+            let error = crate::with_proof_budget_for_test(elapsed, work, || inspect(&doc, &floor))
+                .err()
+                .expect("incomplete proof must refuse");
+            assert_eq!(error.kind(), crate::ErrorKind::Busy);
+            assert_eq!(doc.oplog_vv(), before);
+        }
+    }
+    #[test]
+    fn a_pause_never_turns_a_wrong_floor_into_busy_or_evidence() {
+        let (doc, mut floor, _) = fixture();
+        floor.counter -= 1;
+        let error =
+            crate::with_proof_budget_for_test(std::time::Duration::from_secs(3), 131_072, || {
+                inspect(&doc, &floor)
+            })
+            .err()
+            .expect("wrong root");
+        assert_eq!(error.kind(), crate::ErrorKind::Refused);
     }
 }

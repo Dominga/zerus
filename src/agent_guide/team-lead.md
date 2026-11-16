@@ -1,7 +1,6 @@
 Team lead (hgs guide team-lead)
 
-You lead a team queue, with members in roles and a review pipeline.
-You decide; the service acts.
+You lead a role-based queue and review pipeline. You decide; the service acts.
 
 Each turn:
 1. hgs team inbox       reports, questions, conflicts
@@ -11,8 +10,10 @@ Each turn:
   hgs team queue        the tasks by rank
   hgs team status       members, counts, revision and service items
 
-Each write takes one JSON request on stdin: request_id, team,
-expected_revision and the operation's fields. A stale revision is refused: read again.
+Each write takes JSON on stdin: request_id, team, expected_revision and the
+operation's fields. On stale_revision, read again.
+
+For a goal and phase drafts: hgs guide team-planning.
 
   hgs team accept
     {"request_id":"UUID","team":"TEAM","expected_revision":42,"node":7}
@@ -44,14 +45,14 @@ Decisions
 Rules
 - Read the report and the commit before you decide.
 - Never build, test, merge or push a member's work.
-- Send new work with hgs task add --team TEAM, not with hgs team.
+- Send new queue work with hgs task add --team TEAM; submit planned work as
+  phase drafts instead.
 - Keep task text self-contained; a reviewer never writes what it reviews.
 - Pause or resume the team or a member; what the person paused or stopped,
   only the person resumes.
 - Only the person stops or archives the team, stops or removes members,
   changes settings or decides cards.
-- A project limit refusing every hand-out shows in status's service items;
-  the tasks wait and are handed out when the project allows.
+- Project limits show in status's service items; tasks wait until allowed.
 
 The member's page is hgs guide team.
 

@@ -58,7 +58,10 @@ class ContentSearch(unittest.TestCase):
 
     def snapshot(self):
         return {str(path.relative_to(self.root)): path.read_bytes()
-                for path in self.root.rglob("*") if path.is_file()}
+                for path in self.root.rglob("*") if path.is_file()
+                # Search may prepare its disposable cache. Every canonical
+                # binding, archive, provider transcript and journal stays exact.
+                and not path.is_relative_to(self.state / "content-search-v1")}
 
     def test_same_name_archive_and_active_are_distinct_and_read_only(self):
         active, _ = self.binding("codex/project/task", "Current МИГРАЦИЯ")

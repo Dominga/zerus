@@ -191,4 +191,222 @@ final class TaskActionsTests: XCTestCase {
         try await sync.exchangeNow(connection, key, name: "orchard", computerId: "computer-1")
         XCTAssertEqual(try computer.store.get(reference: task.uuid).text, "Filed on the phone")
     }
+    func testDoneRowsRetainOpaqueIdentityAndMissingFieldsRemainLegacy() async throws {
+        let (computer, _, sync) = try world()
+        computer.update {
+            $0.receipts["task_done"] = { _ in
+                ("completed", ["schema": 1, "tasks": [
+                    ["uuid": "task-1", "id": "T-first1", "text": "Original", "session": ["machine": "node-1", "session": "codex/old-label", "session_id": "launch_id:original"], "accepted_at": 2],
+                    ["uuid": "task-2", "id": "T-second", "text": "Legacy", "session": ["machine": "node-1", "session": "codex/legacy"], "accepted_at": 1]
+                ], "next": .null, "total": 2, "recent": 2, "damaged": 0], .null)
+            }
+        }
+        let page = try await sync.donePage(connection, key, computerId: "computer-1", before: nil)
+        XCTAssertEqual(page.rows[0].session?.sessionId, "launch_id:original")
+        XCTAssertEqual(page.rows[1].session?.sessionId, "")
+    }
+    func testMalformedDoneIdentityCannotBecomeLegacy() async throws {
+        let (computer, _, sync) = try world()
+        computer.update {
+            $0.receipts["task_done"] = { _ in
+                ("completed", ["schema": 1, "tasks": [["uuid": "task-1", "id": "T-first1", "text": "Original", "session": ["machine": "node-1", "session": "codex/api", "session_id": 7], "accepted_at": 2]], "next": .null, "total": 1, "recent": 1, "damaged": 0], .null)
+            }
+        }
+        do { _ = try await sync.donePage(connection, key, computerId: "computer-1", before: nil); XCTFail("Malformed identity must stay untrusted") }
+        catch { }
+    }
+
+    private static func refusing(_ answer: JSONObject, _ documents: [String]) -> JSONObject {
+        answer.putting("refused", .array(documents.map { .object(["uuid": .string($0), "error": "Forced private document refusal"]) }))
+    }
+    func testRefusedSelectedTaskCannotAuthorizeSend() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+        computer.update {
+            $0.modifyExchange = { Self.refusing($0, [task.uuid]) }
+            $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+        }
+        let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = result else { return XCTFail("A refused task cannot authorize Send") }
+        XCTAssertFalse(computer.operations.contains("task_send"))
+    }
+    func testRefusedProjectCannotAuthorizeSend() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+        computer.update {
+            $0.modifyExchange = { Self.refusing($0, ["project"]) }
+            $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+        }
+        let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = result else { return XCTFail("A refused project cannot authorize Send") }
+        XCTAssertFalse(computer.operations.contains("task_send"))
+    }
+    func testUnrelatedRefusedDocumentStillAllowsSelectedTask() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement"); let other = try computer.store.filed("Unrelated requirement")
+        computer.update {
+            $0.modifyExchange = { Self.refusing($0, [other.uuid]) }
+            $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+        }
+        let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        XCTAssertEqual(result, .done)
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
+    }
+    func testLaterCleanPageCannotEraseSelectedTaskRefusal() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement"); let pages = Mutex(0)
+        computer.update {
+            $0.modifyExchange = { answer in
+                let first = pages.withLock { $0 += 1; return $0 == 1 }
+                return first ? Self.refusing(answer, [task.uuid]).putting("more", true) : answer
+            }
+            $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+        }
+        let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = result else { return XCTFail("An earlier refusal remains part of the exchange proof") }
+        XCTAssertGreaterThanOrEqual(pages.withLock { $0 }, 2)
+        XCTAssertFalse(computer.operations.contains("task_send"))
+    }
+    func testSelectedFetchRefusalCannotClaimFreshTaskState() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+        computer.update { $0.modifyExchange = { Self.refusing($0, [task.uuid]) } }
+        do { try await sync.exchangeNow(connection, key, name: "orchard", computerId: "computer-1", fetch: [task.uuid]); XCTFail("A refused selected fetch is not fresh state") }
+        catch { }
+    }
+    func testSettlingUnknownHoldsKeepsRefusedTaskWithoutRepeatingSend() async throws {
+        let (computer, _, sync) = try world(); let first = try computer.store.filed("First requirement"); let second = try computer.store.filed("Second requirement")
+        computer.update { $0.receipts["task_send"] = { _ in ("uncertain", .null, "Unknown private outcome") } }
+        for task in [first, second] {
+            let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+            guard case .uncertain = result else { return XCTFail("Expected an original unknown outcome") }
+        }
+        computer.update { $0.modifyExchange = { Self.refusing($0, [first.uuid]) } }
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let firstHeld = await sync.held(first.uuid); let secondHeld = await sync.held(second.uuid)
+        XCTAssertTrue(firstHeld); XCTAssertFalse(secondHeld)
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 2)
+    }
+
+    func testUnknownOriginalSendCannotBeRepeatedByCaller() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Original requirement")
+        computer.update { $0.receipts["task_send"] = { _ in ("uncertain", .null, "Unknown private outcome") } }
+        let first = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .uncertain = first else { return XCTFail("Expected an unknown original") }
+        let second = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = second else { return XCTFail("Unknown original delivery never authorizes another send") }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
+    }
+
+    private nonisolated static func awaitPrivateOriginal(_ gate: DispatchSemaphore) -> Bool { gate.wait(timeout: .now() + 10) == .success }
+    func testCancellingAfterOriginalPostKeepsUnknownHold() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Original requirement")
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        computer.update { $0.receipts["task_send"] = { _ in
+            entered.signal()
+            guard Self.awaitPrivateOriginal(release) else { XCTFail("The private original-result gate did not settle"); return ("uncertain", .null, "Private gate timeout") }
+            return ("completed", [:], .null)
+        } }
+        let connection = connection, key = key
+        let original = Task { await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api") }
+        let started = await Task.detached { Self.awaitPrivateOriginal(entered) }.value
+        XCTAssertTrue(started); original.cancel(); release.signal(); _ = await original.value
+        let held = await sync.held(task.uuid); XCTAssertTrue(held)
+        let repeated = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = repeated else { return XCTFail("A cancelled posted original is not new Send authority") }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 1)
+    }
+    func testBoundedUnknownSettlementAdvancesWhileNewHoldsArrive() async throws {
+        let (computer, _, sync) = try world()
+        let tasks = try (1...65).map { try computer.store.filed("Requirement \($0)") }
+        computer.update { $0.receipts["task_send"] = { _ in ("uncertain", .null, "Unknown private outcome") } }
+        for task in tasks {
+            let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+            guard case .uncertain = result else { return XCTFail("Expected an original unknown outcome") }
+        }
+        let ordered = tasks.map(\.uuid).sorted(), refused = Array(ordered.prefix(64)), last = try XCTUnwrap(ordered.last)
+        computer.update { $0.modifyExchange = { Self.refusing($0, refused) } }
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let firstHeld = await sync.held(last); XCTAssertTrue(firstHeld)
+        let arrival = try computer.store.filed("New requirement")
+        let arrivalResult = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: arrival.uuid, session: "codex/api")
+        guard case .uncertain = arrivalResult else { return XCTFail("Expected an arriving original unknown") }
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let lastHeld = await sync.held(last); XCTAssertFalse(lastHeld)
+        await sync.settleSends(connection, names: { _ in "orchard" })
+        let arrivalHeld = await sync.held(arrival.uuid); XCTAssertFalse(arrivalHeld)
+        for task in refused { let held = await sync.held(task); XCTAssertTrue(held) }
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 66)
+    }
+
+    func testLocallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() async throws {
+        for project in [false, true] {
+            let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+            let injected = Mutex(false)
+            computer.update {
+                $0.modifyExchange = { answer in
+                    let first = injected.withLock { value in if value { return false }; value = true; return true }
+                    guard first else { return answer }
+                    let bad: JSON = ["task": project ? .null : .string(task.uuid), "bytes": .string(Data("invalid-private-task-snapshot".utf8).base64EncodedString())]
+                    return answer.putting("updates", .array((answer["updates"]?.array ?? []) + [bad]))
+                }
+                $0.receipts["task_send"] = { _ in ("completed", [:], .null) }
+            }
+            let result = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+            guard case .refused = result else { return XCTFail("A locally refused selected document is not native action authority") }
+            XCTAssertFalse(computer.operations.contains("task_send"))
+        }
+    }
+    func testForeignConnectionCannotUseOriginalProjectForAction() async throws {
+        let (computer, _, sync) = try world(); let task = try computer.store.filed("Selected requirement")
+        let foreign = ProjectKey(connectionId: "workspace-b", swarmId: key.swarmId, id: key.id)
+        let result = await sync.send(connection, foreign, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = result else { return XCTFail("Original connection and project scope are required") }
+        XCTAssertTrue(computer.operations.isEmpty)
+    }
+
+
+    func testBusyProofBeforeActionNeverPostsInput() async throws {
+        let (computer, _, sync) = try world()
+        let task = try computer.store.filed("Original task")
+        let busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.update { $0.refusal = busy }
+        let outcome = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused(let reason) = outcome else { return XCTFail("\(outcome)") }
+        XCTAssertTrue(reason.contains(busy), reason)
+        let held = await sync.held(task.uuid)
+        XCTAssertFalse(held)
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 0)
+        computer.update { $0.refusal = nil }
+        try await sync.exchangeNow(connection, key, name: "orchard", computerId: "computer-1", fetch: [task.uuid])
+        XCTAssertEqual(computer.operations.filter { $0 == "task_send" }.count, 0)
+    }
+
+    func testBusyReadsCannotReleaseOrRepostOriginalUnknownSend() async throws {
+        let (computer, _, sync) = try world()
+        let task = try computer.store.filed("Original task")
+        let busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.update { state in
+            state.receipts["task_send"] = { [computer] _ in
+                computer.update { $0.refusal = busy }
+                return ("uncertain", .null, "Original delivery unknown")
+            }
+        }
+        let outcome = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        XCTAssertEqual(outcome, .uncertain("Original delivery unknown"))
+        let original = try XCTUnwrap(computer.envelopes.first { $0.string("operation") == "task_send" }).string("request_id")
+        for _ in 0..<2 { await sync.settleSends(connection) { _ in "orchard" } }
+        var held = await sync.held(task.uuid)
+        XCTAssertTrue(held)
+        let repeated = await sync.send(connection, key, name: "orchard", computerId: "computer-1", task: task.uuid, session: "codex/api")
+        guard case .refused = repeated else { return XCTFail("\(repeated)") }
+        computer.update { $0.receipts["task_done"] = { _ in ("failed", .null, .string(busy)) } }
+        do { _ = try await sync.donePage(connection, key, computerId: "computer-1", before: nil); XCTFail("Busy cannot report a Done page") }
+        catch { XCTAssertTrue(TaskSyncError.reason(error).contains(busy)) }
+        do { try await sync.exchangeNow(connection, key, name: "orchard", computerId: "computer-1", fetch: [task.uuid]); XCTFail("Busy cannot claim a fresh task") }
+        catch { XCTAssertTrue(TaskSyncError.reason(error).contains(busy)) }
+        held = await sync.held(task.uuid)
+        XCTAssertTrue(held)
+        computer.update { $0.refusal = nil }
+        await sync.settleSends(connection) { _ in "orchard" }
+        held = await sync.held(task.uuid)
+        XCTAssertFalse(held)
+        XCTAssertEqual(computer.envelopes.filter { $0.string("operation") == "task_send" }.map { $0.string("request_id") }, [original])
+    }
+
 }

@@ -35,18 +35,17 @@ private func historyLine(_ entry: TaskLogEntry) -> (who: String, what: String) {
 struct TaskSettingsSheet: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
+    let key: ProjectKey
     let uuid: String
     let onCancel: (TaskInfo) -> Void
     @State private var original: TaskInfo?
-    @State private var edited: String?
-    @State private var target: TaskTarget?
     @State private var comment = ""
-    @State private var choosing = false
+    @State private var commentEntry: String?
 
     var body: some View {
         let tasks = app.tasks!
         NavigationStack {
-            if let task = tasks.taskListing.first(where: { $0.uuid == uuid }) {
+            if let task = (tasks.tasksKey == key ? tasks.taskListing.first(where: { $0.uuid == uuid }) : original) {
                 content(tasks, task).onAppear { if original == nil { original = task } }
             } else {
                 Text("This task is no longer here.").foregroundStyle(Theme.muted)
@@ -54,6 +53,9 @@ struct TaskSettingsSheet: View {
         }
         .sheet(isPresented: Binding(get: { app.tasks?.taskEditor?.state != nil }, set: { if !$0 { app.tasks?.taskEditor?.dismiss() } })) {
             if let tasks = app.tasks, let editor = tasks.taskEditor { TaskEditorSheet(model: editor, tasks: tasks) }
+        }
+        .sheet(isPresented: Binding(get: { app.tasks?.taskContent?.state != nil }, set: { if !$0 { app.tasks?.taskContent?.dismiss() } })) {
+            if let tasks = app.tasks, let editor = tasks.taskContent { TaskContentSheet(model: editor, tasks: tasks) }
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
@@ -63,21 +65,10 @@ struct TaskSettingsSheet: View {
     private func content(_ tasks: TasksModel, _ task: TaskInfo) -> some View {
         let tab = TasksPresentation.tab(task.stage)
         let editable = task.writable && [.todo, .backlog].contains(task.stage)
-        let baseline = original ?? task
-        let text = edited ?? baseline.text
-        let chosenTarget = target ?? baseline.target
-        let textChanged = edited != nil && edited != baseline.text
-        let targetChanged = target != nil && target != baseline.target
-        // Send now's reason follows the session chosen here, before it is saved.
-        var draft = task
-        draft.target = chosenTarget
-        let actions = (TasksPresentation.cards([draft], tab: tab, chosen: tasks.tasksChosen, onlyThisSession: false,
-                                               send: tasks.sendRoute, cancel: tasks.cancelRoute).first?.actions ?? [])
+        let draft = task
+        let actions = (TasksPresentation.cards([draft], tab: tab, chosen: tasks.displayedTaskChosen, onlyThisSession: false,
+                                               send: tasks.sendRoute, cancel: tasks.cancelRoute, current: tasks.taskCurrentSession).first?.actions ?? [])
             .filter { $0.action != .edit }
-        let sessionLabel: String = switch chosenTarget {
-        case .session(let session): TasksPresentation.shortName(session.session)
-        case .anySession: "Any session"
-        }
         return ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
@@ -86,28 +77,10 @@ struct TaskSettingsSheet: View {
                     Spacer()
                     Text(tab.label).font(.caption).foregroundStyle(Theme.muted)
                 }
+                Text(task.text).textSelection(.enabled)
+                Text("Session: \(tasks.taskSessionLabel(task))").font(.subheadline).foregroundStyle(Theme.muted)
                 if editable {
-                    TextEditor(text: Binding(get: { text }, set: { edited = $0 }))
-                        .frame(minHeight: 120)
-                        .scrollContentBackground(.hidden)
-                        .padding(8)
-                        .background(Theme.background, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Theme.outline) }
-                        .accessibilityLabel("Prompt")
-                    Button { choosing = true } label: {
-                        HStack {
-                            Text("Session: \(sessionLabel)").lineLimit(1)
-                            Spacer()
-                            Image(systemName: "chevron.down").foregroundStyle(Theme.muted)
-                        }
-                        .padding(10)
-                        .background(Theme.background, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay { RoundedRectangle(cornerRadius: 10).stroke(Theme.outline) }
-                    }
-                    .buttonStyle(.plain)
-                } else {
-                    Text(task.text).textSelection(.enabled)
-                    Text("Session: \(TasksPresentation.sessionLabel(task))").font(.subheadline).foregroundStyle(Theme.muted)
+                    Button(taskEditText("task_content_open")) { tasks.openTaskContent(key, task) }.buttonStyle(.bordered)
                 }
                 let note = TasksPresentation.note(task)
                 if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(Theme.muted) }
@@ -116,16 +89,17 @@ struct TaskSettingsSheet: View {
                 })
                 if task.schema == 8 { Button(taskEditText("task_edit_open")) { tasks.openTaskEditor(task) }.buttonStyle(.bordered) }
                 ForEach(task.attachments, id: \.token) { file in
-                    if let key = tasks.tasksKey { TaskMediaButton(key: key, task: task.uuid, file: file) { tasks.openTaskMedia(task, file) } }
+                    TaskMediaButton(key: key, task: task.uuid, file: file) { tasks.openTaskMedia(key, task: task.uuid, file: file) }
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(actions, id: \.action) { state in
                         Button {
+                            guard tasks.tasksKey == key else { return }
                             if state.action == .cancel {
                                 onCancel(task)
                                 dismiss()
                             } else {
-                                tasks.saveThen(task, text: textChanged ? text : nil, target: targetChanged ? chosenTarget : nil, action: state.action)
+                                if tasks.tasksKey == key { tasks.taskAction(task, state.action) }
                                 dismiss()
                             }
                         } label: { Label(state.action.label, systemImage: state.action.symbol) }
@@ -143,6 +117,12 @@ struct TaskSettingsSheet: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(line.who).font(.caption).foregroundStyle(Theme.muted)
                         Text(line.what).font(.footnote).textSelection(.enabled)
+                        if entry.attachmentCount > 0 && !entry.entryId.isEmpty {
+                            Button(taskEditText(commentEntry == entry.entryId ? "task_content_comment_close" : "task_content_comment_files")) {
+                                commentEntry = commentEntry == entry.entryId ? nil : entry.entryId
+                            }
+                            if commentEntry == entry.entryId { TaskCommentFiles(tasks: tasks, key: key, task: task.uuid, entry: entry.entryId).id(entry.entryId) }
+                        }
                     }
                 }
                 if task.writable {
@@ -153,6 +133,7 @@ struct TaskSettingsSheet: View {
                             .background(Theme.background, in: RoundedRectangle(cornerRadius: 10))
                             .overlay { RoundedRectangle(cornerRadius: 10).stroke(Theme.outline) }
                         Button("Add") {
+                            guard tasks.tasksKey == key else { return }
                             tasks.commentTask(task.uuid, comment.trimmingCharacters(in: .whitespacesAndNewlines))
                             comment = ""
                         }
@@ -165,25 +146,7 @@ struct TaskSettingsSheet: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
-            if textChanged || targetChanged {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        // The edits stay shown until the listing brings them back.
-                        tasks.saveTask(task.uuid, text: textChanged ? text : nil, target: targetChanged ? chosenTarget : nil)
-                    }
-                    .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-        }
-        .onChange(of: task.text) { _, saved in if saved == edited { edited = nil } }
-        .onChange(of: task.target) { _, saved in if saved == target { target = nil } }
-        .sheet(isPresented: $choosing) {
-            if let key = tasks.tasksKey {
-                TaskSessionSheet(key: key) { picked in
-                    target = picked
-                    choosing = false
-                }
-            }
+
         }
     }
 }
@@ -200,7 +163,7 @@ struct TaskSessionSheet: View {
                 Button("Any session") { onPick(.anySession) }
                 ForEach(app.tasks.taskChips(key).filter { !$0.session.machineId.isEmpty }, id: \.session) { chip in
                     Button {
-                        onPick(.session(session: SessionRef(machine: chip.session.machineId, session: chip.session.name)))
+                        onPick(.session(session: SessionRef(machine: chip.session.machineId, session: chip.session.name, sessionId: chip.session.sessionId)))
                     } label: {
                         HStack(spacing: 8) {
                             StatusDot(dot: chip.dot)

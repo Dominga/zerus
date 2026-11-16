@@ -1376,11 +1376,20 @@ fn every_action_the_view_sends_is_still_read() {
 /// Every kind the core reads, as the webview must write it
 /// (`fixtures/action-kinds.json`, which the Team tab's test also reads). The
 /// match below names every variant, so a new one cannot be left out.
-#[test]
-fn the_action_kinds_are_the_shared_list() {
+fn action_kinds() -> Vec<String> {
     fn sample(action: &TeamAction) -> &'static str {
         match action {
-            TeamAction::Create { .. }
+            TeamAction::SendBackPhase { .. }
+            | TeamAction::SubmitPhaseCorrections { .. }
+            | TeamAction::EditPhaseCorrections { .. }
+            | TeamAction::ApprovePhaseCorrections { .. }
+            | TeamAction::RejectPhaseCorrections { .. }
+            | TeamAction::UndoPhaseCorrectionRejection { .. }
+            | TeamAction::ApprovePhase { .. }
+            | TeamAction::RejectPhase { .. }
+            | TeamAction::UndoRejectPhase { .. }
+            | TeamAction::AcceptPhase { .. }
+            | TeamAction::Create { .. }
             | TeamAction::StartPlanning { .. }
             | TeamAction::SubmitDraftPhase { .. }
             | TeamAction::EditDraftPhase { .. }
@@ -1415,6 +1424,71 @@ fn the_action_kinds_are_the_shared_list() {
     }
     let member = || "m1".to_owned();
     let samples = vec![
+        TeamAction::SendBackPhase {
+            phase: 1,
+            publication: TEAM.into(),
+            comment: "Revise".into(),
+        },
+        TeamAction::SubmitPhaseCorrections {
+            phase: 1,
+            publication: TEAM.into(),
+            rework: TEAM.into(),
+            draft: zerus_team_plan::draft::DraftInput {
+                title: String::new(),
+                barrier: false,
+                nodes: vec![],
+            },
+        },
+        TeamAction::EditPhaseCorrections {
+            phase: 1,
+            publication: TEAM.into(),
+            rework: TEAM.into(),
+            generation: 1,
+            draft: zerus_team_plan::draft::DraftInput {
+                title: String::new(),
+                barrier: false,
+                nodes: vec![],
+            },
+        },
+        TeamAction::ApprovePhaseCorrections {
+            phase: 1,
+            publication: TEAM.into(),
+            rework: TEAM.into(),
+            generation: 1,
+        },
+        TeamAction::RejectPhaseCorrections {
+            phase: 1,
+            publication: TEAM.into(),
+            rework: TEAM.into(),
+            generation: 1,
+            comment: "Revise".into(),
+        },
+        TeamAction::UndoPhaseCorrectionRejection {
+            phase: 1,
+            publication: TEAM.into(),
+            rework: TEAM.into(),
+            generation: 1,
+            rejection: TEAM.into(),
+        },
+        TeamAction::ApprovePhase {
+            phase: 1,
+            generation: 1,
+            confirm_initial: true,
+        },
+        TeamAction::RejectPhase {
+            phase: 1,
+            generation: 1,
+            comment: "Revise".into(),
+        },
+        TeamAction::UndoRejectPhase {
+            phase: 1,
+            generation: 1,
+            rejection: TEAM.into(),
+        },
+        TeamAction::AcceptPhase {
+            phase: 1,
+            publication: TEAM.into(),
+        },
         serde_json::from_value::<TeamAction>({
             let mut value = serde_json::to_value(create(None, Integration::Branch).action).unwrap();
             value["kind"] = "start_planning".into();
@@ -1534,6 +1608,23 @@ fn the_action_kinds_are_the_shared_list() {
         })
         .collect();
     kinds.sort();
+    kinds
+}
+
+#[test]
+#[ignore = "writes the shared action-kind fixture using the typed serializer"]
+fn regenerate_action_kinds() {
+    std::fs::write(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/teams/fixtures/action-kinds.json"),
+        serde_json::to_string_pretty(&action_kinds()).unwrap() + "\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_action_kinds_are_the_shared_list() {
+    let kinds = action_kinds();
     let shared: Vec<String> =
         serde_json::from_str(include_str!("../fixtures/action-kinds.json")).unwrap();
     assert_eq!(kinds, shared);

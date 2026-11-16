@@ -410,7 +410,7 @@ fn preview_off_disposition_recognizes_planning_stores_but_refuses_a_future_fence
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
                 .unwrap(),
-            crate::teams::store::SCHEMA_VERSION
+            crate::teams::store::NATIVE_PERSON_LAYOUT
         );
         if status == "stopped" {
             f.h.run(&fixtures::person(), ops::Operation::Stop).unwrap();

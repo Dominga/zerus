@@ -5,6 +5,7 @@ mod cancel;
 mod hosted;
 pub(super) mod completion;
 pub(super) mod stage;
+pub(super) mod planned;
 use crate::swarm::fence::{Admission, Closed};
 use crate::teams::{store::Store, tasks::context};
 use rusqlite::{params, OptionalExtension};
@@ -90,7 +91,7 @@ fn rule(message: impl std::fmt::Display) -> Error {
 fn not_started(error: Error) -> Error {
     if matches!(
         error.code,
-        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE
+        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE | STORE_BUSY_CODE
     ) {
         error
     } else {
@@ -101,10 +102,10 @@ fn cutting_over() -> Error {
     Error::new(CUTTING_OVER, BUSY)
 }
 fn replica(error: zerus_replica::Error) -> Error {
-    if error.kind() == zerus_replica::ErrorKind::Refused {
-        rule(error)
-    } else {
-        fail(error)
+    match error.kind() {
+        zerus_replica::ErrorKind::Refused => rule(error),
+        zerus_replica::ErrorKind::Busy => Error::new(STORE_BUSY_CODE, error.to_string()),
+        zerus_replica::ErrorKind::Failed => fail(error),
     }
 }
 

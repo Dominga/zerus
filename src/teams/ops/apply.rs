@@ -174,6 +174,7 @@ fn apply_inputs(
         actor,
         team: &team,
         op: &request.operation,
+        request_id: &request.request_id,
         now,
         reply: Reply {
             ok: true,
@@ -346,6 +347,22 @@ fn save(db: &Connection, actor: &Actor, request: &Request, result: &Result<Reply
 fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Result<()> {
     match ctx.op {
         Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
+        Operation::ReconcilePhaseReview { .. } => phase_review::review(ctx),
+        Operation::SendBackPhase { .. } => rework::send_back(ctx),
+        Operation::SubmitPhaseCorrections { .. } | Operation::EditPhaseCorrections { .. } => {
+            rework::write(ctx)
+        }
+        Operation::ApprovePhaseCorrections { .. } => rework::approve(ctx),
+        Operation::RejectPhaseCorrections { .. } => rework::reject(ctx),
+        Operation::UndoPhaseCorrectionRejection { .. } => rework::undo(ctx),
+        Operation::ReconcileCorrectionReview { .. } => rework::review(ctx),
+        Operation::ApprovePhase { .. } => publication::approve(ctx),
+        Operation::RejectPhase { .. } => publication::reject(ctx),
+        Operation::UndoRejectPhase { .. } => publication::undo(ctx),
+        Operation::ReconcilePublication { .. } => publication::publish(ctx),
+        Operation::PublicationTaskProblem { .. } => publication::problem(ctx),
+        Operation::ReconcilePhase { .. } => publication::reconcile(ctx),
+        Operation::AcceptPhase { .. } => publication::accept(ctx),
         Operation::SubmitDraftPhase { .. } | Operation::EditDraftPhase { .. } => drafts::write(ctx),
         Operation::AddMember { .. } => editing::add_member(ctx),
         Operation::SwapMember { .. } => editing::swap_member(ctx),

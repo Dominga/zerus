@@ -128,7 +128,7 @@ pub(crate) fn set_hand_back(db: &Connection, team: &str, node: u32, value: bool)
 }
 
 pub(crate) fn deps(db: &Connection, team: &str, id: u32) -> Result<Vec<Dep>> {
-    let mut statement=db.prepare("SELECT dependency,kind FROM dependencies WHERE team=?1 AND node=?2 ORDER BY dependency LIMIT 201").map_err(storage)?;
+    let mut statement=db.prepare("SELECT dependency,kind FROM dependencies WHERE team=?1 AND node=?2 UNION ALL SELECT dependency,kind FROM phase_draft_dependencies WHERE team=?1 AND node=?2 ORDER BY dependency LIMIT 201").map_err(storage)?;
     let deps = statement
         .query_map(params![team, id], |r| {
             Ok(Dep {

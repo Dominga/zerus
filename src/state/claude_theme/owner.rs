@@ -7,8 +7,9 @@ use fs2::FileExt;
 use std::{
     fs::File,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     time::Instant,
 };
@@ -110,6 +111,7 @@ impl Binding {
 }
 
 pub(super) struct Observation {
+    enrollment: Option<Arc<supervisor::AppearanceProducer>>,
     state: Directory,
     binding: Binding,
     until: Instant,
@@ -117,11 +119,16 @@ pub(super) struct Observation {
     _complete: Completion,
 }
 impl Observation {
-    pub(super) fn new(binding: Binding, until: Instant) -> Result<(Arc<Self>, mpsc::Receiver<()>)> {
+    pub(super) fn new(
+        binding: Binding,
+        until: Instant,
+        enrollment: Option<Arc<supervisor::AppearanceProducer>>,
+    ) -> Result<(Arc<Self>, mpsc::Receiver<()>)> {
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
         let (send, done) = mpsc::channel();
         let source = Arc::new(Self {
+            enrollment,
             state,
             binding,
             until,
@@ -133,13 +140,23 @@ impl Observation {
     }
 }
 impl helper::Source for Observation {
+    fn enrollment(&self) -> Option<&Arc<supervisor::AppearanceProducer>> {
+        self.enrollment.as_ref()
+    }
+    fn record(&self) -> Result<Value> {
+        metadata(&self.binding.record)
+    }
     fn check(&self) -> Result<()> {
         helper::boundary(self.until)?;
         self.state.verify()?;
         if crate::platform::canonical(root()).map_err(|e| e.to_string())? != self.state.path {
             return Err("Claude startup state route changed".into());
         }
-        self.binding.current(&metadata(&self.binding.record)?)?;
+        let record = metadata(&self.binding.record)?;
+        self.binding.current(&record)?;
+        if let Some(producer) = &self.enrollment {
+            producer.check(&record)?;
+        }
         helper::boundary(self.until)
     }
     fn until(&self) -> Instant {
@@ -187,6 +204,7 @@ pub(super) struct Scope {
     // FIRST: the SAME actual locks and every original data proof drop before
     // the last-field completion can let the supervisor resume its agent wait.
     writer: Guard,
+    enrollment: Option<Arc<supervisor::AppearanceProducer>>,
     input: Guard,
     state: Directory,
     inputs: Directory,
@@ -205,7 +223,11 @@ pub(super) struct Scope {
     _complete: Completion,
 }
 impl Scope {
-    pub(super) fn acquire(binding: Binding, until: Instant) -> Result<Acquisition> {
+    pub(super) fn acquire(
+        binding: Binding,
+        until: Instant,
+        enrollment: Option<Arc<supervisor::AppearanceProducer>>,
+    ) -> Result<Acquisition> {
         helper::boundary(until)?;
         let state =
             Directory::open(&crate::platform::canonical(root()).map_err(|e| e.to_string())?)?;
@@ -252,6 +274,7 @@ impl Scope {
         let (send, done) = mpsc::channel();
         let scope = Arc::new(Self {
             writer,
+            enrollment,
             input,
             state,
             inputs,
@@ -334,6 +357,15 @@ impl Scope {
     }
 }
 impl helper::Source for Scope {
+    fn enrollment(&self) -> Option<&Arc<supervisor::AppearanceProducer>> {
+        self.enrollment.as_ref()
+    }
+    fn record(&self) -> Result<Value> {
+        Ok(self.record.clone())
+    }
+    fn writer(&self) -> Option<&Guard> {
+        Some(&self.writer)
+    }
     fn check(&self) -> Result<()> {
         helper::boundary(self.until)?;
         self.state.verify()?;
@@ -364,6 +396,9 @@ impl helper::Source for Scope {
             return Err("Original Claude startup resource changed".into());
         }
         self.binding.current(&self.record)?;
+        if let Some(producer) = &self.enrollment {
+            producer.check(&self.record)?;
+        }
         if let Some(claim) = self
             .claim
             .lock()

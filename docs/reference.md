@@ -989,6 +989,17 @@ another computer). Neither the listing nor the launch waits on the shared
 catalog: the link's machine identity is read once a caller is proven, without
 the catalog lock, and a launch without a readable identity records no parent.
 
+The live session context menu offers **Add to favorites** and **Remove from
+favorites**, including independent child sessions. A small star marks a favorite.
+Favorites stay in their existing project and parent hierarchy through collapsed
+groups, retaining only necessary ancestor context; siblings stay collapsed. They
+never override state, search, machine, project, account or folder filters or
+change status and filter counts. The local `sessions/favorites` preference uses
+canonical machine UUID plus durable session ID, surviving rename and restart
+without transferring to a reused name or row key. It keeps at most 2048 identities,
+oldest first; a row without those IDs cannot be favorited. Native internal
+subagents have no independent favorite preference in this version.
+
 The desktop session list nests a child under its parent when both are shown in
 the same project group, 26 px per level up to three levels, with a connector
 from the parent above. The parent's footer shows **Team** with working and all
@@ -2213,7 +2224,18 @@ Shift+PgUp/PgDn in Terminal, and Alt+↑/↓ in the project list on the Projects
 
 Activity shows recorded public messages and tool events rather than a full copy
 of native history. User messages preserve literal text, Markdown markers and
-line breaks; agent replies render Markdown. The copy button at the right of a
+line breaks; agent replies render Markdown. New main-session prompt hooks retain
+up to 32,000 characters for Activity separately from their short list previews.
+Larger displayed messages have **Show more** and **Show less** controls. If only
+part of a message is available, Activity says so and points to Terminal. Older
+clipped previews can recover their body only through an existing exact native
+message, request or typed Kimi-turn binding in the same conversation. A shared
+prefix, nearby timestamp or one available candidate does not establish identity.
+Unbound pre-upgrade previews stay explicitly partial. Attached-message receipts
+remain reserved to their already bound row, including complete or local rows.
+This display repair adds no row,
+sends no input and never confirms delivery or native acceptance.
+The copy button at the right of a
 reply's header puts its Markdown source on the clipboard; a text selection still
 copies the visible text. Claude's recorded thinking appears in
 full as a quieter **Thinking** card: the same Markdown at the same size, without
@@ -2404,18 +2426,28 @@ checks; a missing locator never permits another send.
 The inspection's `receipt_projection` reports index coverage, its next cursor
 and explicit missing, corrupt or changed-original gaps. An unavailable or still
 building index is unknown coverage, not evidence that no message was sent.
-Legacy discovery runs in one coalesced background worker per state directory,
-with transactions limited to 64 directory entries or indexed bindings, or 25 ms,
-and a pause between
-batches. An interrupted worker retains committed locators and their sequence
-numbers; discovery reopens in the background. It never deletes or rewrites
-receipt history. New sends retain the original atomic receipt write and update
-the locator on a best-effort basis afterward.
+Legacy discovery runs in one coalesced background worker per state directory.
+Each transaction processes at most 64 original reads or 1,024 unchanged metadata
+checks, or runs for 25 ms, with a pause between batches. An explicit answer
+holds foreground priority across its nested checks and publication; the worker
+hands off between batches. SQLite writer custody is acquired
+before reading the transaction's snapshot; a transient busy worker retains its
+walk instead of exiting and starting over. A genuinely unavailable index stays
+unknown, with a 60-second worker failure backoff.
+An interrupted worker retains committed locators, their sequence numbers and a
+bounded continuation fenced by source directory, epoch, schema and row count.
+Discovery reopens with metadata checks; a retained row-count cursor resumes its
+count. An invalid continuation is discarded. It never deletes or rewrites receipt
+history. New sends retain the original atomic receipt write and update the locator
+on a best-effort basis afterward.
 
 Older caches remain unverified until the worker reconciles their originals.
 Removing a locator or changing its indexed identity invalidates coverage and
-snapshot cursors. Every worker restart reconciles the original directory even
-when its modification time is unchanged; inspection never does that walk.
+snapshot cursors. A healthy unchanged family needs no new directory walk.
+Periodic verification checks original metadata in bounded slices and parses only
+new or changed receipts; recently modified originals are re-read for coarse
+filesystem clocks. Invalidated projections and schema tokens require fresh
+original checks. Inspection never does that walk.
 Before clearing a cache discrepancy, the worker verifies every projection field
 against its validated original and repairs compatible metadata. A conflicting
 original fingerprint or pinned conversation remains an explicit gap.
@@ -2440,16 +2472,26 @@ incomplete coverage keeps recovery unknown. An explicit answer authority read
 can reconcile that family synchronously, then must validate every original and
 drain a complete snapshot before treating recovery as complete. A cursor from an
 incomplete snapshot requires a fresh chain after migration finishes. Locator
-coverage alone never proves an answer's submission.
+coverage alone never proves an answer's submission. A question-family witness
+is checked independently of unrelated terminal or provider backfills; a broken
+question witness still makes that recovery unknown.
 Codex terminal availability uses the same completed inspection snapshot and
 rechecks the live terminal identity without starting another receipt migration.
 Receipt readers open SQLite read-only with a bounded lock wait; a question
 inspection caps that wait at its remaining deadline. Actual answer input still
 requires fresh receipt recovery and the terminal's exact pending-question check.
-An explicit answer shares one 750 ms receipt-write busy-wait deadline across
-its nested checks and connections. Expiry before admission refuses without
-input; it never certifies stale coverage. Inspection retains its separate short
-read budget.
+An explicit answer shares one 750 ms receipt-write waiting budget across
+its nested checks and connections. Its first reconciliation parses the complete
+original question family. Later checks in that same answer still enumerate every
+original, check stamps and count retained bindings, while reusing only unchanged
+old originals. Changed, unknown and recently modified originals are parsed again;
+the coarse-clock window remains anchored to the first check. This bounded
+request-local optimization ends with the answer and establishes no delivery proof.
+On Linux and macOS, reuse also requires the native file object and change-time
+stamp; other platforms retain full original reconciliation.
+Processing time does not consume or reset that waiting budget. Exhaustion before
+admission refuses without input; it never certifies stale coverage.
+Inspection retains its separate short read budget.
 
 Reads from the selected remote machine show a yellow loading circle beside the
 session name only after two seconds. It remains visible while an actual read is
@@ -6063,6 +6105,16 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `phases`, `phase --phase N` | yes | yes | | none |
 | `submit-draft-phase` | yes | yes | | `phase`, `draft` |
 | `edit-draft-phase` | yes | yes | | `phase`, `generation`, `draft` |
+| `approve-phase` | yes | | | `phase`, `generation`, `confirm_initial` for initial roster/folder confirmation |
+| `reject-phase` | yes | | | `phase`, `generation`, nonblank `comment` |
+| `undo-reject-phase` | yes | | | `phase`, `generation`, current `rejection` UUID |
+| `accept-phase` | yes | Lead policy plus delegation | | `phase`, current `publication` UUID; no task receipt |
+| `send-back-phase` | yes | Lead policy plus delegation | | `phase`, exact base `publication`, required `comment` |
+| `submit-phase-corrections` | yes | yes | | `phase`, base `publication`, `rework`, complete `draft` |
+| `edit-phase-corrections` | yes | yes | | Same plus current correction `generation` |
+| `approve-phase-corrections` | yes | | | `phase`, base `publication`, `rework`, `generation`; Auto is service-only |
+| `reject-phase-corrections` | yes | | | Same plus nonblank `comment` |
+| `undo-phase-correction-rejection` | yes | | | Same plus exact `rejection` UUID |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
@@ -6130,16 +6182,51 @@ Pause stops new planning launches, standing confirmations and doorbells; it
 does not stop the lead's current native turn. Resume returns to Planning, never
 Running, and a lead cannot remove the person's pause. Stop ends the team.
 Launch refusals and unknown outcomes retain their ordinary notices and listed
-decisions, without granting task or integration authority. Approval and
-publication are unavailable in this slice.
+decisions, without granting task or integration authority. Initial approval
+and publication use the planned-phase operations below.
 
-Starting the first planned team atomically raises the private Teams execution
-schema to 3. Queue-only stores remain at 2; this engine reads both. Older
-engines refuse fresh opens of a store marked 3, so all Teams commands and its
-desktop service on that computer need the M2-capable engine thereafter.
+**Private Teams store version allocations.** Reserve every new core layout,
+timer extension layout or writer-fence number in
+`src/teams/store/versions.rs` before implementing its migration. That registry
+is the sole source of numeric bindings; SQL creation, open/admission checks,
+planning and extension writers consume its constants. Never choose a number
+independently in a feature branch. Keep historical allocations permanently.
 
-**Planned drafts.** The Team tab's Layers view reads bounded draft phases;
-approval is shown unavailable until publication is implemented. `phases`
+Core marks are 0 for an uninitialized database, 1 for the refused pre-release
+layout, 2 for legacy queue storage and 3 for planning. Core 4 is the published
+native Person evidence layout (.31, PR #2451). Core 5 is publication (.161.3),
+raised only when approval saves its original requests. Core 6 remains reserved
+for rework (.161.4), and 7 for the cumulative native S2 floor (.31). Those two
+reservations implement no migration and remain refused by this build. Enabling
+a slot must update the supported ceiling, its real migration and older-store
+controls together, in the registry as well as its writers. Ordinary opens keep
+native target 4; the supported publication ceiling 5 is not an open migration.
+
+Published timer layouts occupy 8 through 12. The base-pin writer fence uses
+bit 31 in `timers_extension.version`, retaining the ordinary layout in the
+low bits; its current combined mark is `0x8000000c`. It never occupies a core
+`PRAGMA user_version` or takes the next ordinary layout number. Registry tests
+check all allocations for collisions and exercise every shipped migration
+entry point, both with and without that fence. Reserved layouts are checked
+for refusal, without pretending that their migrations already exist.
+
+Planning historically used execution schema 3, while queue-only stores used
+schema 2. The native Person engine upgrades both to core 4 on an ordinary
+open, under the writer lock. New queue and planning stores also use 4.
+Existing native identities and receipts are preserved; partial or corrupt
+native metadata is refused instead of repaired. Older engines refuse a store
+marked 4, so all Teams commands and the desktop service on that computer need
+the native-Person-capable engine thereafter.
+
+Starting another planning team never lowers an existing floor. An older
+native-4 engine refuses publication stores, including retained handles and
+final native effect admission. All Teams commands and the desktop service on
+that computer must support the stored core floor. Publication5 precedes the
+separate rework6 slice, which precedes final native7 integration; no downgrade
+or alternate floor is used.
+
+**Planned drafts and publication.** The Team tab's Layers view reads bounded
+draft phases and the live-and-archived nodes of published phases. `phases`
 pages at most 200 summaries and supplies `next_phase`, `next_node`, the
 pinned role/pipeline routes and their revision. `phase --phase N` reads one
 complete draft with its generation, revision and editability. An unavailable
@@ -6165,6 +6252,62 @@ no task documents, live bindings,
 member launches or hand-outs. Saving preserves the shown revision; an
 unconfirmed save is checked through the existing unresolved action, never
 automatically resubmitted with a new request identity.
+
+The person approves an exact draft generation. For initial Planning, the
+confirmation also shows and authorizes the current roster and working-folder
+mode. The engine saves the reviewed input and each named-task request before
+calling its task writer; partial creation keeps the phase closed. Once every
+creation is confirmed, the phase becomes Approved. Initial member launch is
+released only after all reserved initial publications settle. Auto approval is
+the person's policy for later phases, never authority for the lead to approve
+itself or activate the initial plan.
+
+Reject requires a comment; undo names that exact current rejection. Editing a
+rejected draft creates a new generation and keeps one bounded previous draft
+for comparison. Waiting for you cards link the exact phase and generation.
+A reserved publication freezes draft editing. Unknown creation never becomes a
+successful task, and a missing task after a committed creation claim is not
+reinserted. Unreadable recovery is attempted at most three times before the
+phase stays explicitly uncertain. A stop clears unpublished task keys through
+the ordinary silent key writer and retains a final refusal or unknown outcome.
+Creation and key cleanup have separate unknown-result budgets. A late creation
+answer after Stop cannot answer cleanup, and a known pause before writing can
+resume with the original saved request. An unchanged Auto-approval failure uses
+the existing retry gate instead of appending a refusal on every service pass.
+Created task documents are retained, not deleted to roll back publication.
+
+Dependencies on unpublished draft nodes stay in a companion table tied to the
+actual draft identities. The kernel holds that missing prerequisite; publishing
+it atomically promotes the incoming edges to ordinary dependencies. Draft
+editing preserves referenced IDs and checks cycles through live, archived and
+draft nodes, without creating task identities for drafts.
+
+`phase --phase N` adds `live: {phase, revision, nodes, complete}` for a published
+phase. This is the same reader and poller, with live and archived nodes including
+stages, no state filtering, and at most 4,096 nodes. Its 7 MiB node payload
+reserves the rest of the 8 MiB command budget for the frozen draft, previous
+generation and metadata. Incomplete or unreadable scopes do not supply live
+metrics. Layers and metrics use the shared core graph and metric projections.
+
+Completion is a service-only fact from publication, live/archive, decision and
+outstanding-effect records, never from an empty queue. Hand-out admission
+rechecks this through the same scheduler kernel, so a completed earlier phase
+already blocks later work before the AwaitingAcceptance fact is recorded.
+`accept-phase` rechecks completion under the lock and moves the phase to Done.
+The exact bound lead may accept or send back only a Lead-policy phase with
+`accept_results` delegated; hard Person gates remain person-only. Send back
+retains AwaitingAcceptance while explicit correction drafts are prepared.
+Only approved, fully confirmed correction publication returns it to Approved.
+Accepted tasks, commits and every original publication/request remain intact.
+The same phase read returns an optional bounded correction episode, its exact
+base publication and nested proposal; it adds no historical selector. Earlier
+unreturned snapshots are unavailable, never substituted with current estimates.
+Barrier, pause, order, mode and acceptance policy are preserved; they are not
+correction controls. See `hgs guide team-rework` and the
+[rework interface](superpowers/specs/2026-11-16-teams-rework-s4-contract.md).
+Phase 0 remains the only intake queue. Approved-plan structural
+edits, including generic dependency/route edits, are deferred to logged plan
+changes; draft nodes remain editable.
 
 `set-deps` replaces dependencies only before the dependent task has started,
 without changing its route, holder or pipeline. The store refuses a started,

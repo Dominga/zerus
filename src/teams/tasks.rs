@@ -62,6 +62,12 @@ mod report;
 #[allow(unused_imports)] // Consumed by the service package.
 pub(crate) use report::report;
 
+fn replica_storage(error: zerus_replica::Error) -> Problem {
+    if error.kind() == zerus_replica::ErrorKind::Busy {
+        Problem::new(code::STORE_BUSY, error.to_string())
+    } else { storage(error) }
+}
+
 /// Native caller proof is resolved by the task command before entering here.
 pub(crate) struct Caller<'a> {
     pub state: &'a Path,
@@ -88,9 +94,9 @@ fn request(store: &Store, team: &str, operation: Operation) -> Result<Request> {
 fn project(state: &Path, task: &TaskRef, wait: Option<std::time::Duration>) -> Result<ProjectStore> {
     let root = state.join("replica");
     match wait {
-        None => ProjectStore::open(&root, &task.project).map_err(storage),
+        None => ProjectStore::open(&root, &task.project).map_err(replica_storage),
         Some(wait) => ProjectStore::open_within(&root, &task.project, wait)
-            .map_err(storage)?
+            .map_err(replica_storage)?
             .ok_or_else(|| storage("Task store is busy.")),
     }
 }
@@ -105,7 +111,7 @@ fn load(store: &ProjectStore, uuid: &str) -> Result<TaskDoc> {
             )
         })?
         .load_complete(uuid)
-        .map_err(storage)
+        .map_err(replica_storage)
 }
 /// The document retains the highest claim across stage changes. A conflicted
 /// projection has no current identity that the team can safely act on. A
@@ -206,14 +212,14 @@ impl Meeting<'_, '_> {
             Meeting::Projects(store) => store.load(uuid),
             Meeting::Admitted(admitted) => admitted.load(uuid),
         }
-        .map_err(storage)
+        .map_err(replica_storage)
     }
     fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
         match self {
             Meeting::Projects(store) => store.save(task),
             Meeting::Admitted(admitted) => admitted.save(task),
         }
-        .map_err(storage)
+        .map_err(replica_storage)
     }
 }
 
@@ -245,8 +251,10 @@ pub(crate) fn clear_returned_key(
         // Bound again to a live team after the stop: the key is live again.
         return Ok(false);
     }
-    let Ok(mut document) = meeting.load(&task.uuid) else {
-        return Ok(false);
+    let mut document = match meeting.load(&task.uuid) {
+        Ok(document) => document,
+        Err(error) if error.code == code::STORE_BUSY => return Err(error),
+        Err(_) => return Ok(false),
     };
     let view = document.view().map_err(storage)?;
     let Some(key) = view.team else {
@@ -423,7 +431,7 @@ pub(crate) fn clear_team_key(
         ));
     }
     clear(state, &mut document, actor)?;
-    tasks.save(&mut document).map_err(storage)?;
+    tasks.save(&mut document).map_err(replica_storage)?;
     Ok(true)
 }
 #[cfg(test)]

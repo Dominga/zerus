@@ -50,6 +50,10 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if !(1..=200).contains(&limit) {
         return Err("search limit must be between 1 and 200".into());
     }
+    search_index::request_worker(&root());
+    if cursor.is_none() {
+        search_index::wait_small(&root());
+    }
     if indexed {
         println!("{}", search_index::indexed(query, limit, cursor)?);
     } else {
@@ -68,12 +72,12 @@ pub(super) fn legacy(query: &str, limit: usize) -> Result<Value> {
         sources.records,
         query,
         limit,
-        MAX_TOTAL_BYTES.saturating_sub(sources.bytes as u64),
+        MAX_TOTAL_BYTES.saturating_sub((sources.bytes + sources.metadata_io) as u64),
     )?;
     if !sources.complete {
         reply["truncated"] = json!(true);
     }
-    reply["discovery"] = json!({"bytes":sources.bytes,"directory_entries":sources.entries,"complete":sources.complete});
+    reply["discovery"] = json!({"bytes":sources.bytes,"metadata_io":sources.metadata_io,"directory_entries":sources.entries,"complete":sources.complete});
     Ok(reply)
 }
 
@@ -746,6 +750,17 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
                 (
                     role,
                     string(payload, "message").to_owned(),
+                    string(payload, "id"),
+                    timestamp(&event["timestamp"]),
+                    "codex_transcript",
+                )
+            } else if string(event, "type") == "response_item"
+                && string(payload, "type") == "message"
+                && string(payload, "role") == "user"
+            {
+                (
+                    "user",
+                    text_parts(&payload["content"], &["input_text", "text"]),
                     string(payload, "id"),
                     timestamp(&event["timestamp"]),
                     "codex_transcript",

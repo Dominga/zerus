@@ -14,6 +14,7 @@ import { TaskActions } from "./TeamActions";
 import { TeamConfirmDialog } from "./TeamConfirmDialog";
 import { stageLine } from "./task-line";
 import { TextInput } from "../lib/TextField";
+import { composing } from "../lib/keys";
 import { Icon } from "../lib/icons";
 import type { TeamView } from "./types";
 import { boardColumns, stageAgrees, type BoardColumn } from "./pipeline-view";
@@ -24,6 +25,7 @@ import { LanesView } from "./LanesView";
 import { TeamTaskCard } from "./TeamTaskCard";
 import { TeamAdvanceBase } from "./TeamAdvanceBase";
 import { PhasePane } from "./PhasePane";
+import { phaseFocus } from "../../store/team-phases";
 import { TeamDrawerButtons, TeamDrawers } from "./TeamDrawers";
 import type { TeamDrawer } from "../../store/teamDrawers";
 import { openTeamNode, setOpenTeamNode } from "./openNode";
@@ -85,6 +87,7 @@ export function TeamWorkspace(props: {
   createEffect(on(teamId, () => setDrawer(null), { defer: true }));
   createEffect(on(teamId, () => setAdvance(false), { defer: true }));
   createEffect(on(teamId, () => { setSettingsView(undefined); if (planMode() === "layers" || planMode() === "lanes") setPlanMode("board"); setSelectedNode(null); setFocusStage(null); setOpenNotice(""); setAsking(null); setReason(""); lookups = 0; looked.clear(); }, { defer: true }));
+  createEffect(() => { if (phaseFocus()?.team === teamId()) { setSelectedNode(null); setPlanMode("layers"); } });
   const groups = createMemo(() => boardColumns(props.view));
   const all = createMemo(() => props.view.groups.flatMap((group) => group.cards));
   // Waiting for you's Open task: the node it names, or the card a stage of that
@@ -115,11 +118,44 @@ export function TeamWorkspace(props: {
     setOpenTeamNode(null); lookups = 0; looked.clear();
   });
   const select = (node: number) => { setSelectedNode(node); setFocusStage(null); setOpenNotice(""); };
+  // Dismissal is viewer state only. Drop this team's outstanding Open task
+  // lookup too, so its late page response cannot select a task again.
+  const dismissPreview = () => {
+    setSelectedNode(null);
+    setFocusStage(null);
+    setOpenNotice("");
+    setAsking(null);
+    setReason("");
+    lookups = 0;
+    looked.clear();
+    if (openTeamNode()?.team === props.view.bar.id) setOpenTeamNode(null);
+  };
+  const dismissKey = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || event.defaultPrevented || composing(event)) return;
+    const target = event.target;
+    if (!(target instanceof Element) || target.closest('input,textarea,select,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) return;
+    const overlay = [...document.querySelectorAll('dialog[open],[aria-modal="true"],[role="dialog"],[role="menu"]')]
+      .some((element) => !element.closest('dialog:not([open]),[hidden],[aria-hidden="true"]'));
+    if (overlay) return;
+    // This native listener runs before the graph's delegated Escape handler.
+    // Let that handler cancel its current link/edge gesture on the first key.
+    const graph = target.closest("[data-team-graph]");
+    if (graph?.querySelector('.team-plan-edge.selected,[role="status"] button')) return;
+    if (selectedNode() === null && !openNotice()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    dismissPreview();
+  };
+  const dismissBlank = (event: MouseEvent) => {
+    if (event.defaultPrevented || event.button !== 0 || !(event.target instanceof Element)) return;
+    if (event.target.closest('.team-task-card,button,a,input,textarea,select,[contenteditable],[role="button"]')) return;
+    dismissPreview();
+  };
   const card = createMemo(() => all().find((candidate) => candidate.node === selectedNode()) ?? null);
   const editors = createTeamEditors(() => props.view, props.onAction);
   const send = (kind: string, fields: Record<string, unknown> = {}) => { if (kind === "swap_member") { editors.open(kind, String(fields.member)); return; } props.onAction(kind, fields); setAsking(null); setReason(""); };
   return (
-    <div class="team-tab" data-team-tab>
+    <div class="team-tab" data-team-tab on:keydown={dismissKey}>
       <TeamBar view={props.view} busy={props.busy} onAction={(kind) => kind === "advance_base" ? setAdvance(true) : send(kind)}
         onSettings={props.onSettingsSave ? () => setSettingsView(props.view) : undefined} settingsBlocked={props.settingsBlocked}
         drawers={<TeamDrawerButtons value={drawer()} onOpen={(kind) => setDrawer(drawer() === kind ? null : kind)} />} />
@@ -148,7 +184,7 @@ export function TeamWorkspace(props: {
             <Show when={planMode() === "lanes"} fallback={<Show when={all().length} fallback={
               <div class="empty team-empty"><Icon name="list-todo" size={24} /><h3>{tr("The queue is empty.")}</h3><p>{tr("Send a task to the team from the task board.")}</p></div>
             }>
-              <Show when={planMode() === "graph"} fallback={<div class="team-board" data-team-board>
+              <Show when={planMode() === "graph"} fallback={<div class="team-board" data-team-board onClick={dismissBlank}>
                 <For each={groups()}>
                   {(group) => (
                     <section class="team-column" data-group={group.key}>
@@ -170,7 +206,10 @@ export function TeamWorkspace(props: {
             <Show when={card()}>
               {(shown) => (
                 <div class="team-task-detail" data-team-detail>
-                  <h3>{shown().title || tr("Task %1", shown().node)}</h3>
+                  <header class="team-task-detail-head">
+                    <h3>{shown().title || tr("Task %1", shown().node)}</h3>
+                    <button type="button" class="icon-btn" aria-label={tr("Close")} title={tr("Close")} onClick={dismissPreview}><Icon name="x" size={16} /></button>
+                  </header>
                   <dl class="team-facts">
                     <dt>{tr("Task")}</dt><dd>
                       <Show when={shown().task} fallback={tr("not sent yet")}>

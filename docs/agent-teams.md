@@ -314,8 +314,9 @@ with the usual creation request on stdin and a nonblank goal.
 
 The lead receives a durable inbox notice and can read the original goal with
 `hgs team current`. It submits drafts that you can inspect in **Layers**.
-Approval and publication are still unavailable in this slice, so the team
-stays in Planning and hands out no tasks.
+Review the initial draft with **Approve phase**. The review includes the roster,
+account choices and working folders. The team stays in Planning until creation
+of every approved task is confirmed; then it starts the other members.
 
 **Pause planning** stops new launches and automatic messages; the lead's current
 work may continue. **Resume planning** returns to Planning. A lead cannot
@@ -337,8 +338,8 @@ projection; opening a task shows its original description and criteria.
 A person or the team's bound lead may save a draft. Drafts reserve task IDs
 and count against the team's planned-work cap, including when a pipeline
 creates a stage. They create no task documents, launches or hand-outs.
-**Approve phase** is unavailable in this slice. Phase 0 remains the only
-intake queue; planned startup and phase publication are still to come.
+Phase 0 remains the only intake queue. Approval freezes a draft and creates
+its tasks before the phase becomes available for hand-outs.
 
 The CLI reads are `hgs team phases --team TEAM` and
 `hgs team phase --team TEAM --phase N`. Use the returned revision, next phase
@@ -352,6 +353,26 @@ A failed read shows its reason and **Read again**, never an editable empty
 plan. A stale save retains the editor text for copying. An unconfirmed save
 locks saving and points to **Check** in the team's unresolved actions; it is
 never automatically sent again under a new request identity.
+
+## Reviewing and accepting phases
+
+**Approve phase** reviews the exact generation, its descriptions, criteria and
+changes since the previous draft. **Reject phase** requires a comment for the
+lead. **Undo rejection** restores only that rejection's draft; it does not
+approve it. The lead can edit a rejected draft and submit a new generation.
+
+The phase shows confirmed task-creation progress. A refusal or uncertain result
+keeps the phase closed; an unknown result never becomes a successful task or
+an automatic second creation. A frozen publication cannot be edited.
+The person's Auto policy can approve later phases of a running team; the
+initial roster and working-folder confirmation always requires the person.
+
+Layers shows live and archived tasks after publication. The service records
+**Awaiting acceptance** only when the work, pipeline stages, decisions and
+integration are settled. **Accept phase** rechecks those facts and completes
+the phase, allowing later work through its gate. It supplies no task or merge
+receipt. Send back, delegated lead acceptance and phase controls follow in
+later slices.
 
 ## Sending a task to a team
 
@@ -701,9 +722,9 @@ tool approvals.
   shell; run it from the Zerus window." Commands that a lead or a member runs
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
-- Queue execution has Board, Graph and Lanes views; draft phases use Layers.
-  A lead can prepare drafts from a goal. Planned phase approval/publication
-  and phase acceptance are not yet available.
+- Queue execution has Board, Graph and Lanes views; planned phases use Layers.
+  A lead can prepare drafts from a goal. The person can approve, reject and
+  accept phases; send-back rework and phase controls follow in later slices.
 - DeepSeek can be a lead or member with a host that proves each tool call
   with its per-call token, witnesses task input and reports its lifecycle.
   A host lacking those capabilities stays unavailable; Zerus never reloads
@@ -852,3 +873,23 @@ execution/acceptance policy, so older clients/services keep their existing task
 behavior. Old hgs versions show inspection as unavailable, never a successful
 empty configuration. An uncertain save keeps its original action for Check in the
 Team tab; it is never automatically reposted.
+
+## Correcting an awaiting phase
+
+**Send phase back** requires a comment and keeps the phase awaiting acceptance.
+Its earlier accepted tasks and commits stay unchanged. The person can send back
+a hard gate; the exact lead can decide only a Lead gate with the Accept results
+delegation. **Draft corrections** opens a separate nonempty proposal with new
+task IDs. **Edit corrections**, **Approve corrections**, rejection and undo
+retain that proposal's exact publication, episode and generation. The phase
+returns to Approved only after every new task is confirmed and publication
+settles. A partial or unknown outcome never causes an automatic replay.
+
+Corrections preserve the existing acceptance, approval policy, barrier, pause,
+order, kind and mode. The barrier shown in their editor is read-only. The
+existing phase reader/poller keeps the retained base snapshot separate from
+the proposal, then switches to the new frozen publication after confirmation.
+Older unreturned publications remain unavailable to estimate views; the whole
+phase live scope still includes earlier accepted work. No task is mass-reopened
+and no integration history is rewound. Read `hgs guide team-rework` for the
+strict command fields and original-request Check behavior.

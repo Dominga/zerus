@@ -222,6 +222,14 @@ impl Ports for Native {
     ) -> Result<()> {
         state.terminal(self, store, now)
     }
+    fn planned_task(
+        &mut self,
+        team: &Team,
+        request: &crate::teams::store::publication::PlannedTaskRequest,
+        clear: bool,
+    ) -> Result<super::ports::TaskReply> {
+        self.planned_task_child(team, request, clear)
+    }
     fn stage(
         &mut self,
         team: &Team,

@@ -402,7 +402,7 @@ fn the_exact_card_lookup_is_indexed_and_an_older_v2_file_gains_the_index() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        crate::teams::store::SCHEMA_VERSION
+        crate::teams::store::NATIVE_PERSON_LAYOUT
     );
     h.run(&service(), receipt(node, seq)).unwrap();
     assert_fact(&h, seq, Some(COMMIT), &[]);

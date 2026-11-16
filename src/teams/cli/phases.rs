@@ -56,7 +56,7 @@ pub(super) fn read(
     let next = page.next.as_ref().map(input::cursor_token).transpose()?;
     let answer = json!({"ok":true,"actor":actor::view(&who.actor),"team":id,"revision":team.revision,
         "rows":page.rows,"next":next,"next_phase":store.next_draft_phase(&id)?,"next_node":store.next_draft_node(&id)?,
-        "drafts_available":true,"approval_available":false,"routes":routes,"default_pipeline":team.bundle.template.default_pipeline});
+        "drafts_available":true,"approval_available":true,"routes":routes,"default_pipeline":team.bundle.template.default_pipeline});
     tx.commit().map_err(storage)?;
     Ok(answer)
 }

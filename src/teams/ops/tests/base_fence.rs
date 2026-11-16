@@ -366,7 +366,7 @@ fn advance_base_preserves_the_core_planning_layout_namespace() {
             .unwrap()
     };
     let core = core_version(&h.store);
-    assert_eq!(core, crate::teams::store::SCHEMA_VERSION);
+    assert_eq!(core, crate::teams::store::NATIVE_PERSON_LAYOUT);
     let plan = h.store.planning(TEAM_B).unwrap();
     assert!(plan.is_some());
     let advance = f.request(&h, &f.next);

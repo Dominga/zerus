@@ -24,6 +24,7 @@
       "next_phase": 2,
       "next_node": 5,
       "drafts_available": true,
+      "approval_available": true,
       "routes": [
         {
           "pipeline": "reviewed",
@@ -190,7 +191,13 @@
       },
       "complete": true,
       "editable": true,
-      "unknown_fields": false
+      "accept_available": false,
+      "unknown_fields": false,
+      "publication": null,
+      "rejection": null,
+      "previous": null,
+      "live": null,
+      "rework_available": true
     },
     "selected": 1,
     "list_failure": null,

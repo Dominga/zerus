@@ -14,7 +14,11 @@ mod disposition;
 pub(crate) mod drafts;
 pub(crate) mod editing;
 mod holder;
+pub(crate) mod layout;
+pub(crate) mod phase_snapshot;
 pub(crate) mod planning;
+pub(crate) mod publication;
+pub(crate) mod rework;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 mod native_person;
@@ -27,10 +31,12 @@ mod progress;
 mod recorded_timings;
 mod records;
 pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
+mod roster;
 pub(crate) mod rows;
 mod stage;
 pub(crate) mod timers;
 pub(crate) mod unstaffed;
+pub(crate) mod versions;
 pub use records::*;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -42,11 +48,12 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-// Layout 3 was published by planning and used by the original native candidate.
-// The combined writer fences both engines with its own distinct core mark.
-pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = 2;
-pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = 3;
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+// Ordinary opens migrate native evidence to 4. Publication raises its floor
+// to 5 and SendBack to 6; raising the ceiling never opts ordinary queues in.
+pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = versions::CORE_LEGACY;
+pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = versions::CORE_PLANNING;
+pub(crate) const NATIVE_PERSON_LAYOUT: u32 = versions::CORE_NATIVE_PERSON;
+pub(crate) const SCHEMA_VERSION: u32 = versions::CORE_CURRENT;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -314,7 +321,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
-    if version == 1 {
+    if version == versions::RETIRED_PREVIEW {
         return Err(Problem::new(
             code::INVALID_STATE,
             "Version-1 Teams store belongs to an unsupported pre-release build.",
@@ -326,7 +333,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if version == SCHEMA_VERSION {
+    if layout::native(version) {
         native_person::validate(db)?;
         return schema_extensions(db);
     }
@@ -337,32 +344,37 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
     let sql = match current {
-        0 => Some(include_str!("schema.sql")),
-        1 => {
+        versions::UNINITIALIZED => Some(include_str!("schema.sql")),
+        versions::RETIRED_PREVIEW => {
             return Err(Problem::new(
                 code::INVALID_STATE,
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT | SCHEMA_VERSION => None,
+        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT => None,
+        native if layout::native(native) => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
         tx.execute_batch(
-            &sql.replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
-                .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
-                .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
+            &sql.replace(
+                "__CORE_LEGACY_VERSION__",
+                &versions::CORE_LEGACY.to_string(),
+            )
+            .replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
+            .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
+            .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
         )
         .map_err(storage)?;
     }
     schema_extensions(&tx)?;
-    if current == SCHEMA_VERSION {
+    if layout::native(current) {
         // Another current opener won the writer. A current but damaged leaf
         // cannot be mistaken for an unmigrated legacy store.
         native_person::validate(&tx)?;
     } else {
         native_person::migrate(&tx)?;
-        tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        tx.pragma_update(None, "user_version", NATIVE_PERSON_LAYOUT)
             .map_err(storage)?;
     }
     tx.commit().map_err(storage)
@@ -405,6 +417,8 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     card_parameters(db)?;
     drafts::extend(db)?;
     planning::extend(db)?;
+    publication::extend(db)?;
+    rework::validate(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }
@@ -420,6 +434,20 @@ pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
             code::INVALID_STATE,
             "store schema is newer than this version of Zerus",
         ));
+    }
+    Ok(())
+}
+
+/// Raise the private execution floor without lowering an already-published
+/// store when another team starts planning. Called under the operation lock.
+pub(crate) fn raise_execution_floor(db: &Connection, floor: u32) -> Result<()> {
+    execution_fence(db)?;
+    let current: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if current < floor {
+        db.pragma_update(None, "user_version", floor)
+            .map_err(storage)?;
     }
     Ok(())
 }

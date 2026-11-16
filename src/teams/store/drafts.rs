@@ -42,6 +42,14 @@ pub struct PhaseDraft {
     pub nodes: Vec<DraftNode>,
     pub complete: bool,
     pub editable: bool,
+    pub accept_available: bool,
+    pub publication: Option<publication::Publication>,
+    pub rejection: Option<publication::Rejection>,
+    pub previous: Option<publication::PreviousDraft>,
+    pub live: Option<phase_snapshot::PhaseNodeSnapshot>,
+    pub rework_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rework: Option<rework::ReworkView>,
 }
 
 pub(crate) fn count(db: &Connection, team: &str) -> Result<u32> {
@@ -104,7 +112,7 @@ impl Store {
             .optional()
             .map_err(storage)?
             .ok_or_else(|| Problem::new(code::NOT_FOUND, "Phase does not exist."))?;
-        let generation: Option<u64> = tx
+        let mut generation: Option<u64> = tx
             .query_row(
                 "SELECT generation FROM phase_drafts WHERE team=?1 AND phase=?2",
                 params![team, phase],
@@ -117,22 +125,76 @@ impl Store {
                 r.get(0)
             })
             .map_err(storage)?;
-        let nodes = nodes(&tx, team, phase)?;
-        let editable = generation.is_some()
+        let episode = rework::latest(&tx, team, phase)?;
+        let held = episode.as_ref().filter(|r| r.state != "published");
+        let publication = if let Some(r) = held {
+            Some(
+                publication::by_id(&tx, team, &r.base_publication)?
+                    .ok_or_else(|| storage("The rework base publication is missing."))?,
+            )
+        } else {
+            publication::publication(&tx, team, phase)?
+        };
+        let nodes = if let Some(p) = &publication {
+            generation = Some(p.generation);
+            publication::snapshot(&tx, team, &p.id)?
+        } else {
+            nodes(&tx, team, phase)?
+        };
+        let rejection = if held.is_some() {
+            None
+        } else {
+            publication::rejection(&tx, team, phase)?
+        };
+        let live = if publication.as_ref().is_some_and(|p| p.state == "published") {
+            Some(phase_snapshot::load(&tx, team, phase, header.revision)?)
+        } else {
+            None
+        };
+        let editable = publication.is_none()
+            && generation.is_some()
             && record.kind == PhaseKind::Plan
-            && record.state == PhaseState::Draft
+            && matches!(record.state, PhaseState::Draft | PhaseState::Rejected)
             && matches!(
                 header.status,
                 TeamStatus::Planning | TeamStatus::Running | TeamStatus::Paused
             );
+        let accept_available = record.state == PhaseState::AwaitingAcceptance
+            && matches!(header.status, TeamStatus::Running | TeamStatus::Paused)
+            && crate::teams::ops::publication::complete(&tx, team, phase)?;
+        let previous = if held.is_some() {
+            None
+        } else {
+            publication::previous(&tx, team, phase)?
+        };
+        let rework = episode
+            .map(|r| {
+                rework::view(
+                    &tx,
+                    team,
+                    r,
+                    header.revision,
+                    next_node,
+                    matches!(header.status, TeamStatus::Running | TeamStatus::Paused),
+                )
+            })
+            .transpose()?;
+        let complete = generation.is_some() && !nodes.is_empty();
         let answer = PhaseDraft {
             phase: record,
             revision: header.revision,
             generation,
             next_node,
             nodes,
-            complete: generation.is_some(),
+            complete,
             editable,
+            accept_available,
+            publication,
+            rejection,
+            previous,
+            live,
+            rework_available: true,
+            rework,
         };
         tx.commit().map_err(storage)?;
         Ok(answer)

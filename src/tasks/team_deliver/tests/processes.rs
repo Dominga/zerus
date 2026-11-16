@@ -1203,6 +1203,7 @@ mod return_text_tests;
 
 mod attempt_tests;
 
+mod reservation_readiness;
 mod removal_tests;
 pub(crate) use removal_tests::{removed_stage_cancel, RealCancel};
 pub(crate) use attempt_tests::{cutover_delivery::fence_delivery_cycle, legacy_cancel::with_legacy_cancel};

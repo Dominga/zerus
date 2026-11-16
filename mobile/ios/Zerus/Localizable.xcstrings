@@ -920,6 +920,125 @@
           }
         }
       }
+    },
+    "task_content_open": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit prompt and files"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Изменить запрос и файлы"
+          }
+        }
+      }
+    },
+    "task_content_new": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New task with files"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Новая задача с файлами"
+          }
+        }
+      }
+    },
+    "task_content_upload": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Zerus on the selected task computer to attach files. Your draft was kept."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Обновите Zerus на выбранном компьютере задачи, чтобы прикрепить файлы. Черновик сохранён."
+          }
+        }
+      }
+    },
+    "task_content_stale": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The task changed while you were editing. Your original draft was kept; review the current task first."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Задача изменилась во время редактирования. Исходный черновик сохранён; сначала проверьте текущую задачу."
+          }
+        }
+      }
+    },
+    "task_content_held": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The save could not be confirmed. Your original draft was kept; check the task before making another edit."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Не удалось подтвердить сохранение. Исходный черновик сохранён; проверьте задачу перед новым изменением."
+          }
+        }
+      }
+    },
+    "task_content_comment_files": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View comment files"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Посмотреть файлы комментария"
+          }
+        }
+      }
+    },
+    "task_content_comment_close": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close comment files"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Закрыть файлы комментария"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

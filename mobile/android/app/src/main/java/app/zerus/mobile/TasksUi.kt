@@ -142,6 +142,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @Composable internal fun TasksScreen(model: ZerusViewModel) {
     val key = model.tasksKey ?: return
     TaskEditorSheet(model)
+    TaskContentSheet(model)
     val chosen = model.displayedTaskChosen()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -336,7 +337,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     }
 }
 
-/** The app's message input without the attach button; nothing is sent to the agent. */
+/** Quick text entry and a separate scoped composition with files; neither sends agent input. */
 @Composable private fun TaskInput(model: ZerusViewModel, modifier: Modifier) {
     val editor = rememberTextFieldState()
     val focus = remember { FocusRequester() }
@@ -345,7 +346,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
     val reason = TasksPresentation.addReason(model.tasksChosen)
     val canAdd = text.isNotBlank() && reason.isEmpty()
     CompactMessageInput(state = editor, placeholder = "Add to $stage", readOnly = false, inputTransformation = InputTransformation { },
-        focusRequester = focus, onFocusChanged = { }, modifier = modifier, leading = { Spacer(Modifier.width(8.dp)) }, action = {
+        focusRequester = focus, onFocusChanged = { }, modifier = modifier, leading = { IconButton(onClick = model::newTaskContent) { Icon(Icons.Default.AttachFile, androidx.compose.ui.res.stringResource(R.string.task_content_new)) } }, action = {
             // A session that cannot take tasks answers the tap with why.
             ComposerActionButton(onClick = { if (canAdd) { model.addTask(text.trim()); editor.clearText() } else model.taskNotice = reason },
                 enabled = text.isNotBlank(),
@@ -363,15 +364,9 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
 @Composable private fun TaskSettingsSheet(model: ZerusViewModel, key: ProjectKey, task: TaskInfo, onDismiss: () -> Unit, onCancel: () -> Unit) {
     val tab = TasksPresentation.tab(task.stage)
     val editable = task.writable && task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG)
-    val original = remember(key, task.uuid) { task.copy() }
-    var text by remember(key, task.uuid) { mutableStateOf(original.text) }
-    var target by remember(key, task.uuid) { mutableStateOf(original.target) }
-    var comment by remember(task.uuid) { mutableStateOf("") }
-    var choosing by remember { mutableStateOf(false) }
-    val textChanged = text != original.text
-    val targetChanged = target != original.target
-    // Send now's reason follows the session chosen here, before it is saved.
-    val draft = task.copy(target = target)
+    var comment by remember(key, task.uuid) { mutableStateOf("") }
+    var commentEntry by remember(key, task.uuid) { mutableStateOf<String?>(null) }
+    val draft = task
     val actions = TasksPresentation.cards(listOf(draft), tab, model.displayedTaskChosen(), false, model::sendRoute, model::cancelRoute, model::taskCurrentSession)
         .single().actions.filter { it.action != TaskAction.EDIT }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -383,13 +378,11 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 Text(task.id, Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 Text(tab.label, style = MaterialTheme.typography.labelMedium, color = TasksColors.Muted)
             }
-            if (editable) OutlinedTextField(text, { text = it }, Modifier.fillMaxWidth(), label = { Text("Prompt") }, minLines = 3, maxLines = 12)
-            else SelectionContainer { Text(task.text, style = MaterialTheme.typography.bodyMedium) }
-            val sessionLabel = (target as? TaskTarget.Session)?.session?.let { TasksPresentation.shortName(model.taskCurrentSession(it) ?: it.session) } ?: "Any session"
-            if (editable) OutlinedButton(onClick = { choosing = true }, Modifier.fillMaxWidth()) {
-                Text("Session: $sessionLabel", Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.Default.ArrowDropDown, null)
-            } else Text("Session: ${model.taskSessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
+            SelectionContainer { Text(task.text, style = MaterialTheme.typography.bodyMedium) }
+            Text("Session: ${model.taskSessionLabel(task)}", style = MaterialTheme.typography.bodyMedium, color = TasksColors.Muted)
+            if (editable) OutlinedButton(onClick = { model.openTaskContent(key, task); onDismiss() }) {
+                Text(androidx.compose.ui.res.stringResource(R.string.task_content_open))
+            }
             if (TasksPresentation.note(task).isNotBlank()) Text(TasksPresentation.note(task), style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
             SavedExecutionSection(SavedExecutionPresentation.section(task, key.id, model.taskExecutionStale, ::time))
             if (task.schema == 8L) OutlinedButton(onClick = { model.openTaskEditor(key, task); onDismiss() }) {
@@ -402,7 +395,7 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 actions.forEach { state ->
                     OutlinedButton(onClick = {
                         if (state.action == TaskAction.CANCEL) onCancel()
-                        else { model.saveThen(task, text.takeIf { textChanged }, target.takeIf { targetChanged }, state.action); onDismiss() }
+                        else if (model.tasksKey == key) { model.taskAction(task, state.action); onDismiss() }
                     }, enabled = state.enabled) {
                         Icon(actionIcon(state.action), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text(state.action.label)
                     }
@@ -411,9 +404,6 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
             actions.filter { !it.enabled && it.reason.isNotBlank() }.forEach {
                 Text("${it.action.label}: ${it.reason}", style = MaterialTheme.typography.bodySmall, color = TasksColors.Muted)
             }
-            if (textChanged || targetChanged) Button(onClick = {
-                model.saveTask(task.uuid, text.takeIf { textChanged }, target.takeIf { targetChanged })
-            }, enabled = text.isNotBlank()) { Text("Save") }
             HorizontalDivider(color = TasksColors.Handle)
             Text("History", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             task.log.forEach { entry ->
@@ -421,15 +411,20 @@ private fun historyLine(entry: TaskLogEntry): Pair<String, String> {
                 Column {
                     Text(who, style = MaterialTheme.typography.labelMedium, color = TasksColors.Muted)
                     SelectionContainer { Text(what, style = MaterialTheme.typography.bodySmall) }
+                    if (entry.attachmentCount > 0u && entry.entryId.isNotEmpty()) {
+                        TextButton(onClick = { commentEntry = entry.entryId.takeUnless { it == commentEntry } }) {
+                            Text(androidx.compose.ui.res.stringResource(if (commentEntry == entry.entryId) R.string.task_content_comment_close else R.string.task_content_comment_files))
+                        }
+                        if (commentEntry == entry.entryId) TaskCommentFiles(model, key, task.uuid, entry.entryId)
+                    }
                 }
             }
             if (task.writable) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(comment, { comment = it }, Modifier.weight(1f), label = { Text("Comment") }, maxLines = 4)
-                TextButton(onClick = { model.commentTask(task.uuid, comment.trim()); comment = "" }, enabled = comment.isNotBlank()) { Text("Add") }
+                TextButton(onClick = { if (model.tasksKey == key) { model.commentTask(task.uuid, comment.trim()); comment = "" } }, enabled = comment.isNotBlank()) { Text("Add") }
             }
         }
     }
-    if (choosing) TaskSessionSheet(model, key, onDismiss = { choosing = false }) { picked -> target = picked; choosing = false }
 }
 
 /** Any session or one of the project's sessions, for a task in To do or Backlog. */

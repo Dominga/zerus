@@ -100,13 +100,13 @@ extension TaskAction {
     }
 }
 
-private struct OpenTask: Identifiable { let id: String }
+private struct OpenTask: Identifiable { let id: String; let key: ProjectKey }
 
 /// The project's tasks full-screen, as Terminal opens; Back returns to the conversation.
 struct TasksView: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
-    @State private var openTask: String?
+    @State private var openTask: OpenTask?
     @State private var cancelling: TaskInfo?
     /// Cancel chosen in the task settings: its alert waits until the sheet has gone.
     @State private var cancelAfterSheet: TaskInfo?
@@ -126,7 +126,7 @@ struct TasksView: View {
                     chips(tasks, key)
                     tabStrip(tasks)
                     ProgressView().progressViewStyle(.linear).tint(Theme.mint).frame(height: 3).opacity(tasks.taskBusy ? 1 : 0)
-                    if tasks.taskTab == .done { DoneList(onOpen: { openTask = $0.uuid }) } else { cards(tasks) }
+                    if tasks.taskTab == .done { DoneList(onOpen: { if let key = tasks.tasksKey { openTask = OpenTask(id: $0.uuid, key: key) } }) } else { cards(tasks) }
                 }
             }
             .safeAreaInset(edge: .bottom) { TaskInput().padding(.horizontal, 12).padding(.vertical, 8).background(Theme.background) }
@@ -165,13 +165,16 @@ struct TasksView: View {
             try? await Task.sleep(for: .seconds(3))
             if !Task.isCancelled { shown = nil }
         }
-        .sheet(item: Binding(get: { openTask.map(OpenTask.init) }, set: { openTask = $0?.id }), onDismiss: {
+        .sheet(item: $openTask, onDismiss: {
             guard let task = cancelAfterSheet else { return }
             cancelAfterSheet = nil
             cancelReason = ""
             cancelling = task
         }) { open in
-            TaskSettingsSheet(uuid: open.id) { task in cancelAfterSheet = task }
+            TaskSettingsSheet(key: open.key, uuid: open.id) { task in cancelAfterSheet = task }
+        }
+        .sheet(isPresented: Binding(get: { openTask == nil && tasks.taskContent?.state != nil }, set: { if !$0 { tasks.taskContent?.dismiss() } })) {
+            if let editor = tasks.taskContent { TaskContentSheet(model: editor, tasks: tasks) }
         }
         .sheet(isPresented: $projectSettings) { ProjectTaskSettingsSheet() }
         .sheet(isPresented: $allSessions) { AllSessionsSheet() }
@@ -288,7 +291,7 @@ struct TasksView: View {
                 ForEach(cards, id: \.uuid) { card in
                     if let task = tasks.taskListing.first(where: { $0.uuid == card.uuid }) {
                         TaskCardView(card: card, badge: card.tab == .active ? activeSession(tasks, key, task.session) : nil,
-                                     onOpen: { openTask = card.uuid }, onAction: { act(tasks, task, $0) })
+                                     onOpen: { if let key = tasks.tasksKey { openTask = OpenTask(id: card.uuid, key: key) } }, onAction: { act(tasks, task, $0) })
                     }
                 }
             }
@@ -304,7 +307,7 @@ struct TasksView: View {
     }
 
     private func act(_ tasks: TasksModel, _ task: TaskInfo, _ state: ActionState) {
-        if state.action == .edit { openTask = task.uuid }
+        if state.action == .edit { if let key = tasks.tasksKey { openTask = OpenTask(id: task.uuid, key: key) } }
         else if !state.enabled { tasks.taskNotice = state.reason }
         else if state.action == .cancel {
             cancelReason = ""
@@ -440,6 +443,8 @@ private struct TaskInput: View {
         let blank = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         let canAdd = !blank && reason.isEmpty
         HStack(alignment: .bottom, spacing: 8) {
+            Button { tasks.newTaskContent() } label: { Image(systemName: "paperclip") }
+                .accessibilityLabel(taskEditText("task_content_new"))
             TextField("Add to \(stage)", text: $text, axis: .vertical)
                 .lineLimit(1...6)
                 .padding(.horizontal, 14)

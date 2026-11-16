@@ -214,7 +214,11 @@ fn recovery_keeps_the_original_request_and_lead_after_the_lead_is_rebound() {
     assert_eq!(view.text, r.text);
 }
 
-fn ended(f: &Fixture, r: &crate::teams::store::publication::PlannedTaskRequest, stage: Stage) {
+pub(super) fn ended(
+    f: &Fixture,
+    r: &crate::teams::store::publication::PlannedTaskRequest,
+    stage: Stage,
+) {
     let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
     let mut doc = tasks.load(&r.task.uuid).unwrap();
     if stage == Stage::Done {

@@ -16,6 +16,7 @@ Session names look like provider/project/tag. [@h] marks an optional @alias.
   hgs guide team              your part in an Agent Teams team
   hgs guide team-lead         leading a team: inbox, decisions, queue
   hgs guide team-planning     drafting and editing the lead's phase plan
+  hgs guide team-rework       explicit corrections and retained acceptance gates
 
 Rules
 - Plain ls --json includes at most 50 recent archives. Its archive_page gives

@@ -188,7 +188,7 @@ fn named(value: &str, field: &str, bytes: usize) -> Result<()> {
     Ok(())
 }
 
-fn validate(
+pub(super) fn validate(
     ctx: &Context<'_>,
     phase: &Phase,
     input: &DraftInput,
@@ -298,7 +298,7 @@ fn validate(
             if ids.contains(&d.node) {
                 continue;
             }
-            if d.kind == DepKind::Hard {
+            if d.kind == DepKind::Hard && others.get(&d.node) != Some(&phase.n) {
                 return Err(invalid(
                     "A hard dependency must be in this phase; use a barrier between phases.",
                 ));

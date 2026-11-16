@@ -6095,7 +6095,13 @@ its operation: `op`, `actor` and any other foreign field are refused.
 | `approve-phase` | yes | | | `phase`, `generation`, `confirm_initial` for initial roster/folder confirmation |
 | `reject-phase` | yes | | | `phase`, `generation`, nonblank `comment` |
 | `undo-reject-phase` | yes | | | `phase`, `generation`, current `rejection` UUID |
-| `accept-phase` | yes | | | `phase`, current `publication` UUID; no task receipt |
+| `accept-phase` | yes | Lead policy plus delegation | | `phase`, current `publication` UUID; no task receipt |
+| `send-back-phase` | yes | Lead policy plus delegation | | `phase`, exact base `publication`, required `comment` |
+| `submit-phase-corrections` | yes | yes | | `phase`, base `publication`, `rework`, complete `draft` |
+| `edit-phase-corrections` | yes | yes | | Same plus current correction `generation` |
+| `approve-phase-corrections` | yes | | | `phase`, base `publication`, `rework`, `generation`; Auto is service-only |
+| `reject-phase-corrections` | yes | | | Same plus nonblank `comment` |
+| `undo-phase-correction-rejection` | yes | | | Same plus exact `rejection` UUID |
 | `current` | | yes | yes | none |
 | `settings` | yes | | | `settings`, the complete settings object |
 | `pause`, `resume` | yes | yes | | none |
@@ -6274,9 +6280,19 @@ Completion is a service-only fact from publication, live/archive, decision and
 outstanding-effect records, never from an empty queue. Hand-out admission
 rechecks this through the same scheduler kernel, so a completed earlier phase
 already blocks later work before the AwaitingAcceptance fact is recorded.
-The person's `accept-phase` rechecks completion under the lock and moves the
-phase to Done. Send back, delegated lead acceptance and the full rework UI are
-a later slice. Phase 0 remains the only intake queue. Approved-plan structural
+`accept-phase` rechecks completion under the lock and moves the phase to Done.
+The exact bound lead may accept or send back only a Lead-policy phase with
+`accept_results` delegated; hard Person gates remain person-only. Send back
+retains AwaitingAcceptance while explicit correction drafts are prepared.
+Only approved, fully confirmed correction publication returns it to Approved.
+Accepted tasks, commits and every original publication/request remain intact.
+The same phase read returns an optional bounded correction episode, its exact
+base publication and nested proposal; it adds no historical selector. Earlier
+unreturned snapshots are unavailable, never substituted with current estimates.
+Barrier, pause, order, mode and acceptance policy are preserved; they are not
+correction controls. See `hgs guide team-rework` and the
+[rework interface](superpowers/specs/2026-11-16-teams-rework-s4-contract.md).
+Phase 0 remains the only intake queue. Approved-plan structural
 edits, including generic dependency/route edits, are deferred to logged plan
 changes; draft nodes remain editable.
 

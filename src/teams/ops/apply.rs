@@ -302,6 +302,14 @@ fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Re
     match ctx.op {
         Operation::AdvanceBase { .. } => unreachable!("handled with the trusted repository reader"),
         Operation::ReconcilePhaseReview { .. } => phase_review::review(ctx),
+        Operation::SendBackPhase { .. } => rework::send_back(ctx),
+        Operation::SubmitPhaseCorrections { .. } | Operation::EditPhaseCorrections { .. } => {
+            rework::write(ctx)
+        }
+        Operation::ApprovePhaseCorrections { .. } => rework::approve(ctx),
+        Operation::RejectPhaseCorrections { .. } => rework::reject(ctx),
+        Operation::UndoPhaseCorrectionRejection { .. } => rework::undo(ctx),
+        Operation::ReconcileCorrectionReview { .. } => rework::review(ctx),
         Operation::ApprovePhase { .. } => publication::approve(ctx),
         Operation::RejectPhase { .. } => publication::reject(ctx),
         Operation::UndoRejectPhase { .. } => publication::undo(ctx),

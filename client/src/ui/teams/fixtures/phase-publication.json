@@ -348,6 +348,7 @@
           },
           "rejection": null,
           "revision": 15,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -775,6 +776,7 @@
           },
           "rejection": null,
           "revision": 14,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -1119,6 +1121,7 @@
           "publication": null,
           "rejection": null,
           "revision": 4,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -1523,6 +1526,7 @@
           },
           "rejection": null,
           "revision": 8,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -2016,6 +2020,7 @@
           },
           "rejection": null,
           "revision": 11,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -2394,6 +2399,7 @@
           },
           "rejection": null,
           "revision": 8,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -2726,6 +2732,7 @@
             "id": "00000000-0000-4000-8000-000000009388"
           },
           "revision": 5,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,
@@ -3101,6 +3108,7 @@
           "publication": null,
           "rejection": null,
           "revision": 7,
+          "rework_available": true,
           "unknown_fields": false
         },
         "draft_failure": null,

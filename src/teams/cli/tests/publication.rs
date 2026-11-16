@@ -5,7 +5,7 @@ use crate::teams::{cli::actor::Caller, ops::Operation};
 use serde_json::{json, Value};
 use zerus_replica::{Actor, ProjectStore, Stage};
 
-fn context(h: &Harness) -> Value {
+pub(super) fn context(h: &Harness) -> Value {
     let mut out = serde_json::Map::new();
     for (key, command) in [
         ("phases", format!("phases --team {TEAM}")),
@@ -22,6 +22,14 @@ fn context(h: &Harness) -> Value {
 }
 
 fn produced() -> Value {
+    produced_mode(false)
+}
+
+pub(super) fn correction_contexts() -> Value {
+    produced_mode(true)
+}
+
+fn produced_mode(rework: bool) -> Value {
     let h = Harness::new();
     crate::swarm::fixture_project(&h.config, MACHINE, "example-project");
     let tasks = ProjectStore::open(&h.state().join("replica"), "example-project").unwrap();
@@ -167,6 +175,9 @@ fn produced() -> Value {
         },
     );
     out.insert("awaiting".into(), context(&h));
+    if rework {
+        return super::rework::from_waiting(&h, p, requests);
+    }
     command("accept-phase", json!({"phase":1,"publication":p}));
     out.insert("accepted".into(), context(&h));
     Value::Object(out)

@@ -236,6 +236,7 @@
       "publication": null,
       "rejection": null,
       "revision": 2,
+      "rework_available": true,
       "unknown_fields": false
     },
     "draft_failure": null,

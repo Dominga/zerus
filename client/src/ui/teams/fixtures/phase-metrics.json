@@ -196,7 +196,8 @@
       "publication": null,
       "rejection": null,
       "previous": null,
-      "live": null
+      "live": null,
+      "rework_available": true
     },
     "selected": 1,
     "list_failure": null,

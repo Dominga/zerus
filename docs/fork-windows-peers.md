@@ -29,6 +29,14 @@ the phone reaches every PC through the relay.
   **Settings -> Sessions -> Keep the session host running for other computers**:
   its Zerus then runs `hgs session-host start`, a host that stays without
   sessions until `hgs session-host stop`, and checks it every minute.
+- An administrator's commands over SSH run elevated, and an elevated token
+  makes BUILTIN\Administrators the owner of every file it creates. The peer's
+  `hgs` therefore sets its own user as the default owner at start
+  (`platform::own_new_files`), so the state folders stay the user's: the private
+  stores (input receipts and the rest) refuse a folder another owner holds, and
+  every send to that peer stalled ("could not retain the pre-input refusal").
+  Folders an older peer `hgs` created that way need their owner back once,
+  for example `icacls PATH /setowner *USER-SID` for each entry Administrators own.
 
 ## A lasting connection
 

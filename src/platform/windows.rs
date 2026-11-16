@@ -2332,6 +2332,49 @@ mod process {
         let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
         Some(unsafe { sid_bytes(user.User.Sid) }.to_vec())
     }
+    /// WhiteWh fork (owner, 2026-11-17): an elevated administrator's token
+    /// names BUILTIN\Administrators as the default owner of what it creates.
+    /// Windows OpenSSH starts every command of such a user elevated, so a peer's
+    /// `hgs __peer serve` made the state folders Administrators' and the
+    /// private-store checks refused them: sends on that computer stalled ("could
+    /// not retain the pre-input refusal"). The process's new files and folders
+    /// belong to its own user instead, as for a session started on the desktop.
+    /// Answers whether the default owner was changed.
+    pub fn own_new_files() -> io::Result<bool> {
+        use windows_sys::Win32::Security::{SetTokenInformation, TokenOwner, TOKEN_ADJUST_DEFAULT, TOKEN_OWNER};
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, &mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = Owned(token);
+        let read = |class| -> io::Result<Vec<u64>> {
+            let mut size = 0;
+            unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &mut size) };
+            if size == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
+            if unsafe { GetTokenInformation(token.0, class, buffer.as_mut_ptr().cast(), size, &mut size) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(buffer)
+        };
+        let user = read(TokenUser)?;
+        let owner = read(TokenOwner)?;
+        let user_sid = unsafe { (*(user.as_ptr() as *const TOKEN_USER)).User.Sid };
+        let owner_sid = unsafe { (*(owner.as_ptr() as *const TOKEN_OWNER)).Owner };
+        if unsafe { sid_bytes(owner_sid) == sid_bytes(user_sid) } {
+            return Ok(false);
+        }
+        let wanted = TOKEN_OWNER { Owner: user_sid };
+        if unsafe {
+            SetTokenInformation(token.0, TokenOwner, (&wanted as *const TOKEN_OWNER).cast(), std::mem::size_of::<TOKEN_OWNER>() as u32)
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(true)
+    }
     pub(super) fn current_user() -> Option<&'static [u8]> {
         static USER: OnceLock<Option<Vec<u8>>> = OnceLock::new();
         USER.get_or_init(|| token_user(unsafe { GetCurrentProcess() }))

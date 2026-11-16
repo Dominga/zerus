@@ -61,6 +61,10 @@ fn main() {
     }
     #[cfg(windows)]
     let entered = std::time::Instant::now();
+    // WhiteWh fork: what an elevated administrator's hgs creates (a peer's
+    // commands over Windows OpenSSH) belongs to the user, not Administrators.
+    #[cfg(windows)]
+    let _ = platform::own_new_files();
     zerus_client_core::quit_origin::capture_process_entry();
     // A creation launch child keeps the desktop actor's custody lock for its
     // own lifetime only: marked close-on-exec before anything else starts;

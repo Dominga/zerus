@@ -11,9 +11,9 @@ type Result<T> = std::result::Result<T, zerus_team_plan::Problem>;
 
 pub(crate) struct Permit<'a>(Original<'a>);
 enum Original<'a> {
-    Card(card::Admission),
-    Action(super::original::Admission),
-    Intake(super::intake::Admission<'a>),
+    Card(Box<card::Admission>),
+    Action(Box<super::original::Admission>),
+    Intake(Box<super::intake::Admission<'a>>),
     #[cfg(test)]
     Fixture {
         actor: ops::Actor,
@@ -29,17 +29,17 @@ pub(crate) enum Evidence<'a> {
 }
 impl From<card::Admission> for Permit<'_> {
     fn from(original: card::Admission) -> Self {
-        Self(Original::Card(original))
+        Self(Original::Card(Box::new(original)))
     }
 }
 impl From<super::original::Admission> for Permit<'_> {
     fn from(original: super::original::Admission) -> Self {
-        Self(Original::Action(original))
+        Self(Original::Action(Box::new(original)))
     }
 }
 impl<'a> From<super::intake::Admission<'a>> for Permit<'a> {
     fn from(original: super::intake::Admission<'a>) -> Self {
-        Self(Original::Intake(original))
+        Self(Original::Intake(Box::new(original)))
     }
 }
 impl<'a> Permit<'a> {

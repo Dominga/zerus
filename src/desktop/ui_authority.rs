@@ -3080,6 +3080,10 @@ mod tests {
             Validated::fixture(&action).team_person_action().unwrap(),
             intent
         );
+        // Native metadata execution is Unix-only; this expiry model uses
+        // its actual Process::read fixture. The shared binding checks above
+        // still compile on every target.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         assert!(
             Validated::fixture_expiring(&action, Instant::now() - Duration::from_secs(1))
                 .team_person_action()

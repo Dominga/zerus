@@ -1,8 +1,12 @@
 //! First Create binds existing directory objects, then creates only an absent
 //! database. It never adopts a file which appeared after the native review.
 use super::required;
+#[cfg(unix)]
 use crate::{platform, teams::store};
-use std::{fs::File, path::Path};
+#[cfg(unix)]
+use std::fs::File;
+use std::path::Path;
+#[cfg(unix)]
 use zerus_client_core::desktop::team_person_actions as wire;
 use zerus_team_plan::Problem;
 type Result<T> = std::result::Result<T, Problem>;
@@ -42,7 +46,9 @@ pub(super) fn root(state: &Path) -> Result<String> {
 }
 
 pub(super) struct Birth {
+    #[cfg(unix)]
     file: File,
+    #[cfg(unix)]
     root: String,
 }
 impl Birth {

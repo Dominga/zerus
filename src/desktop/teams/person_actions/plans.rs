@@ -226,6 +226,54 @@ mod tests {
     }
 
     #[test]
+    fn native_plan_staging_preserves_the_existing_maximum_draft_input() {
+        let mut plan = plan(true);
+        let wire::Action::Team { change } = &mut plan.action else {
+            unreachable!()
+        };
+        let TeamAction::SubmitDraftPhase { draft, .. } = change.as_mut() else {
+            unreachable!()
+        };
+        let node = draft.nodes[0].clone();
+        draft.nodes = (1..=16)
+            .map(|id| {
+                let mut node = node.clone();
+                node.id = id;
+                node.text = "x".repeat(15_000);
+                node
+            })
+            .collect();
+        // Fill the exact byte boundary without exceeding any task text's
+        // separate product bound. These are request DTOs, not stored rows.
+        let mut remaining = 250_000 - serde_json::to_vec(draft).unwrap().len();
+        for node in &mut draft.nodes {
+            let add = remaining.min(16_384 - node.text.len());
+            node.text.push_str(&"x".repeat(add));
+            remaining -= add;
+        }
+        assert_eq!(remaining, 0);
+        assert_eq!(serde_json::to_vec(draft).unwrap().len(), 250_000);
+        assert!(plan.valid());
+        let reference = plan.reference().unwrap();
+        assert!(reference.bytes < wire::PLAN_BYTES as u64);
+        let scope = scope();
+        let mut cache = Cache::new(scope.clone());
+        for piece in pieces(&scope, &plan) {
+            assert!(serde_json::to_vec(&piece).unwrap().len() < 64 << 10);
+            cache.stage(piece).unwrap();
+        }
+        assert_eq!(*cache.get(&reference).unwrap(), plan);
+        let wire::Action::Team { change } = &mut plan.action else {
+            unreachable!()
+        };
+        let TeamAction::SubmitDraftPhase { draft, .. } = change.as_mut() else {
+            unreachable!()
+        };
+        draft.nodes.last_mut().unwrap().text.push('x');
+        assert!(!plan.valid(), "the original draft byte bound still applies");
+    }
+
+    #[test]
     fn scope_content_and_request_identity_cannot_replace_an_existing_plan() {
         let scope = scope();
         let plan = plan(false);

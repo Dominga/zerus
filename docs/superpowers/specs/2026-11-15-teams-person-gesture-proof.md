@@ -381,9 +381,24 @@ absence, then exclude another first-store creator through setup. The proof is
 checked before setup as well as under the actual Teams writer transaction.
 The receipt binds the database object that was created, not merely the earlier
 absence. An existing or replaced store cannot be adopted through an absent
-binding. Ordinary older opens are fenced by the new schema; already-open old
-executables and arbitrary same-user store injection remain outside this
-boundary and require operational deployment of current writers.
+binding. Ordinary older opens are fenced by the new schema. Supported older
+writers with an already-open connection must also re-read the monotonic
+execution floor under the writer lock, before original-receipt replay or any
+write. Arbitrary same-user executable replacement and direct store injection
+remain outside the stated boundary.
+
+The cumulative S2 core floor is 7. Publication 5 and separately reviewed
+rework 6 must be admitted first, and the engine which activates 7 must
+understand both. A later floor 6 cannot fence an engine already writing at 7.
+Neither ordinary open nor feature activation may lower an existing mark.
+The registry owns these numbers; S2 must not use a temporary alternative
+floor or combine the separately reviewed rework slice with this authority
+change. The migration preserves existing native nonces and receipts and all
+publication/rework rows. It creates the intake evidence leaf only when
+entirely absent in a legacy layout; a partial, corrupt or missing required
+current-layout leaf is unavailable and must not be reconstructed. Both
+writer-lock orderings and a connection opened before activation need explicit
+controls before final integration.
 
 Intake is a compound metadata action. Project locks precede the Teams writer
 lock. Native admission and a durable exact-request reservation must precede

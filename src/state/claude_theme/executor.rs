@@ -7,7 +7,7 @@ use super::{
 };
 use backend::{Capture, InputClaim, InputState, Key, PaneInfo, TerminalBackend};
 use std::{
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     process::ExitStatus,
     sync::Arc,
     time::{Duration, Instant},
@@ -39,7 +39,10 @@ impl Ticket {
             started: None,
         })
     }
-    fn binding<C: supervisor::ChildStatus>(&self, spawned: &supervisor::Spawned<C>) -> Option<Binding> {
+    fn binding<C: supervisor::ChildStatus>(
+        &self,
+        spawned: &supervisor::Spawned<C>,
+    ) -> Option<Binding> {
         let r = &spawned.record;
         if self.spent
             || !eligible(r)
@@ -129,7 +132,11 @@ fn screen(native: &Native) -> Result<String> {
         .map_err(|e| e.to_string())
 }
 
-fn observed<C: supervisor::ChildStatus>(native: &Native, child: &mut C, expected: &parser::Panel) -> Result<()> {
+fn observed<C: supervisor::ChildStatus>(
+    native: &Native,
+    child: &mut C,
+    expected: &parser::Panel,
+) -> Result<()> {
     // Every Child probe follows the preceding helper's actual wait/EOF/joins.
     alive(child, &native.0.record)?;
     native.0.check()?;
@@ -190,9 +197,13 @@ fn confirm<C: supervisor::ChildStatus>(
     Err("Claude appearance advancement is unconfirmed; automatic Enter will not repeat".into())
 }
 
-fn capture(binding: Binding, until: Instant) -> Result<String> {
+fn capture(
+    binding: Binding,
+    until: Instant,
+    enrollment: Option<Arc<supervisor::AppearanceProducer>>,
+) -> Result<String> {
     let pane = string(&binding.record, "pane").to_owned();
-    let (source, done) = owner::Observation::new(binding, until)?;
+    let (source, done) = owner::Observation::new(binding, until, enrollment)?;
     let result = catch_unwind(AssertUnwindSafe(|| {
         helper::run(&source, helper::Call::Capture(pane))
     }));
@@ -211,6 +222,11 @@ pub(in crate::state) fn wait<C: supervisor::ChildStatus>(
     let Some(binding) = ticket.binding(spawned) else {
         return supervisor::wait(&mut spawned.child);
     };
+    let appearance = match spawned.child.appearance(&spawned.record, &ticket.request) {
+        Ok(appearance) => appearance,
+        Err(_) => return supervisor::wait(&mut spawned.child),
+    };
+    let enrollment = appearance.as_ref().map(supervisor::Appearance::producer);
     let started = *ticket.started.get_or_insert_with(Instant::now);
     let cap = started + Duration::from_secs(60);
     loop {
@@ -221,7 +237,7 @@ pub(in crate::state) fn wait<C: supervisor::ChildStatus>(
             break;
         }
         let until = (Instant::now() + Duration::from_secs(3)).min(cap);
-        let screen = match capture(binding.clone(), until) {
+        let screen = match capture(binding.clone(), until, enrollment.clone()) {
             Ok(screen) => screen,
             Err(_) => break,
         };
@@ -233,6 +249,7 @@ pub(in crate::state) fn wait<C: supervisor::ChildStatus>(
             match Scope::acquire(
                 binding.clone(),
                 (Instant::now() + Duration::from_secs(3)).min(cap),
+                enrollment.clone(),
             ) {
                 Ok(Acquisition::Busy) => {}
                 Ok(Acquisition::Spent) => {
@@ -281,5 +298,8 @@ pub(in crate::state) fn wait<C: supervisor::ChildStatus>(
             Duration::from_millis(1500)
         });
     }
+    // Closing this retained producer prevents any late borrower from enrolling;
+    // it says nothing about other writers, inherited custody or global drain.
+    drop(appearance);
     supervisor::wait(&mut spawned.child)
 }

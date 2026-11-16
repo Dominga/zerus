@@ -16,6 +16,13 @@ pub(in crate::state) struct OriginalDomain {
     configured_root: PathBuf,
 }
 impl OriginalDomain {
+    pub(super) fn matches(&self, record: &serde_json::Value) -> Result<()> {
+        self.current()?;
+        if record["session_id"] != self.scope.session || record["run_id"] != self.scope.run {
+            return Err(REFUSED.into());
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(in crate::state) fn fixture(root: &std::path::Path) -> Self {
         let scope = Run::new(

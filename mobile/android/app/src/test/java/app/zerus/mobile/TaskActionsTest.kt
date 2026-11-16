@@ -6,6 +6,11 @@ import app.zerus.mobile.replica.TaskStage
 import app.zerus.mobile.replica.TaskStore
 import app.zerus.mobile.replica.TaskTarget
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -32,6 +37,8 @@ class TaskActionsTest {
         /** Whole responses for an operation instead of its receipt: a lost answer, a relay refusal. */
         val raw = mutableMapOf<String, () -> MockResponse>()
         @Volatile var exchangeFails = false
+        @Volatile var exchangeError = "the project's tasks are busy; try again"
+        @Volatile var modifyExchange: ((JSONObject) -> Unit)? = null
         override fun dispatch(request: RecordedRequest): MockResponse {
             val envelope = JSONObject(request.body.readUtf8())
             synchronized(this) { envelopes += envelope }
@@ -40,8 +47,8 @@ class TaskActionsTest {
             raw[operation]?.let { return it() }
             val payload = envelope.getJSONObject("payload")
             val (state, result, error) = when {
-                operation == "task_exchange" && exchangeFails -> Triple("failed", JSONObject.NULL, "the project's tasks are busy; try again")
-                operation == "task_exchange" -> Triple("completed", JSONObject(store.answerExchange(payload.toString())), JSONObject.NULL)
+                operation == "task_exchange" && exchangeFails -> Triple("failed", JSONObject.NULL, exchangeError)
+                operation == "task_exchange" -> Triple("completed", JSONObject(store.answerExchange(payload.toString())).also { modifyExchange?.invoke(it) }, JSONObject.NULL)
                 else -> receipts.getValue(operation)(payload)
             }
             return MockResponse().setBody(JSONObject().put("request_id", id).put("state", state).put("result", result)
@@ -204,4 +211,183 @@ class TaskActionsTest {
         sync.exchangeNow(connection, key, "orchard", "computer-1")
         assertEquals("Filed on the phone", computer.store.get(task.uuid).text)
     }
+
+    @Test fun doneRowsRetainOpaqueIdentityAndMissingIdentityRemainsLegacy() = world { computer, connection, _, sync ->
+        computer.receipts["task_done"] = {
+            val original = JSONObject().put("machine", "node-1").put("session", "codex/old-label").put("session_id", "launch_id:original")
+            val legacy = JSONObject().put("machine", "node-1").put("session", "codex/legacy")
+            val rows = JSONArray().put(JSONObject().put("uuid", "task-1").put("id", "T-first1").put("text", "Original").put("session", original).put("accepted_at", 2))
+                .put(JSONObject().put("uuid", "task-2").put("id", "T-second").put("text", "Legacy").put("session", legacy).put("accepted_at", 1))
+            Triple("completed", JSONObject().put("schema", 1).put("tasks", rows).put("next", JSONObject.NULL)
+                .put("total", 2).put("recent", 2).put("damaged", 0), JSONObject.NULL)
+        }
+        val rows = sync.donePage(connection, key, "computer-1", null).rows
+        assertEquals("launch_id:original", rows[0].session?.sessionId)
+        assertEquals("", rows[1].session?.sessionId)
+    }
+
+    @Test fun aMalformedDoneIdentityCannotBecomeANameOnlyLegacyKey() = world { computer, connection, _, sync ->
+        computer.receipts["task_done"] = {
+            val session = JSONObject().put("machine", "node-1").put("session", "codex/api").put("session_id", 7)
+            val rows = JSONArray().put(JSONObject().put("uuid", "task-1").put("id", "T-first1").put("text", "Original").put("session", session).put("accepted_at", 2))
+            Triple("completed", JSONObject().put("schema", 1).put("tasks", rows).put("next", JSONObject.NULL)
+                .put("total", 1).put("recent", 1).put("damaged", 0), JSONObject.NULL)
+        }
+        var refused = false
+        try { sync.donePage(connection, key, "computer-1", null) }
+        catch (_: IllegalArgumentException) { refused = true }
+        assertTrue("Malformed identity must stay untrusted", refused)
+    }
+
+    private fun refuse(answer: JSONObject, vararg documents: String) {
+        answer.put("refused", JSONArray(documents.map { JSONObject().put("uuid", it).put("error", "Forced private document refusal") }))
+    }
+    @Test fun aRefusedSelectedTaskCannotAuthorizeSend() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement")
+        computer.modifyExchange = { refuse(it, task.uuid) }
+        computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertFalse(computer.operations().contains("task_send"))
+    }
+    @Test fun aRefusedProjectCannotAuthorizeSend() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement")
+        computer.modifyExchange = { refuse(it, "project") }
+        computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertFalse(computer.operations().contains("task_send"))
+    }
+    @Test fun anUnrelatedRefusedDocumentStillAllowsTheSelectedTask() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement"); val other = added(computer.store, "Unrelated requirement")
+        computer.modifyExchange = { refuse(it, other.uuid) }
+        computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+        assertEquals(TaskOutcome.Done, sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api"))
+        assertEquals(1, computer.operations().count { it == "task_send" })
+    }
+    @Test fun aLaterCleanPageCannotEraseASelectedTaskRefusal() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement"); val pages = java.util.concurrent.atomic.AtomicInteger()
+        computer.modifyExchange = { if (pages.incrementAndGet() == 1) { refuse(it, task.uuid); it.put("more", true) } }
+        computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertTrue("The proof must span multiple pages", pages.get() >= 2)
+        assertFalse(computer.operations().contains("task_send"))
+    }
+    @Test fun aSelectedFetchRefusalCannotBeReportedAsFreshTaskState() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement")
+        computer.modifyExchange = { refuse(it, task.uuid) }
+        assertTrue(runCatching { sync.exchangeNow(connection, key, "orchard", "computer-1", fetch = listOf(task.uuid)) }.isFailure)
+    }
+    @Test fun settlingUnknownHoldsKeepsTheRefusedTaskAndNeverRepeatsSend() = world { computer, connection, _, sync ->
+        val first = added(computer.store, "First requirement"); val second = added(computer.store, "Second requirement")
+        computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, "Unknown private outcome") }
+        for (task in listOf(first, second)) {
+            assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        }
+        computer.modifyExchange = { refuse(it, first.uuid) }
+        sync.settleSends(connection) { "orchard" }
+        assertTrue("A refused task cannot release its original hold", sync.held(first.uuid))
+        assertFalse("The unrelated valid task can settle", sync.held(second.uuid))
+        assertEquals(2, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun anUnknownOriginalSendCannotBeRepeatedByTheCaller() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original requirement")
+        computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, "Unknown private outcome") }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertEquals(1, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun cancellingAfterTheOriginalPostKeepsItsUnknownHold() = world { computer, connection, _, sync -> coroutineScope {
+        val task = added(computer.store, "Original requirement")
+        val entered = java.util.concurrent.CountDownLatch(1); val release = java.util.concurrent.CountDownLatch(1)
+        computer.receipts["task_send"] = {
+            entered.countDown()
+            check(release.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "The private original-result gate did not settle" }
+            Triple("completed", JSONObject(), JSONObject.NULL)
+        }
+        val original = async { sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") }
+        try {
+            assertTrue(withContext(Dispatchers.IO) { entered.await(10, java.util.concurrent.TimeUnit.SECONDS) })
+            original.cancel(); release.countDown(); original.cancelAndJoin()
+            assertTrue("A posted original stays held after caller cancellation", sync.held(task.uuid))
+            assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+            assertEquals(1, computer.operations().count { it == "task_send" })
+        } finally { release.countDown(); original.cancelAndJoin() }
+    } }
+
+    @Test fun boundedUnknownSettlementAdvancesPastRefusalsWhileNewHoldsArrive() = world { computer, connection, _, sync ->
+        val tasks = (1..65).map { added(computer.store, "Requirement $it") }
+        computer.receipts["task_send"] = { Triple("uncertain", JSONObject.NULL, "Unknown private outcome") }
+        for (task in tasks) assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        val ordered = tasks.map { it.uuid }.sorted(); val refused = ordered.take(64); val last = ordered.last()
+        computer.modifyExchange = { refuse(it, *refused.toTypedArray()) }
+        sync.settleSends(connection) { "orchard" }
+        assertTrue("One bounded page must retain the later original", sync.held(last))
+        val arrival = added(computer.store, "New requirement")
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", arrival.uuid, "codex/api") is TaskOutcome.Uncertain)
+        sync.settleSends(connection) { "orchard" }
+        assertFalse("The cursor must advance beyond the refused page", sync.held(last))
+        sync.settleSends(connection) { "orchard" }
+        assertFalse("An arriving original is visited without dropping older refusals", sync.held(arrival.uuid))
+        assertTrue(refused.all(sync::held)); assertEquals(66, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun locallyRefusedTaskOrProjectUpdatesCannotAuthorizeSend() {
+        for (project in listOf(false, true)) world { computer, connection, _, sync ->
+            val task = added(computer.store, "Selected requirement")
+            val injected = java.util.concurrent.atomic.AtomicBoolean()
+            computer.modifyExchange = { answer -> if (injected.compareAndSet(false, true)) answer.getJSONArray("updates").put(JSONObject()
+                .put("task", if (project) JSONObject.NULL else task.uuid)
+                .put("bytes", java.util.Base64.getEncoder().encodeToString("invalid-private-task-snapshot".toByteArray()))) }
+            computer.receipts["task_send"] = { Triple("completed", JSONObject(), JSONObject.NULL) }
+            assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+            assertFalse(computer.operations().contains("task_send"))
+        }
+    }
+    @Test fun aForeignConnectionCannotUseTheOriginalProjectForAnAction() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Selected requirement")
+        val foreign = key.copy(connectionId = "workspace-b")
+        assertTrue(sync.send(connection, foreign, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        assertTrue(computer.operations().isEmpty())
+    }
+
+
+    @Test fun aBusyProofBeforeTheActionNeverPostsInput() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original task")
+        val busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.exchangeError = busy; computer.exchangeFails = true
+        val outcome = sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api")
+        assertTrue(outcome.toString(), outcome is TaskOutcome.Refused)
+        assertTrue((outcome as TaskOutcome.Refused).reason.contains(busy))
+        assertFalse(sync.held(task.uuid))
+        assertEquals(0, computer.operations().count { it == "task_send" })
+        computer.exchangeFails = false
+        sync.exchangeNow(connection, key, "orchard", "computer-1", listOf(task.uuid))
+        assertEquals(0, computer.operations().count { it == "task_send" })
+    }
+
+    @Test fun busyReadsCannotReleaseOrRepostTheOriginalUnknownSend() = world { computer, connection, _, sync ->
+        val task = added(computer.store, "Original task")
+        val busy = "The task history proof is busy; the saved copy is kept. Please try again."
+        computer.receipts["task_send"] = {
+            computer.exchangeError = busy; computer.exchangeFails = true
+            Triple("uncertain", JSONObject.NULL, "Original delivery unknown")
+        }
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Uncertain)
+        val original = computer.envelopes.single { it.getString("operation") == "task_send" }.getString("request_id")
+        repeat(2) { sync.settleSends(connection) { "orchard" } }
+        assertTrue(sync.held(task.uuid))
+        assertTrue(sync.send(connection, key, "orchard", "computer-1", task.uuid, "codex/api") is TaskOutcome.Refused)
+        computer.receipts["task_done"] = { Triple("failed", JSONObject.NULL, busy) }
+        val done = runCatching { sync.donePage(connection, key, "computer-1", null) }
+        assertTrue(done.exceptionOrNull()?.message.orEmpty().contains(busy))
+        val fetch = runCatching { sync.exchangeNow(connection, key, "orchard", "computer-1", listOf(task.uuid)) }
+        assertTrue(fetch.exceptionOrNull()?.message.orEmpty().contains(busy))
+        assertTrue(sync.held(task.uuid))
+        computer.exchangeFails = false
+        sync.settleSends(connection) { "orchard" }
+        assertFalse(sync.held(task.uuid))
+        assertEquals(listOf(original), computer.envelopes.filter { it.getString("operation") == "task_send" }.map { it.getString("request_id") })
+    }
+
 }

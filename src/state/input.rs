@@ -832,73 +832,145 @@ pub(super) fn codex_wrapped_columns(record: &Value, screen: &str, x: usize, y: u
 }
 
 /// A hard-wrapped native model/path footer, with this run's exact folder.
-/// Rejoin only the exact model/folder content. Native word and hyphen wraps
-/// need not fill each row; the current width still bounds row size and count.
-pub(super) fn codex_wrapped_empty(record: &Value, screen: &str, x: usize, y: usize, columns: usize) -> bool {
+/// Rejoin the exact model/folder, or a bounded title continuation after them.
+/// Native word and hyphen wraps need not fill a folder row; title continuations
+/// require one necessary word wrap. The native width bounds every row.
+pub(super) fn codex_wrapped_empty(
+    record: &Value,
+    screen: &str,
+    x: usize,
+    y: usize,
+    columns: usize,
+) -> bool {
     use unicode_width::UnicodeWidthStr;
     if string(record, "agent") != "codex" || columns <= 2 || string(record, "cwd").is_empty() {
         return false;
     }
     let lines: Vec<_> = screen.lines().collect();
-    let Some(input) = lines.get(y) else { return false; };
-    if !styled_row(input).iter().skip(x).any(|(ch, dim)| !ch.is_whitespace() && *dim) {
+    let Some(input) = lines.get(y) else {
+        return false;
+    };
+    if !styled_row(input)
+        .iter()
+        .skip(x)
+        .any(|(ch, dim)| !ch.is_whitespace() && *dim)
+    {
         return false;
     }
     let mut style = TerminalStyle::default();
-    let rows: Vec<_> = lines.iter().map(|line| {
-        let cells = styled_cells(line, &mut style);
-        let plain: String = cells.iter().map(|(ch, _)| ch).collect();
-        let unshaded = cells.iter().filter(|(ch, _)| !ch.is_whitespace())
-            .all(|(_, cell)| !cell.background && !cell.inverse);
-        (plain, unshaded)
-    }).collect();
-    let Some(first) = (y + 1..rows.len()).find(|&i| !rows[i].0.trim().is_empty()) else { return false; };
-    if first + 2 >= rows.len() { return false; }
+    let rows: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let cells = styled_cells(line, &mut style);
+            let plain: String = cells.iter().map(|(ch, _)| ch).collect();
+            let unshaded = cells
+                .iter()
+                .filter(|(ch, _)| !ch.is_whitespace())
+                .all(|(_, cell)| !cell.background && !cell.inverse);
+            let unfaded = cells
+                .iter()
+                .filter(|(ch, _)| !ch.is_whitespace())
+                .all(|(_, cell)| !cell.dim);
+            (plain, unshaded, unfaded)
+        })
+        .collect();
+    let Some(first) = (y + 1..rows.len()).find(|&i| !rows[i].0.trim().is_empty()) else {
+        return false;
+    };
+    if first + 2 >= rows.len() {
+        return false;
+    }
     let last = rows.len() - 1;
     let shortcuts = &rows[last].0;
-    if !shortcuts.trim_start().starts_with("← for agents · ? for shortcuts")
-        || !codex_shortcuts_footer(shortcuts) || !rows[first..].iter().all(|r| r.1)
+    if !shortcuts
+        .trim_start()
+        .starts_with("← for agents · ? for shortcuts")
+        || !codex_shortcuts_footer(shortcuts)
+        || !rows[first..].iter().all(|r| r.1)
     {
         return false;
     }
     let model = codex_footer_model(record);
     let first_row = &rows[first].0;
-    let Some(label_model) = first_row.split_whitespace().next() else { return false; };
-    if !first_row.starts_with("  ") || first_row[2..].starts_with(char::is_whitespace)
+    let Some(label_model) = first_row.split_whitespace().next() else {
+        return false;
+    };
+    if !first_row.starts_with("  ")
+        || first_row[2..].starts_with(char::is_whitespace)
         || !codex_status_row(first_row, model)
         || !codex_model_footer(first_row, model.or(Some(label_model)))
     {
         return false;
     }
-    let Some((label, path)) = first_row.split_once(" · ") else { return false; };
+    let Some((label, path)) = first_row.split_once(" · ") else {
+        return false;
+    };
     let prefix = format!("{label} · ");
-    if rows[first..=last].iter().any(|(row, _)| row.width() > columns) {
+    if rows[first..=last]
+        .iter()
+        .any(|(row, _, _)| row.width() > columns)
+    {
         return false;
     }
     let cwd = string(record, "cwd");
     let home_alias = crate::platform::home().and_then(|home| shown_path::home_alias(cwd, &home));
-    let Some(folder) = std::iter::once(cwd).chain(home_alias.as_deref()).find(|folder| {
-        // Two cells are the native left margin on every physical footer row.
-        // Permit no more rows than this exact footer needs at the fresh width.
-        let needed = (prefix.width() + folder.width() - 2).div_ceil(columns - 2);
-        if last - first != needed { return false; }
-        let windows = shown_path::drive(cwd);
-        let Some(mut remaining) = shown_path::strip_prefix(folder, path, windows) else { return false; };
-        for (row, _) in &rows[first + 1..last] {
-            let Some(part) = row.strip_prefix("  ").filter(|s| !s.trim().is_empty()) else { return false; };
-            // A native word wrap may consume exactly one separating space.
-            // Hyphens and every other character must remain in the capture.
-            let rest = shown_path::strip_prefix(remaining, part, windows).or_else(|| {
-                shown_path::strip_prefix(remaining.strip_prefix(' ')?, part, windows)
-            });
-            let Some(rest) = rest else { return false; };
-            remaining = rest;
-        }
-        remaining.is_empty()
-    }) else { return false; };
+    let Some(folder) = std::iter::once(cwd)
+        .chain(home_alias.as_deref())
+        .find(|folder| {
+            // Two cells are the native left margin on every physical footer row.
+            // Permit no more rows than this exact footer needs at the fresh width.
+            let needed = (prefix.width() + folder.width() - 2).div_ceil(columns - 2);
+            if last - first != needed {
+                return false;
+            }
+            let windows = shown_path::drive(cwd);
+            let Some(mut remaining) = shown_path::strip_prefix(folder, path, windows) else {
+                return false;
+            };
+            for (row, _, _) in &rows[first + 1..last] {
+                let Some(part) = row.strip_prefix("  ").filter(|s| !s.trim().is_empty()) else {
+                    return false;
+                };
+                // A native word wrap may consume exactly one separating space.
+                // Hyphens and every other character must remain in the capture.
+                let rest = shown_path::strip_prefix(remaining, part, windows).or_else(|| {
+                    shown_path::strip_prefix(remaining.strip_prefix(' ')?, part, windows)
+                });
+                let Some(rest) = rest else {
+                    return false;
+                };
+                remaining = rest;
+            }
+            remaining.is_empty()
+        })
+        .or_else(|| {
+            // A named thread can wrap its title after a complete model/cwd row.
+            // The title is decoration, never an identity or input-authority source.
+            if model.is_none() || last - first != 2 || !rows[first..last].iter().all(|row| row.2) {
+                return None;
+            }
+            std::iter::once(cwd)
+                .chain(home_alias.as_deref())
+                .find(|folder| {
+                    wrapped_title::matches(
+                        folder,
+                        first_row,
+                        &rows[first + 1].0,
+                        columns,
+                        shown_path::drive(cwd),
+                    )
+                })
+        })
+    else {
+        return false;
+    };
     // Folding footer rows does not move the cursor or alter the composer.
     // Reuse its existing cursor, placeholder and input-boundary checks.
-    let folded = format!("{}\n\x1b[0m{prefix}{folder}\n{}", lines[..first].join("\n"), lines[last]);
+    let folded = format!(
+        "{}\n\x1b[0m{prefix}{folder}\n{}",
+        lines[..first].join("\n"),
+        lines[last]
+    );
     composer_empty_for_model("codex", &folded, x, y, model)
 }
 
@@ -3265,3 +3337,8 @@ mod clear_input_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod wrapped_title_tests;
+
+mod wrapped_title;

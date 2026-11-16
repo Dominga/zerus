@@ -3,13 +3,16 @@
 use serde_json::Value;
 
 // Dormant durable-writer support. The disabled original supervisor initializes
-// its own domain; no real writer/marker/controller/effect entry is enrolled.
+// its own domain and fixed Claude startup helpers. Ordinary mutators, marker
+// and controller entry points remain unenrolled.
 // Saved rows and native locks supply no Terminate or cleanup authority.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(dead_code)]
 mod writer_records;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use writer_records::domain::{creation_record, OriginalDomain};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) use writer_records::startup::{StartupAdmission, StartupExchange};
 
 pub(super) const WAIT: &str =
     "Session termination is unfinished; inspect its original result before changing the session";

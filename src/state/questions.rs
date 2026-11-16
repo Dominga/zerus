@@ -914,7 +914,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let _answer_guard = lock(Some(&answer_lock(&request.expected_run_id)?))?;
     // Nested canonical receipt checks share this one budget; a new connection
     // or terminal guard must not restart the person's SQLite wait.
-    let _receipt_wait = receipt_index::QuestionAdmission::new();
+    let mut receipt_wait = receipt_index::QuestionAdmission::new();
     // Only the preparation is locked. Awaiting the UI must not block provider
     // hooks which confirm the very answer that we are waiting for.
     let (record, question, answers, mut receipt) = {
@@ -935,6 +935,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             return Err("delivery uncertain: this answer request may already be in Terminal; do not resend automatically".into());
         }
+        receipt_wait.prioritize(&absolute_root()?)?;
         let record = matching_record(name, &request)?;
         let question = current(&record)?
             .into_iter()

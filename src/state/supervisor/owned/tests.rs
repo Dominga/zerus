@@ -121,12 +121,16 @@ fn legacy_census_refuses_owned_metadata_before_any_native_stop() {
         let record = json!({"original_owner":owner,"pid":std::process::id()});
         let error = processes::Termination::prepare(&record).err().unwrap();
         assert!(error.contains("cohort-aware"));
-        assert!(super::super::check_relaunch(&record)
-            .unwrap_err()
-            .contains("without replay"));
-        assert!(archive::save(&record)
-            .unwrap_err()
-            .contains("cohort finalization"));
+        assert!(
+            super::super::check_relaunch(&record)
+                .unwrap_err()
+                .contains("without replay")
+        );
+        assert!(
+            archive::save(&record)
+                .unwrap_err()
+                .contains("cohort finalization")
+        );
     }
 }
 #[test]
@@ -180,11 +184,14 @@ fn owned_mac_facade_waits_for_and_caches_its_actual_original_child() {
         .spawn()
         .unwrap();
     let mut original = Original {
-        domain: terminating::OriginalDomain::fixture(&_d.path().join("state")),
+        domain: Arc::new(terminating::OriginalDomain::fixture(
+            &_d.path().join("state"),
+        )),
+        appearance: None,
         root,
         exit: None,
         channel,
-        source,
+        source: Arc::new(source),
         binding,
         startup: true,
         unresolved: false,

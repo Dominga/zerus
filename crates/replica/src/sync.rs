@@ -104,12 +104,13 @@ const CACHE_MARK: &str = "inventory.repaired";
 
 /// What the mark holds for the cache `bytes`.
 fn cache_mark(bytes: &[u8]) -> String {
-    // 2: a cut-over task's entry follows its mark, which a load raises
+    // 3: retry any negative rows made by the former two-second proof policy.
+    // A cut-over task's entry still follows its mark, which a load raises
     // before its version is acknowledged. The mark's format joins it: a
     // cache made under another rule for a readable mark (before the seal,
     // for one) is never trusted, so every task is read again.
     format!(
-        "schema-repair-2 mark-{} {:x}\n",
+        "schema-repair-3 proof-budget-1 mark-{} {:x}\n",
         crate::store::MARK_FORMAT,
         Sha256::digest(bytes)
     )
@@ -369,9 +370,13 @@ impl ProjectStore {
         let mut tasks = Vec::new();
         let mut damaged = 0;
         for (at, uuid) in &done[start..end] {
-            let Ok(view) = self.load(uuid).and_then(|task| task.view()) else {
-                damaged += 1;
-                continue;
+            let view = match self.load(uuid).and_then(|task| task.view()) {
+                Ok(view) => view,
+                Err(error) if error.kind() == crate::ErrorKind::Busy => return Err(error),
+                Err(_) => {
+                    damaged += 1;
+                    continue;
+                }
             };
             tasks.push(DoneRow {
                 uuid: uuid.clone(),
@@ -463,6 +468,7 @@ impl ProjectStore {
                             session: task.session(),
                         }),
                     },
+                    (Err(error), _) if error.kind() == crate::ErrorKind::Busy => return Err(error),
                     (Err(error), files) => Cached {
                         files,
                         version: Version::new(),
@@ -629,6 +635,9 @@ impl ProjectStore {
             match result {
                 Ok(changed) => imported.changed += usize::from(changed),
                 Err(refusal) => {
+                    if refusal.error.kind() == crate::ErrorKind::Busy {
+                        return Err(refusal.error);
+                    }
                     if refusal.refresh {
                         imported.refresh.insert(name.clone());
                     }
@@ -668,7 +677,7 @@ impl ProjectStore {
             match self.load(uuid) {
                 Ok(mut task) => {
                     let before = task.current_vv();
-                    if !task.import_block(bytes) {
+                    if !task.import_block(bytes)? {
                         let shallow = task.is_shallow();
                         return Err(Refusal {
                             error: Error::new(if shallow {
@@ -695,9 +704,11 @@ impl ProjectStore {
                 // the cutover to execution attempts can be lost (`recovered`);
                 // its files are set aside, not removed. Otherwise it stays
                 // damaged and closed for a person's review.
+                Err(error) if error.kind() == crate::ErrorKind::Busy => return Err(error.into()),
                 Err(damaged) => match self.recovered(uuid, bytes) {
                     Recovery::Whole(task) | Recovery::Replaced(task) => (task, true),
                     Recovery::Unreadable => return Err(damaged.into()),
+                    Recovery::Busy(error) => return Err(error.into()),
                     Recovery::Kept(reason) => {
                         return Err(Refusal {
                             error: Error::new(format!(
@@ -812,9 +823,17 @@ impl ProjectStore {
             Err(_) => return Recovery::Kept(Keep::UnreadableLocalData),
         };
         let (found, intact) = crate::store::blocks(&local);
-        let applied = found
-            .into_iter()
-            .all(|(payload, _)| task.import_block(payload));
+        let mut applied = true;
+        for (payload, _) in found {
+            match task.import_block(payload) {
+                Ok(true) => {}
+                Ok(false) => {
+                    applied = false;
+                    break;
+                }
+                Err(error) => return Recovery::Busy(error),
+            }
+        }
         if !marked {
             return if task.execution_managed() {
                 Recovery::Kept(Keep::AttemptEvidence)
@@ -860,6 +879,8 @@ impl ProjectStore {
 }
 
 enum Recovery {
+    /// Temporary incomplete proof never authorizes replacement or damage.
+    Busy(Error),
     /// This copy's whole state with the other document merged in.
     Whole(TaskDoc),
     /// The other document, with every block saved here, replaces this copy.
@@ -1508,7 +1529,7 @@ mod tests {
         assert!(intact && found.len() == 1, "{} blocks", found.len());
         let mut task = store.load(uuid).unwrap();
         let before = task.current_vv();
-        assert!(task.import_block(found[0].0));
+        assert!(task.import_block(found[0].0).unwrap());
         assert_eq!(task.current_vv(), before);
     }
 
@@ -1989,7 +2010,7 @@ mod tests {
             TaskDoc::from_bytes(&fs::read(store.snapshot_path(&uuid)).unwrap()).unwrap();
         let cut = fs::read(store.updates_path(&uuid)).unwrap();
         for (payload, _) in crate::store::blocks(&cut).0 {
-            assert!(older.import_block(payload));
+            assert!(older.import_block(payload).unwrap());
         }
         assert!(older.held().unwrap().is_none());
         write_atomic(&store.snapshot_path(&uuid), &older.snapshot().unwrap()).unwrap();
@@ -2359,7 +2380,7 @@ mod tests {
             for (payload, _) in
                 crate::store::blocks(&fs::read(store.updates_path(&uuid)).unwrap()).0
             {
-                assert!(raw.import_block(payload));
+                assert!(raw.import_block(payload).unwrap());
             }
             let mark = mark_version(&store, &uuid).unwrap();
             for version in &saved {

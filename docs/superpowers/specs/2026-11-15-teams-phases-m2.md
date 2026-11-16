@@ -91,14 +91,17 @@ publication alone raises the private execution floor to 5 in its operation
 transaction. Layout 6 is reserved for rework in slice 4 and remains refused
 by slice 3. Layout 7 is reserved for .31 slice 2 native Person controls and
 also remains refused. Legacy queue 2 and planning 3 remain migration inputs. These core
-allocations live in `src/teams/store/layout.rs`, with the allocation uniqueness
-control; timer layouts 8 through 12 and raw pinned mark 2147483660 are separate.
+allocations live in the sole `src/teams/store/versions.rs` registry, with the
+allocation uniqueness control; `layout.rs` keeps only aliases and behavior helpers.
+Timer layouts 8 through 12 and raw pinned mark 2147483660 are separate.
 The supported ceiling is not the ordinary-open migration target.
 
 Execution floors are monotonic, so activation must preserve their cumulative
 semantics: an engine writing native floor 7 must already understand rework 6.
-Raising 6 cannot fence an older engine that has already written 7. Keep that
-activation order, or reserve and qualify a later combined floor first.
+Raising 6 cannot fence an older engine that has already written 7. The Teams
+coordinator confirmed separate S4/rework6 and its review ahead of final native7
+integration. Keep publication5, then rework6, then native7; no downgrade or
+alternate floor.
 
 ## Operations and authority
 

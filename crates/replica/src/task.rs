@@ -422,9 +422,14 @@ impl TaskDoc {
         Ok(self.doc.export(ExportMode::updates_in_range(spans))?)
     }
 
-    /// Applies stored updates; false when they cannot be applied completely.
-    pub(crate) fn import_block(&mut self, bytes: &[u8]) -> bool {
-        self.apply_checked(bytes).is_ok()
+    /// Applies stored updates. Invalid/incomplete bytes retain the existing
+    /// fold/recovery behavior; temporary proof exhaustion is never corruption.
+    pub(crate) fn import_block(&mut self, bytes: &[u8]) -> Result<bool> {
+        match self.apply_checked(bytes) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == crate::ErrorKind::Busy => Err(error),
+            Err(_) => Ok(false),
+        }
     }
 
     fn meta(&self) -> LoroMap {
@@ -1833,7 +1838,7 @@ mod tests {
         let mut merged = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
         let old = stale.export_since_vv(&merged.current_vv()).unwrap();
         assert!(
-            !merged.import_block(&old),
+            !merged.import_block(&old).unwrap(),
             "a live import must refuse the pre-floor branch"
         );
         // Decode a literal older importer's result to retain the raw-schema
@@ -2054,7 +2059,9 @@ mod tests {
             } else {
                 (cancelling, reviving)
             };
-            assert!(first.import_block(&second.export_since_vv(&first.current_vv()).unwrap()));
+            assert!(first
+                .import_block(&second.export_since_vv(&first.current_vv()).unwrap())
+                .unwrap());
             let view = first.view().unwrap();
             assert!(
                 matches!(view.stage, Stage::Todo | Stage::Review),
@@ -2081,7 +2088,9 @@ mod tests {
         let mut two = TaskDoc::from_bytes(&marked).unwrap();
         one.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
         two.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
-        assert!(one.import_block(&two.export_since_vv(&one.current_vv()).unwrap()));
+        assert!(one
+            .import_block(&two.export_since_vv(&one.current_vv()).unwrap())
+            .unwrap());
         let view = one.view().unwrap();
         assert_eq!(view.stage, Stage::Todo);
         assert_eq!(view.cancelled_at, None);

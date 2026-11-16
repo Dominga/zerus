@@ -58,6 +58,25 @@ impl Store {
         budget: &Budget,
         cancel: &AtomicBool,
     ) -> Result<CatchupProgress> {
+        self.consume_mode(state, budget, cancel, false)
+    }
+
+    pub(in crate::state::search_index) fn prepare_metadata(
+        &mut self,
+        state: &Path,
+        budget: &Budget,
+        cancel: &AtomicBool,
+    ) -> Result<CatchupProgress> {
+        self.consume_mode(state, budget, cancel, true)
+    }
+
+    fn consume_mode(
+        &mut self,
+        state: &Path,
+        budget: &Budget,
+        cancel: &AtomicBool,
+        metadata_only: bool,
+    ) -> Result<CatchupProgress> {
         if budget.files > 256
             || budget.directory_entries > 2000
             || budget.records > 512
@@ -72,35 +91,49 @@ impl Store {
             return Ok(progress);
         }
         self.catalog_schema()?;
+        // Revisit older decoder refusals and seed the compact cache in bounded
+        // batches. A failed parse in this decoder version remains unavailable.
+        self.index.connection().execute("UPDATE catalog_queue SET done=0,skipped=0,identity=NULL WHERE id IN(SELECT id FROM (SELECT id,done,skipped,identity FROM catalog_queue WHERE reader_version<? ORDER BY reader_version,id LIMIT 32) WHERE done<>0 OR skipped<>0 OR identity IS NOT NULL)", [metadata_cache::VERSION]).map_err(|e| e.to_string())?;
         progress.pruned_paths = self.prune_catalog(budget, cancel)?;
         self.cleanup()?;
-        let mut reader = metadata::Reader::default();
-        self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
+        let mut reader = metadata::Reader::cached(state);
+        if !metadata_only {
+            self.sweep(state, budget, &mut progress.ingestion, cancel, &mut reader)?;
+        }
         let last:i64=self.index.connection().query_row("SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='queue_cursor'),0)",[],|r|r.get(0)).map_err(|e|e.to_string())?;
-        let mut rows = self.queue_page(last)?;
+        let mut rows = self.queue_page(if metadata_only { 0 } else { last }, metadata_only)?;
         if rows.is_empty() && last > 0 {
-            rows = self.queue_page(0)?;
+            rows = self.queue_page(0, metadata_only)?;
         }
-        for (id, path, kind) in rows {
-            if !progress.ingestion.available(budget, cancel) {
-                progress.ingestion.stopped = true;
-                break;
+        // Metadata preparation publishes only one bounded cache/identity page.
+        // Group its durable writes; history retains its per-source atomic step.
+        let batch = metadata_only && self.begin_step()?;
+        let rows_result = (|| -> Result<()> {
+            for (id, path, kind) in rows {
+                if !progress.ingestion.available(budget, cancel) {
+                    progress.ingestion.stopped = true;
+                    break;
+                }
+                // One queued source is one step transaction: its identity, index
+                // rows, input cursor, progress and queue completion commit together.
+                let owned = self.begin_step()?;
+                let row = self.consume_row(
+                    state,
+                    (id, path, kind, metadata_only),
+                    budget,
+                    cancel,
+                    &mut progress,
+                    &mut reader,
+                );
+                let ended = self.end_step(owned);
+                row?;
+                ended?;
             }
-            // One queued source is one step transaction: its identity, index
-            // rows, input cursor, progress and queue completion commit together.
-            let owned = self.begin_step()?;
-            let row = self.consume_row(
-                state,
-                (id, path, kind),
-                budget,
-                cancel,
-                &mut progress,
-                &mut reader,
-            );
-            let ended = self.end_step(owned);
-            row?;
-            ended?;
-        }
+            Ok(())
+        })();
+        let batch_end = self.end_step(batch);
+        rows_result?;
+        batch_end?;
         let catalog = self.catalog_status()?;
         let coverage = self.index.status().map_err(|e| e.to_string())?;
         let ready = catalog["discovery"] == "complete"
@@ -119,16 +152,29 @@ impl Store {
     fn consume_row(
         &mut self,
         state: &Path,
-        (id, path, kind): (i64, PathBuf, String),
+        (id, path, kind, metadata_only): (i64, PathBuf, String, bool),
         budget: &Budget,
         cancel: &AtomicBool,
         progress: &mut CatchupProgress,
         reader: &mut metadata::Reader,
     ) -> Result<()> {
         let record = queued_record(state, &path, &kind, &mut progress.ingestion, budget, reader);
+        if metadata_only && matches!(&record, Ok(metadata::Record::OverBudget)) {
+            // This version records an attempt, not coverage. An oversized header
+            // stays pending/unknown and the rotating ingestion queue retries it;
+            // it must not pin all later preparation at the same directory prefix.
+            self.index
+                .connection()
+                .execute(
+                    "UPDATE catalog_queue SET reader_version=? WHERE id=?",
+                    params![metadata_cache::VERSION, id],
+                )
+                .map_err(|e| e.to_string())?;
+        }
         let mut record = match record {
             Ok(metadata::Record::Ready(record)) => record,
             Ok(metadata::Record::Deferred | metadata::Record::OverBudget) => {
+                reader.cache_into(self.index.connection(), &path)?;
                 progress.ingestion.stopped = true;
                 // Leave it pending, but let later bounded slices reach
                 // other paths even when this record needs a larger slice.
@@ -145,6 +191,7 @@ impl Store {
                 return Ok(());
             }
         };
+        reader.cache_into(self.index.connection(), &path)?;
         if kind == "archive" {
             rename::normalize_archive(&mut record)?;
         }
@@ -154,7 +201,8 @@ impl Store {
             progress.visited_paths += 1;
             return Ok(());
         }
-        if kind == "native" {
+        let native = kind == "native" || record["backend"] == "dsh";
+        if native {
             record["agent"] = json!("dsh");
         }
         let target = record_target(&record);
@@ -181,16 +229,21 @@ impl Store {
         self.index
             .connection()
             .execute(
-                "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0 WHERE id=?",
+                "UPDATE catalog_queue SET identity=?,source=?,updated=?,skipped=0,reader_version=? WHERE id=?",
                 params![
                     serde_json::to_string(&identity).map_err(|e| e.to_string())?,
                     source,
                     updated,
+                    metadata_cache::VERSION,
                     id
                 ],
             )
             .map_err(|e| e.to_string())?;
-        if kind == "native" {
+        if metadata_only && !native {
+            progress.visited_paths += 1;
+            return Ok(()); // History remains pending; fresh fallback can use its header.
+        }
+        if native {
             // The native engine remains authoritative; the existing bounded
             // query stays its fallback until an indexed adapter is admitted.
             if self.index.register(&target).is_ok() {
@@ -215,6 +268,7 @@ impl Store {
             progress.ingestion.locator_probes += read.locator_probes;
             progress.ingestion.records += read.records;
             progress.ingestion.bytes += read.bytes;
+            progress.ingestion.metadata_io += read.metadata_io;
             progress.ingestion.targets += read.targets;
             progress.ingestion.stopped |= read.stopped;
             progress.ingestion.errors.extend(read.errors);
@@ -252,7 +306,7 @@ impl Store {
     }
 
     fn skip_queued(&self, id: i64, shadow: bool) -> Result<()> {
-        self.index.connection().execute("UPDATE catalog_queue SET done=1,identity=?,source=NULL,skipped=?,fallback=? WHERE id=?",params![if shadow{"null"}else{""},if shadow{2}else{1},!shadow,id]).map_err(|e|e.to_string())?;
+        self.index.connection().execute("UPDATE catalog_queue SET done=1,identity=?,source=NULL,skipped=?,fallback=?,reader_version=? WHERE id=?",params![if shadow{"null"}else{""},if shadow{2}else{1},!shadow,metadata_cache::VERSION,id]).map_err(|e|e.to_string())?;
         Ok(())
     }
 
@@ -318,20 +372,30 @@ impl Store {
         }
         Ok(pruned)
     }
-    fn queue_page(&self, after: i64) -> Result<Vec<(i64, PathBuf, String)>> {
-        self.index
+    fn queue_page(&self, after: i64, metadata_only: bool) -> Result<Vec<(i64, PathBuf, String)>> {
+        let sql = if metadata_only {
+            "SELECT id,path,kind FROM catalog_queue WHERE reader_version<? AND id>=? ORDER BY reader_version,id LIMIT 32"
+        } else {
+            "SELECT id,path,kind FROM catalog_queue WHERE done=0 AND id>? ORDER BY id LIMIT 16"
+        };
+        let mut statement = self
+            .index
             .connection()
-            .prepare(
-                "SELECT id,path,kind FROM catalog_queue WHERE done=0 AND id>? ORDER BY id LIMIT 16",
-            )
-            .map_err(|e| e.to_string())?
-            .query_map([after], |r| {
-                Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<_>>()
+            .prepare(sql)
+            .map_err(|e| e.to_string())?;
+        let map = |r: &rusqlite::Row<'_>| {
+            Ok((r.get(0)?, PathBuf::from(r.get::<_, String>(1)?), r.get(2)?))
+        };
+        let rows = if metadata_only {
+            statement.query_map(params![metadata_cache::VERSION, after], map)
+        } else {
+            statement.query_map([after], map)
+        }
+        .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<_>>()
             .map_err(|e| e.to_string())
     }
+
 }
 
 fn queued_record(
@@ -345,17 +409,17 @@ fn queued_record(
     let parents = match kind {
         "binding" => vec![state.to_owned(), state.join("bindings"), state.join("sessions")],
         "archive" => vec![state.join("archives")],
-        "native" => vec![state.join("dsh/bindings")],
+        "native" => vec![state.join("dsh/bindings"), state.join("dsh/sessions")],
         _ => return Err("Unknown queued source kind".into()),
     };
-    if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(path, kind) {
+    if !parents.iter().any(|parent| path.parent() == Some(parent)) || !candidate(state, path, kind) {
         return Err("Queued source is outside this state configuration".into());
     }
     let record = match reader.read(path, progress, budget, 0)? {
         metadata::Record::Ready(record) => record,
         other => return Ok(other),
     };
-    if !record.is_object() || (kind != "native" && record["version"] != 1) {
+    if !record.is_object() || (kind != "native" && record["backend"] != "dsh" && record["version"] != 1) {
         return Err("Queued source is not a binding".into());
     }
     if kind == "native" && record["backend"] != "dsh" {

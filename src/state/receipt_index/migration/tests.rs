@@ -37,6 +37,7 @@ fn finishing(migration: &mut Migration, count: u128) {
         walk_errors: false,
         attempts: 0,
         catchup: None,
+        reparse: true,
         epoch: migration
             .catalog
             .db
@@ -249,3 +250,113 @@ mod insert_race;
 
 #[path = "catchup_tests.rs"]
 mod catchup;
+
+#[test]
+fn an_explicit_question_step_waits_before_reading_while_another_writer_is_active() {
+    let temp = tempfile::tempdir().unwrap();
+    let _wait = admission::Wait::new();
+    let mut migration = Migration::questions(temp.path()).unwrap();
+    let writer = Connection::open(temp.path().join(DATABASE)).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE receipt_meta SET value=value WHERE key='epoch'")
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        writer.execute_batch("COMMIT").unwrap();
+    });
+    let started = Instant::now();
+    let result = migration.step();
+    release.join().unwrap();
+    assert!(result.is_ok(), "transient writer contention must wait before the snapshot, not fail immediately: {result:?}");
+    eprintln!(
+        "QUESTION_HANDOFF elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    while !migration.step().unwrap() {}
+    let complete: bool = migration
+        .catalog
+        .db
+        .query_row(
+            "SELECT complete FROM receipt_sources WHERE source='question'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(complete);
+}
+
+#[test]
+fn bounded_advances_resume_discovery_instead_of_restarting_the_same_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("input_receipts");
+    fs::create_dir(&directory).unwrap();
+    for n in 1..=384_u128 {
+        let id = uuid::Uuid::from_u128(n).to_string();
+        fs::write(
+            directory.join(format!("{id}.json")),
+            json!({"request_id":id,
+            "name":"codex/fixture/progress","run_id":"run","conversation_id":"conversation",
+            "digest":"fixture","status":"submitted","submitted_at":n as f64})
+            .to_string(),
+        )
+        .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(directory.join(format!("{id}.json")))
+            .unwrap()
+            .set_times(
+                fs::FileTimes::new()
+                    .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(n as u64)),
+            )
+            .unwrap();
+    }
+    // Historical receipts are outside the native change-clock ambiguity
+    // window; the assertion still bounds every individual advance.
+    std::thread::sleep(Duration::from_millis(2100));
+    let mut complete = false;
+    for _ in 0..40 {
+        if advance(temp.path(), Duration::ZERO).unwrap() {
+            complete = true;
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "bounded invocations must retain committed discovery and row-count progress"
+    );
+    let catalog = Catalog::open(temp.path(), false).unwrap();
+    let state: (i64, bool) = catalog
+        .db
+        .query_row(
+            "SELECT indexed,complete FROM receipt_sources WHERE source='terminal'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(state, (384, true));
+}
+
+#[test]
+fn foreground_question_reconciliation_hands_off_the_background_writer() {
+    let temp = tempfile::tempdir().unwrap();
+    let foreground = Migration::questions(temp.path()).unwrap();
+    assert!(priority(temp.path(), true).unwrap().is_none());
+    drop(foreground);
+    assert!(priority(temp.path(), true).unwrap().is_some());
+}
+
+#[test]
+fn a_busy_background_step_keeps_its_unadvanced_walk() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut background = Migration::background(temp.path()).unwrap();
+    let writer = Connection::open(temp.path().join(DATABASE)).unwrap();
+    writer
+        .execute_batch("BEGIN IMMEDIATE; UPDATE receipt_meta SET value=value WHERE key='epoch'")
+        .unwrap();
+    assert!(!background.step().unwrap());
+    assert_eq!(background.next_source, 0);
+    assert!(background.walk.is_none());
+    writer.execute_batch("COMMIT").unwrap();
+    while !background.step().unwrap() {}
+    assert!(background.catalog.coverage_verified());
+}

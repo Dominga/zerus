@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 
 pub(super) mod domain;
+pub(super) mod startup;
 mod store;
 use store::{Lease, Store};
 mod admission;

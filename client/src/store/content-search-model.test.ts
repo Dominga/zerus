@@ -83,6 +83,29 @@ describe("bounded public-content search", () => {
     for (let n = 1; n < 4; n++) f.answer(n); await tick(); expect(f.search.hits()).toHaveLength(1);
     f.search.dispose();
   });
+  it("refreshes a partial zero reply once after preparation and clears stale coverage", async () => {
+    const f = fixture(); f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
+    f.answer(0, [], { truncated: true, contents_unavailable: true }); await tick();
+    expect(f.search.busy()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1000); expect(f.calls).toHaveLength(2);
+    expect(f.calls[1].generation).not.toBe(f.calls[0].generation);
+    f.answer(1, [hit("prepared")]); await tick();
+    expect(f.search.hits().map((found) => found.hit.message_id)).toEqual(["prepared"]);
+    expect(f.search.errors()).toEqual([]); expect(f.search.limited()).toBe(false); expect(f.search.busy()).toBe(false);
+    f.search.dispose();
+  });
+  it("bounds an unavailable zero refresh and cancels it when the query changes or hides", async () => {
+    const f = fixture(); f.search.configure("needle", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
+    f.answer(0, [], { truncated: true, contents_unavailable: true }); await tick();
+    await vi.advanceTimersByTimeAsync(1000); expect(f.calls).toHaveLength(2);
+    f.answer(1, [], { truncated: true, contents_unavailable: true }); await tick();
+    await vi.advanceTimersByTimeAsync(5000); expect(f.calls).toHaveLength(2); expect(f.search.busy()).toBe(false);
+    f.search.configure("newer", [host(0)], true); await vi.advanceTimersByTimeAsync(350);
+    f.answer(2, [], { truncated: true, contents_unavailable: true }); await tick();
+    f.search.configure("newer", [host(0)], false);
+    await vi.advanceTimersByTimeAsync(5000); expect(f.calls).toHaveLength(3); expect(f.search.busy()).toBe(false);
+    f.search.dispose();
+  });
   it("caps retained excerpts and computers and explicitly reports partial or unavailable history", async () => {
     const f = fixture(); const hosts = Array.from({ length: SEARCH_HOSTS + 2 }, (_, n) => host(n, n !== 0));
     f.search.configure("needle", hosts, true); await vi.advanceTimersByTimeAsync(350);

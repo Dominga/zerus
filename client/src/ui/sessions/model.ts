@@ -10,6 +10,7 @@ import { archiveMachineChoices, archiveProjectChoices } from "./archive-filters"
 import { defaultProject, grouping, groups } from "../../store/organization";
 import { stateFilter, listedByFilter, type StateFilter, search,machineFilter, projectFilter, accountFilter, folderFilter, expandedChildren, compactRows, selected, selectedKey, subagentOpen } from "../../store/ui";
 import { teamCollapsed } from "../../store/teamCollapse";
+import { favorite } from "../../store/favorites";
 import { compileScopes, scopeCounts } from "./scope-filters";
 import { withCreations } from "../../store/creations";
 import { countedAttention, isWorking } from "../../store/attention";
@@ -134,7 +135,7 @@ function listScope() {
     selected: { key: selectedKey(), subagent: subagentOpen(), conversation: selected()?.conversationId },
     roster: (s: Session) => rosterFor(s, s.key === selectedKey() ? followedFor(s.key).value : undefined),
     childDraft: (s: Session, child: { id: string }) => hasDraftKey(`${s.computer}\n${s.name}\n${s.conversationId ?? ""}\n${child.id}`),
-    parentKey: parentKeyOf(), teamCollapsed,
+    parentKey: parentKeyOf(), teamCollapsed, favorite,
     containers: true, machineOf: (s: Session) => machineCards[s.computer]?.machine_id,
   };
 }

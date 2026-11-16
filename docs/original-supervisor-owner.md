@@ -21,9 +21,11 @@ durability and readback, and retains the original handles before starting the
 child. Existing or partial scopes refuse; failures retain the reservation and
 partial namespace without retry or adoption. Creation has one thirty-second
 monotonic budget, including its existing-writer wait, without unrelated recovery.
-The domain is explicitly `initialized_not_enrolled`: no real input/mutation/IO
-writer has been enrolled, and an empty ledger grants no effect or completion
-authority. See [the bootstrap design](original-writer-domain-bootstrap.md).
+The domain remains explicitly `initialized_not_enrolled`: the dormant route
+enrolls only its fixed Claude appearance helper family. Ordinary mutators and
+Kimi startup input are not enrolled, and an empty ledger grants no effect or
+completion authority. See [the bootstrap design](original-writer-domain-bootstrap.md)
+and [the first producer adapter](original-startup-writer-enrollment.md).
 It holds the original state/configuration directories,
 selected running image and supervisor birth, and records the original SID,
 run and launch-conversation/expected identity. Unconfirmed conversation identity

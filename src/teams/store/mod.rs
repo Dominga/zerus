@@ -34,6 +34,7 @@ pub(crate) mod rows;
 mod stage;
 pub(crate) mod timers;
 pub(crate) mod unstaffed;
+pub(crate) mod versions;
 pub use records::*;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -47,10 +48,10 @@ use zerus_team_plan::{model::*, problem::code, Problem};
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
 // Ordinary opens migrate native evidence to 4. Only an approved publication
 // raises the execution floor to 5; raising the ceiling must not opt queues in.
-pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = layout::LEGACY_QUEUE;
-pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = layout::LEGACY_PLANNING;
-pub(crate) const NATIVE_PERSON_LAYOUT: u32 = layout::NATIVE_PERSON;
-pub(crate) const SCHEMA_VERSION: u32 = layout::PUBLICATION;
+pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = versions::CORE_LEGACY;
+pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = versions::CORE_PLANNING;
+pub(crate) const NATIVE_PERSON_LAYOUT: u32 = versions::CORE_NATIVE_PERSON;
+pub(crate) const SCHEMA_VERSION: u32 = versions::CORE_CURRENT;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -318,7 +319,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
-    if version == 1 {
+    if version == versions::RETIRED_PREVIEW {
         return Err(Problem::new(
             code::INVALID_STATE,
             "Version-1 Teams store belongs to an unsupported pre-release build.",
@@ -341,8 +342,8 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
     let sql = match current {
-        0 => Some(include_str!("schema.sql")),
-        1 => {
+        versions::UNINITIALIZED => Some(include_str!("schema.sql")),
+        versions::RETIRED_PREVIEW => {
             return Err(Problem::new(
                 code::INVALID_STATE,
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
@@ -355,9 +356,13 @@ fn initialize(db: &mut Connection) -> Result<()> {
     };
     if let Some(sql) = sql {
         tx.execute_batch(
-            &sql.replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
-                .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
-                .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
+            &sql.replace(
+                "__CORE_LEGACY_VERSION__",
+                &versions::CORE_LEGACY.to_string(),
+            )
+            .replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
+            .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
+            .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
         )
         .map_err(storage)?;
     }

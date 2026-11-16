@@ -31,7 +31,7 @@ pub(super) fn start(ctx: &mut Context<'_>) -> Result<()> {
     // The old engine refuses a fresh open before it can cause a planned
     // effect. An already-open old writer cannot resume Planning: planning
     // pauses deliberately never use its legacy Paused -> Running transition.
-    store::raise_execution_floor(ctx.db, 3)?;
+    store::raise_execution_floor(ctx.db, store::versions::CORE_PLANNING)?;
     ctx.db
         .execute(
             "INSERT INTO planning_startup(team) VALUES(?1)",

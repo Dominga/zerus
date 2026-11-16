@@ -152,6 +152,9 @@ impl TaskDoc {
             if self.fields().get("cancelled_at").is_some() {
                 self.fields().delete("cancelled_at")?;
                 self.fields().delete("cancel_reason")?;
+                // A successful mutator must finalize these operations before
+                // the store freezes versions and inspects committed history.
+                self.commit()?;
             }
             return Ok(());
         }

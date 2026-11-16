@@ -2,7 +2,6 @@
 //! and the schema of a merged snapshot cannot qualify its individual changes.
 use crate::{Error, Result};
 use loro::{LoroDoc, VersionVector, ID};
-use std::time::{Duration, Instant};
 
 pub(crate) fn validate(doc: &LoroDoc, baseline: &VersionVector, floor: ID) -> Result<()> {
     let refused = || {
@@ -12,8 +11,7 @@ pub(crate) fn validate(doc: &LoroDoc, baseline: &VersionVector, floor: ID) -> Re
         )
     };
     let current = doc.oplog_vv();
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let mut spans = 0usize;
+    let mut budget = crate::proof_budget::Budget::new();
     if doc.is_shallow()
         || current != doc.state_vv()
         || !current.includes_vv(baseline)
@@ -29,10 +27,7 @@ pub(crate) fn validate(doc: &LoroDoc, baseline: &VersionVector, floor: ID) -> Re
     for (&peer, &end) in current.iter() {
         let mut next = baseline.get(&peer).copied().unwrap_or(0);
         while next < end {
-            spans += 1;
-            if spans > 131_072 || Instant::now() >= deadline {
-                return Err(refused());
-            }
+            budget.step()?;
             let change = doc.get_change(ID::new(peer, next)).ok_or_else(refused)?;
             let after = change
                 .id
@@ -237,5 +232,51 @@ mod tests {
             )
             .unwrap();
         assert!(validate(&shallow, &baseline, floor).is_err());
+    }
+    #[test]
+    fn a_scheduling_pause_does_not_refuse_a_valid_post_floor_span() {
+        let (doc, _, prefix, floor) = sealed();
+        doc.get_map("task")
+            .insert("text", "admitted descendant")
+            .unwrap();
+        doc.commit();
+        crate::with_proof_budget_for_test(std::time::Duration::from_secs(3), 131_072, || {
+            validate(&doc, &prefix, floor)
+        })
+        .unwrap();
+    }
+    #[test]
+    fn exhausted_causal_proof_is_typed_busy_never_success_or_invalid_history() {
+        let (doc, _, prefix, floor) = sealed();
+        doc.get_map("task")
+            .insert("text", "admitted descendant")
+            .unwrap();
+        doc.commit();
+        for (elapsed, work) in [
+            (std::time::Duration::from_secs(31), 131_072),
+            (std::time::Duration::ZERO, 0),
+        ] {
+            let error =
+                crate::with_proof_budget_for_test(elapsed, work, || validate(&doc, &prefix, floor))
+                    .unwrap_err();
+            assert_eq!(error.kind(), crate::ErrorKind::Busy);
+        }
+    }
+    #[test]
+    fn a_pause_never_qualifies_an_offline_span() {
+        let (doc, offline, prefix, floor) = sealed();
+        offline
+            .get_map("task")
+            .insert("text", "stale original")
+            .unwrap();
+        offline.commit();
+        doc.import(&offline.export(ExportMode::Snapshot).unwrap())
+            .unwrap();
+        let error =
+            crate::with_proof_budget_for_test(std::time::Duration::from_secs(3), 131_072, || {
+                validate(&doc, &prefix, floor)
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), crate::ErrorKind::Refused);
     }
 }

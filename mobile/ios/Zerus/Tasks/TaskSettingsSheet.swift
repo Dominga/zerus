@@ -71,11 +71,11 @@ struct TaskSettingsSheet: View {
         // Send now's reason follows the session chosen here, before it is saved.
         var draft = task
         draft.target = chosenTarget
-        let actions = (TasksPresentation.cards([draft], tab: tab, chosen: tasks.tasksChosen, onlyThisSession: false,
-                                               send: tasks.sendRoute, cancel: tasks.cancelRoute).first?.actions ?? [])
+        let actions = (TasksPresentation.cards([draft], tab: tab, chosen: tasks.displayedTaskChosen, onlyThisSession: false,
+                                               send: tasks.sendRoute, cancel: tasks.cancelRoute, current: tasks.taskCurrentSession).first?.actions ?? [])
             .filter { $0.action != .edit }
         let sessionLabel: String = switch chosenTarget {
-        case .session(let session): TasksPresentation.shortName(session.session)
+        case .session(let session): TasksPresentation.shortName(tasks.taskCurrentSession(session) ?? session.session)
         case .anySession: "Any session"
         }
         return ScrollView {
@@ -107,7 +107,7 @@ struct TaskSettingsSheet: View {
                     .buttonStyle(.plain)
                 } else {
                     Text(task.text).textSelection(.enabled)
-                    Text("Session: \(TasksPresentation.sessionLabel(task))").font(.subheadline).foregroundStyle(Theme.muted)
+                    Text("Session: \(tasks.taskSessionLabel(task))").font(.subheadline).foregroundStyle(Theme.muted)
                 }
                 let note = TasksPresentation.note(task)
                 if !note.isEmpty { Text(note).font(.footnote).foregroundStyle(Theme.muted) }
@@ -200,7 +200,7 @@ struct TaskSessionSheet: View {
                 Button("Any session") { onPick(.anySession) }
                 ForEach(app.tasks.taskChips(key).filter { !$0.session.machineId.isEmpty }, id: \.session) { chip in
                     Button {
-                        onPick(.session(session: SessionRef(machine: chip.session.machineId, session: chip.session.name)))
+                        onPick(.session(session: SessionRef(machine: chip.session.machineId, session: chip.session.name, sessionId: chip.session.sessionId)))
                     } label: {
                         HStack(spacing: 8) {
                             StatusDot(dot: chip.dot)

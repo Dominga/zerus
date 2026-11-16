@@ -1,8 +1,9 @@
 //! Inactive original-request/run admission. This is correlation/exclusion DATA,
 //! not native image/configuration/target/consent proof or an operation receipt.
-//! Future hosts must validate their ORIGINAL durable request (including no
-//! replay) and native source before using this single-use local object. No
-//! producer, migration, mutator, helper launch or graceful controller calls it.
+//! Hosts must validate their ORIGINAL durable request (including no replay)
+//! and native source before using this single-use local object. The dormant
+//! fixed Claude startup producer is the first caller; ordinary mutators and
+//! the graceful controller remain disconnected.
 use super::io::{IoAdmission, IoExchange, Settled};
 use super::store::Directory;
 use super::*;
@@ -133,6 +134,14 @@ impl Reserved {
         self,
         writer: &storage::Guard,
     ) -> std::result::Result<SourceIoAdmission, (Box<Self>, Failure)> {
+        self.into_io_holding(writer, None)
+    }
+
+    pub(super) fn into_io_holding(
+        self,
+        writer: &storage::Guard,
+        companion: Option<Arc<dyn Send + Sync>>,
+    ) -> std::result::Result<SourceIoAdmission, (Box<Self>, Failure)> {
         if Instant::now() >= self.source.until {
             return Err((Box::new(self), Failure::Expired));
         }
@@ -143,7 +152,11 @@ impl Reserved {
             source,
             reservation,
         } = self;
-        match IoAdmission::reserve_holding(reservation, Some(source.clone())) {
+        let charge: Arc<dyn Send + Sync> = match companion {
+            Some(companion) => Arc::new((source.clone(), companion)),
+            None => source.clone(),
+        };
+        match IoAdmission::reserve_holding(reservation, Some(charge)) {
             Ok(admission) => Ok(SourceIoAdmission { source, admission }),
             Err((reservation, failure)) => Err((
                 Box::new(Self {
@@ -236,6 +249,10 @@ pub(super) struct SourceIoSettled {
     settled: Settled,
 }
 impl SourceIoSettled {
+    pub(super) fn finish(mut self, until: Instant) -> Result<Report> {
+        self.retire(until)?;
+        Ok(self.settled.into_report())
+    }
     pub(super) fn report(&self) -> &Report {
         self.settled.report()
     }

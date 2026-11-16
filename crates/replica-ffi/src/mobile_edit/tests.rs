@@ -711,3 +711,76 @@ fn replacing_a_local_validation_attempt_cannot_keep_old_edits_or_reset_a_frozen_
         "Original requirement"
     );
 }
+
+#[test]
+fn a_native_busy_answer_keeps_the_phone_copy_and_has_a_public_refusal() {
+    let f = Fixture::new();
+    let original = f.api.get(f.task.uuid().into()).unwrap();
+    let native = ProjectStore::open(&f.root.path().join("native-replica"), "project-1").unwrap();
+    let mut changed = native.load(f.task.uuid()).unwrap();
+    changed
+        .comment("Arrived on the host", &Actor::Person, 2)
+        .unwrap();
+    native.save(&mut changed).unwrap();
+    let exchange = f.api.clone().exchange();
+    let request: replica::phone::Request =
+        serde_json::from_str(&exchange.next_request().unwrap().unwrap()).unwrap();
+    let error =
+        replica::with_proof_budget_for_test(std::time::Duration::from_secs(31), 131_072, || {
+            replica::phone::answer(&native, request.clone())
+        })
+        .expect_err("incomplete native proof must not produce a successful answer");
+    assert_eq!(error.kind(), replica::ErrorKind::Busy);
+    match crate::ReplicaError::from(error) {
+        crate::ReplicaError::Refused(reason) => assert!(
+            reason.contains("busy") && reason.contains("try again"),
+            "{reason}"
+        ),
+        other => panic!("temporary proof must keep its public refusal classification: {other:?}"),
+    }
+    assert_eq!(
+        f.api.get(f.task.uuid().into()).unwrap().content_revision,
+        original.content_revision
+    );
+    assert_eq!(f.api.get(f.task.uuid().into()).unwrap().log, original.log);
+    // A native read can recover, then its read-only phone projection can advance.
+    let answer = replica::phone::answer(&native, request).unwrap();
+    assert!(answer
+        .updates
+        .iter()
+        .any(|update| update.task.as_deref() == Some(f.task.uuid())));
+    exchange
+        .accept(serde_json::to_string(&answer).unwrap())
+        .unwrap();
+    assert!(f
+        .api
+        .get(f.task.uuid().into())
+        .unwrap()
+        .log
+        .iter()
+        .any(|entry| entry.text == "Arrived on the host"));
+    assert!(!f.api.get(f.task.uuid().into()).unwrap().writable);
+}
+
+#[test]
+fn a_busy_local_qualification_returns_no_handle_and_keeps_the_original_task() {
+    let f = Fixture::new();
+    let original = f.api.get(f.task.uuid().into()).unwrap();
+    let error =
+        replica::with_proof_budget_for_test(std::time::Duration::from_secs(31), 131_072, || {
+            f.api.clone().qualify_edit(f.task.uuid().into(), f.route())
+        })
+        .err()
+        .expect("incomplete proof must not create a qualification handle");
+    match error {
+        TaskEditError::Refused(reason) => assert!(
+            reason.contains("busy") && reason.contains("try again"),
+            "{reason}"
+        ),
+        other => panic!("temporary proof must not claim unknown native mutation: {other:?}"),
+    }
+    let current = f.api.get(f.task.uuid().into()).unwrap();
+    assert_eq!(current.content_revision, original.content_revision);
+    assert_eq!(current.log, original.log);
+    assert_eq!(f.qualification().view().text, "Original requirement");
+}

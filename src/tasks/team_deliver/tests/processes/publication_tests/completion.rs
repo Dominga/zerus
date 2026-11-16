@@ -1,6 +1,6 @@
 use super::*;
 
-fn reported_stage() -> (
+pub(super) fn reported_stage() -> (
     Fixture,
     String,
     Vec<crate::teams::store::publication::PlannedTaskRequest>,

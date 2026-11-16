@@ -538,3 +538,95 @@ fn auto_approval_metadata_never_acquires_neighbor_task_custody_or_invents_free_f
     assert_eq!(facts::task_custody::fixture::reads(), before + 1);
     assert!(public.controls.unwrap().unstarted.allowed);
 }
+
+#[test]
+fn an_archived_accepted_task_keeps_the_approved_phase_unmovable_without_rewriting_history() {
+    let (mut f, _, requests) = published();
+    f.h.settings(|s| s.integration = zerus_team_plan::Integration::None);
+    for r in &requests {
+        crate::teams::tasks::observe(&f.config.state, &r.task).unwrap();
+    }
+    another_published(&mut f);
+    super::completion::ended(&f, &requests[0], Stage::Done);
+    let selected = f.h.store.phase_draft(TEAM, 1).unwrap();
+    assert_eq!(selected.phase.state, PhaseState::Approved);
+    assert!(selected.live.as_ref().unwrap().complete);
+    assert!(selected.live.as_ref().unwrap().nodes.iter().any(|n| {
+        n.id == requests[0].node.id && n.state == zerus_team_plan::NodeState::Accepted
+    }));
+    let archived: bool = f.h.store.db.as_ref().unwrap().query_row(
+        "SELECT EXISTS(SELECT 1 FROM node_archive WHERE team=?1 AND id=?2) AND NOT EXISTS(SELECT 1 FROM nodes WHERE team=?1 AND id=?2)",
+        rusqlite::params![TEAM, requests[0].node.id], |row| row.get(0),
+    ).unwrap();
+    assert!(
+        archived,
+        "the product writer must retain only the archival row"
+    );
+    assert!(!selected.controls.unwrap().unstarted.allowed);
+    let task_revision = {
+        let store = crate::tasks::store(&f.config, &requests[0].task.project).unwrap();
+        store.load(&requests[0].task.uuid).unwrap().revision()
+    };
+    let old = facts::phase(f.h.store.db.as_ref().unwrap(), TEAM, 1).unwrap();
+    let current = scope(&f, 2);
+    let relative_to = scope(&f, 1);
+    ops::tests::refused(
+        f.h.run(
+            &person(),
+            Operation::MovePhase {
+                scope: current,
+                relative_to,
+                placement: PhasePlacement::Before,
+            },
+        ),
+        zerus_team_plan::problem::code::INVALID_STATE,
+    );
+    let current = scope(&f, 1);
+    ops::tests::refused(
+        f.h.run(
+            &person(),
+            Operation::SetPhaseAcceptance {
+                scope: current,
+                acceptance: Acceptance::Person,
+            },
+        ),
+        zerus_team_plan::problem::code::INVALID_STATE,
+    );
+    assert_eq!(
+        facts::phase(f.h.store.db.as_ref().unwrap(), TEAM, 1).unwrap(),
+        old
+    );
+    let store = crate::tasks::store(&f.config, &requests[0].task.project).unwrap();
+    assert_eq!(
+        store.load(&requests[0].task.uuid).unwrap().revision(),
+        task_revision
+    );
+}
+
+#[test]
+fn real_reported_pipeline_history_is_not_an_unstarted_phase() {
+    // The existing fixture feeds native report observations to the real
+    // service writers; it runs no native agent or hand-written SQL row.
+    let (mut f, _, _, stage) = super::completion::reported_stage();
+    let phase = f.h.store.phase_draft(TEAM, 1).unwrap();
+    assert!(phase.live.as_ref().unwrap().complete);
+    assert!(phase
+        .live
+        .as_ref()
+        .unwrap()
+        .nodes
+        .iter()
+        .any(|n| { n.id == stage && n.kind == zerus_team_plan::NodeKind::Stage }));
+    assert!(!phase.controls.unwrap().unstarted.allowed);
+    let current = scope(&f, 1);
+    ops::tests::refused(
+        f.h.run(
+            &person(),
+            Operation::SetPhaseAcceptance {
+                scope: current,
+                acceptance: Acceptance::Person,
+            },
+        ),
+        zerus_team_plan::problem::code::INVALID_STATE,
+    );
+}

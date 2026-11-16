@@ -170,7 +170,10 @@ impl TeamsModel {
         }
         self.observed_update()
     }
-    fn observed_scope_matches(&self, page: &observed_timing::ObservedTimingPage) -> bool {
+    pub(super) fn observed_scope_matches(
+        &self,
+        page: &observed_timing::ObservedTimingPage,
+    ) -> bool {
         let Some((_, parts)) = &self.parts else {
             return false;
         };

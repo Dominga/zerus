@@ -23,3 +23,13 @@ export interface PhaseEstimatesView {
   scope: EstimateScope | null; cohort_complete: boolean;
   unknown: EstimateUnknown | null; rows: EstimateRow[];
 }
+
+export type ComparisonUnknown = "estimate_unavailable" | "outside_cohort" | "not_implementation"
+  | "original_publication_unavailable" | "different_publication" | "different_task"
+  | "partial_coverage" | "implementation_unsupported";
+export interface EstimatePaneView extends PhaseEstimatesView {
+  epoch: number;
+  window: import("./observed-timing").ObservedPage["scope"]["window"];
+  units: { unit: number; node: number; estimate_minutes: number | null;
+    coverage: import("./observed-timing").UnitCoverage; unknown: ComparisonUnknown }[];
+}

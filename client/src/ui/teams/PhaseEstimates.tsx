@@ -1,6 +1,6 @@
 import { For, Show } from "solid-js";
 import { tr } from "../../i18n";
-import type { EstimateUnknown, PhaseEstimatesView } from "../../store/phase-estimates";
+import type { ComparisonUnknown, EstimatePaneView, EstimateUnknown, PhaseEstimatesView } from "../../store/phase-estimates";
 import "../styles/phase-estimates.css";
 
 export function estimateUnknownText(reason: EstimateUnknown | null | undefined): string {
@@ -26,15 +26,28 @@ export function estimateUnknownText(reason: EstimateUnknown | null | undefined):
 
 /** No source read, estimate editor, actual-time inference or local cache.
  * The shared observed-page lifecycle will own mounting and retiring this view. */
-export function PhaseEstimates(props: { value?: PhaseEstimatesView | null; readFailed?: boolean }) {
+function comparisonUnknownText(reason: ComparisonUnknown): string {
+  switch (reason) {
+    case "estimate_unavailable": return tr("The estimate is unavailable for this unit.");
+    case "outside_cohort": return tr("This observed unit is outside the frozen estimate cohort.");
+    case "not_implementation": return tr("This is not an implementation unit.");
+    case "original_publication_unavailable": return tr("The original observation did not retain its publication identity.");
+    case "different_publication": return tr("This observation belongs to a different publication or generation.");
+    case "different_task": return tr("This observation belongs to a different task identity.");
+    case "partial_coverage": return tr("This unit has partial or unavailable observation coverage.");
+    case "implementation_unsupported": return tr("The source does not measure implementation work.");
+  }
+}
+export function PhaseEstimates(props: { value?: PhaseEstimatesView | EstimatePaneView | null; readFailed?: boolean }) {
   const current = () => props.readFailed ? undefined : props.value;
+  const comparison = () => { const value = current(); return value && "units" in value ? value as EstimatePaneView : undefined; };
   const known = () => !!current()?.cohort_complete && current()?.unknown === null;
   return <section class="phase-estimates" data-phase-estimates aria-label={tr("Implementation estimates")}>
     <h4>{tr("Implementation estimates")}</h4>
     <p class="dim">{tr("Implementation estimates are not phase elapsed time or a completion promise.")}</p>
     <Show when={current()?.scope} fallback={<p role="status">{estimateUnknownText(current()?.unknown)}</p>}>{(scope) => <>
       <div class="phase-estimate-source">
-        <span class="tag">{scope().basis === "unapproved_preview" ? tr("Unapproved draft preview") : tr("Approved publication estimates")}</span>
+        <span class="tag">{scope().basis === "unapproved_preview" ? tr("Unapproved draft preview") : tr("Frozen publication estimates")}</span>
         <span class="tag">{tr("Draft generation %1", scope().version.draft_generation)}</span>
         <span class="dim">{tr("Source revision %1", scope().revision)}</span>
       </div>
@@ -48,6 +61,16 @@ export function PhaseEstimates(props: { value?: PhaseEstimatesView | null; readF
           </>}><span data-estimate-minutes>{tr("%1 min", row.estimate_minutes!)}</span></Show></td>
         </tr>}</For>
       </tbody></table>
+      <Show when={comparison() && scope().basis === "frozen_publication"}>
+        <h5>{tr("Observed implementation")}</h5>
+        <p class="dim">{tr("Recorded states and delivery events do not measure implementation work.")}</p>
+        <Show when={comparison()?.units.length} fallback={<p>{tr("No implementation observations are available in this selected window.")}</p>}>
+          <ul><For each={comparison()?.units ?? []}>{(unit) => <li data-estimate-unit={unit.unit}>
+            <span>{tr("Unit #%1", unit.unit)}</span>{" — "}<span>{tr("Task #%1", unit.node)}</span>{": "}
+            <span>{tr("Unknown")}</span>{" — "}<span>{comparisonUnknownText(unit.unknown)}</span>
+          </li>}</For></ul>
+        </Show>
+      </Show>
     </>}</Show>
   </section>;
 }

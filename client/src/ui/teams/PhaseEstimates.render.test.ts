@@ -26,7 +26,7 @@ const stale = (): PhaseEstimatesView => ({
 it("renders product-written publication estimates per unit without summing an elapsed time", () => {
   const host = mount(produced.published as PhaseEstimatesView);
   expect([...host.querySelectorAll("[data-estimate-minutes]")].map(node => node.textContent)).toEqual(["30 min", "30 min"]);
-  expect(host.textContent).toContain("Approved publication estimates");
+  expect(host.textContent).toContain("Frozen publication estimates");
   expect(host.textContent).not.toContain("60 min");
   expect(host.querySelector("button,input,textarea")).toBeNull();
 });

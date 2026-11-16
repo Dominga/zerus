@@ -23,6 +23,7 @@ mod progress157;
 mod providers;
 #[cfg(unix)]
 mod publication;
+mod estimate_preview;
 mod reads;
 mod recorded_timings;
 #[cfg(unix)]

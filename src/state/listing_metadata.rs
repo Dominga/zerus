@@ -11,6 +11,7 @@ mod model;
 mod changes;
 pub(super) mod worker;
 pub(super) mod control;
+pub(super) mod listing;
 mod publication;
 mod repair;
 mod store;

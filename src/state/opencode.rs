@@ -271,7 +271,7 @@ fn legacy_decision(
 }
 /// `migration` is fetched at most once per caller and only when needed.
 fn legacy_state(
-    service: &service::Service,
+    service: &dyn Native,
     record: &Value,
     migration: &mut Option<Reply>,
 ) -> Result<(Legacy, bool)> {
@@ -916,7 +916,7 @@ fn processes() -> Value {
     json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"})
 }
 fn parent_view(
-    service: &service::Service,
+    service: &dyn Native,
     record: &Value,
     active: &Value,
     detail: Detail,
@@ -1059,6 +1059,8 @@ struct Inspector {
     verdicts_changed: bool,
     /// The cached home short list; tests stand in for the cache.
     cached_options: CachedOptions,
+    deadline: Option<Instant>,
+    observe_only: bool,
 }
 impl Inspector {
     /// Never starts the service.
@@ -1071,7 +1073,16 @@ impl Inspector {
             verdicts: None,
             verdicts_changed: false,
             cached_options: catalog::stopped_options,
+            deadline: None,
+            observe_only: false,
         }
+    }
+    fn listing(deadline: Instant) -> Self {
+        let mut value=Self::connect_without_io();
+        value.service=service::connect_within(deadline);value.deadline=Some(deadline);value.observe_only=true;value
+    }
+    fn connect_without_io() -> Self {
+        Self {service:Err(service::Unavailable::NotRunning),computer:None,active:None,migration:None,verdicts:None,verdicts_changed:false,cached_options:catalog::stopped_options,deadline:None,observe_only:true}
     }
     fn row(&mut self, record: &Value, detail: Detail) -> Value {
         let mut row = self.view(record, detail);
@@ -1090,6 +1101,8 @@ impl Inspector {
             }
             Ok(service) => service,
         };
+        let bounded=Bounded {service,deadline:self.deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(10))};
+        let native:&dyn Native=if self.deadline.is_some() {&bounded}else{service};
         let key = verdict_key(record, &service.reg);
         let known = record["service"] != "opencode2"
             && self
@@ -1099,7 +1112,7 @@ impl Inspector {
         let state = if known {
             Ok((Legacy::Unsupported, false))
         } else {
-            legacy_state(service, record, &mut self.migration)
+            legacy_state(native, record, &mut self.migration)
         };
         let mut current = record.clone();
         // A failed read keeps the cached short list, like a stopped service.
@@ -1121,16 +1134,16 @@ impl Inspector {
                 return legacy_row(record);
             }
             Ok((Legacy::Adopted, _)) => {
-                adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                if !self.observe_only {adopt_binding(string(record, "name"), string(record, "conversation_id"));}
                 modernize(&mut current);
             }
             Ok((Legacy::Current, _)) => {}
         }
-        let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
+        let active = match self.active.get_or_insert_with(|| active_sessions(native)) {
             Ok(active) => active,
             Err(reason) => return failed(reason.clone()),
         };
-        parent_view(service, &current, active, detail).unwrap_or_else(failed)
+        parent_view(native, &current, active, detail).unwrap_or_else(failed)
     }
     fn finish(self) {
         if self.verdicts_changed {
@@ -1201,6 +1214,19 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     inspector.finish();
     Ok(rows)
 }
+/// Same row normalizer over bounded caller-supplied metadata, without inventories or adoption effects.
+pub(in crate::state) fn listing_records(records: &[Value], deadline: Instant) -> Result<Vec<Value>> {
+    if records.is_empty() {return Ok(Vec::new());}
+    let mut inspector=Inspector::listing(deadline);let preferences=notifications::load();let mut rows=Vec::new();
+    for record in records {
+        let mut row=inspector.row(record,Detail::Listing);
+        notifications::enrich(&mut row,preferences.as_ref(),journal::journal_name(record));
+        if let Some(map)=row.as_object_mut() {for key in ["events","voice_messages","attachment_messages","processes","model_options","model_options_truncated"] {map.remove(key);}}
+        rows.push(row);
+    }
+    inspector.finish();Ok(rows)
+}
+
 fn checked_request(record: &Value) -> Result<Value> {
     let request = read_request()?;
     check_request_identity(record, &request)?;
@@ -4872,6 +4898,8 @@ mod tests {
             verdicts: Some(Vec::new()),
             verdicts_changed: false,
             cached_options: cached_stub,
+            deadline: None,
+            observe_only: false,
         }
     }
     /// A registered service that refuses every connection before a byte is sent.

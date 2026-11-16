@@ -52,7 +52,7 @@ impl Store {
         db.busy_timeout(Duration::ZERO)?;
         if new {
             db.execute_batch("PRAGMA synchronous=FULL; PRAGMA max_page_count=131072;")?;
-            db.execute_batch("PRAGMA user_version=2; PRAGMA journal_mode=WAL;
+            db.execute_batch("PRAGMA user_version=3; PRAGMA journal_mode=WAL;
               CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,root TEXT NOT NULL,epoch TEXT NOT NULL,writes INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL DEFAULT 0,serial INTEGER NOT NULL DEFAULT 0,ready INTEGER NOT NULL DEFAULT 0);
               CREATE TABLE sources(source TEXT PRIMARY KEY,seed TEXT,stamp TEXT,revision INTEGER NOT NULL,tombstone INTEGER NOT NULL CHECK(tombstone IN(0,1)),issue TEXT);
               CREATE TABLE intents(id TEXT PRIMARY KEY,source TEXT NOT NULL,seed TEXT,created REAL NOT NULL);
@@ -63,6 +63,8 @@ impl Store {
               CREATE TABLE queue(generation INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(generation,source));
               CREATE TABLE dirty(generation INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(generation,source));
               CREATE TABLE snapshots(generation INTEGER NOT NULL,source TEXT NOT NULL,seed TEXT NOT NULL,stamp TEXT,PRIMARY KEY(generation,source));
+              CREATE INDEX snapshots_session ON snapshots(generation,json_extract(seed,'$.record.session_id'));
+              CREATE INDEX snapshots_conversation ON snapshots(generation,json_extract(seed,'$.record.conversation_id'));
               CREATE INDEX snapshots_journal ON snapshots(generation,coalesce(json_extract(seed,'$.record.journal_name'),json_extract(seed,'$.record.name')));
               CREATE TABLE generations(generation INTEGER PRIMARY KEY,complete INTEGER NOT NULL,dirs TEXT NOT NULL,gap TEXT NOT NULL,high_water INTEGER NOT NULL DEFAULT 0);
               CREATE INDEX generations_complete ON generations(complete,generation);")?;
@@ -75,22 +77,12 @@ impl Store {
             )?;
         }
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version == 1 {
-            // An old generation has no immutable native stamp. Keep its
-            // canonical sources, but require bounded repair before reading it.
-            db.execute_batch("BEGIN IMMEDIATE;
-                ALTER TABLE snapshots ADD COLUMN stamp TEXT;
-                ALTER TABLE generations ADD COLUMN high_water INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE scan ADD COLUMN base INTEGER NOT NULL DEFAULT 0;
-                CREATE TABLE dirty(generation INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(generation,source));
-                UPDATE generations SET complete=0;
-                DELETE FROM scan;
-                UPDATE meta SET ready=0,generation=0;
-                PRAGMA user_version=2;
-                COMMIT;")?;
-        }
         anyhow::ensure!(version != 0, "Incomplete display cache schema");
-        anyhow::ensure!(matches!(version, 1 | 2), "Unknown display cache version");
+        anyhow::ensure!(
+            !matches!(version, 1 | 2),
+            "Display reader schema requires background rebuild"
+        );
+        anyhow::ensure!(version == 3, "Unknown display cache version");
         let identity: String =
             db.query_row("SELECT root FROM meta WHERE id=1 AND version=1", [], |r| {
                 r.get(0)
@@ -131,7 +123,7 @@ impl Store {
         db.busy_timeout(Duration::ZERO)?;
         db.execute_batch("BEGIN DEFERRED")?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        anyhow::ensure!(version == 2, "Display snapshot requires metadata repair");
+        anyhow::ensure!(version == 3, "Display snapshot requires metadata repair");
         let identity: String =
             db.query_row("SELECT root FROM meta WHERE id=1 AND version=1", [], |r| {
                 r.get(0)
@@ -271,7 +263,15 @@ impl Store {
         if error.to_string() == WAL_QUOTA {
             // Only the background owner may checkpoint. A pinned reader makes
             // this nonblocking attempt report busy; canonical writers do not wait.
-            let store = Self::open_for(path, true)?;
+            let store = match Self::open_for(path, true) {
+                Ok(store) => store,
+                Err(error)
+                    if error.to_string() == "Display reader schema requires background rebuild" =>
+                {
+                    return Self::recover(path, &error)
+                }
+                Err(error) => return Err(error),
+            };
             let (busy, _, _): (i64, i64, i64) =
                 store
                     .db
@@ -297,6 +297,7 @@ impl Store {
                 "Display root/store identity changed"
                     | "Orphaned display journal files"
                     | "Incomplete display cache schema"
+                    | "Display reader schema requires background rebuild"
             ),
         };
         if !eligible {
@@ -318,7 +319,7 @@ impl Store {
                 if let Ok(version) = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 {
                     anyhow::ensure!(
-                        matches!(version, 0 | 1 | 2),
+                        matches!(version, 0 | 1 | 2 | 3),
                         "Unknown display cache version; rebuild refused"
                     );
                 }

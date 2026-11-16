@@ -171,3 +171,41 @@ fn private_transition_data_is_not_cached_as_a_public_launch_recipe() {
         );
     }
 }
+
+#[test]
+fn native_bindings_do_not_require_the_terminal_record_schema() {
+    for agent in ["dsh", "opencode"] {
+        for id_layout in [false, true] {
+            let session = uuid::Uuid::new_v4().to_string();
+            let name = format!("{agent}/example/native");
+            let mut record = json!({"name":name,"agent":agent,"backend":agent,
+                "run_id":"native-run","session_id":session,"conversation_id":if agent=="dsh" {"session-native"} else {"ses_native"},
+                "agent_home":"/srv/example/home","cwd":"/srv/example/project","created":1});
+            if id_layout {
+                record["layout"] = json!("id");
+            }
+            let source = if id_layout {
+                format!("{agent}/sessions/{session}.json")
+            } else {
+                format!("{agent}/bindings/{}.json", storage::label_key(&name))
+            };
+            let key = Key(source);
+            let seed = Seed::encode(&key, &record)
+                .expect("native provider bindings are intentionally unversioned");
+            let decoded = Seed::decode(&key, &seed).unwrap();
+            for field in [
+                "name",
+                "agent",
+                "backend",
+                "run_id",
+                "session_id",
+                "conversation_id",
+                "agent_home",
+                "cwd",
+                "created",
+            ] {
+                assert_eq!(decoded["record"][field], record[field], "{agent} {field}");
+            }
+        }
+    }
+}

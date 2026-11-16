@@ -592,6 +592,7 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// only Linux advertises those ABIs.
 fn help_text() -> Cow<'static, str> {
     let usage = advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"));
+    let usage=if cfg!(target_os="linux") {Cow::Owned(format!("{usage}\n{}\n",state::LISTING_METADATA_MARKER))}else{usage};
     match crate::tasks::controls::help_marker() {
         Some(marker) => format!("{usage}\n{marker}\n").into(),
         None => usage,
@@ -2250,6 +2251,8 @@ fn remote_via(
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'Subagent retirement ABI: subagent-retire-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to retire stale subagent records' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "repository" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
+    } else if command == "listing-index" || command=="ls" && has(&args,"--paged") {
+        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer for indexed session listing' >&2; exit 1; fi",state::LISTING_METADATA_MARKER,platform::join(&remote_args)))
     } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
@@ -2348,7 +2351,7 @@ fn remote_via(
         println!("{}", dry_run_line(&flags, target, &remote));
         return Ok(0);
     }
-    if command == "ls" && has(&args, "--json") {
+    if command == "ls" && has(&args, "--json") && !has(&args,"--paged") {
         println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
         return Ok(0);
     }
@@ -2392,6 +2395,9 @@ pub(crate) fn local_json(config: &Config) -> Result<Value> { local_json_archives
 /// `ls --json --local --no-archives`, which `hgs watch` streams.
 pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
+    local_json_archives_with(config, archives, None)
+}
+fn local_json_archives_with(config: &Config, archives: bool, ordinary: Option<&state::ListingQuery>) -> Result<Value> {
     if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.
@@ -2430,7 +2436,10 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     }
     // A session renamed before merge_listing reads the panes keeps its ID.
     let ids = state::listed_ids(&listing);
-    let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
+    let mut merged = match ordinary {
+        Some(query) => state::merge_ordinary_listing(raw,&ids,archives,query),
+        None => state::merge_listing_archives(raw,&ids,archives),
+    }.map_err(|e| Error::new(1,e))?;
     merged["archive_paging"] = json!(true);
     merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);
     let ended = launches.ended(merged["sessions"].as_array().map_or(&[], Vec::as_slice));
@@ -2442,6 +2451,19 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
 fn local_list(config: &Config) -> Result<()> {
     if !platform::local_sessions() {
         println!("  (control console: sessions run on remote machines)");
+        return Ok(());
+    }
+    if cfg!(target_os="linux") {
+        let value=local_json_archives_with(config,false,Some(&state::ListingQuery::default()))?;
+        let native=terminal().attached_counts().map_err(|error|Error::new(1,error))?;
+        let mut live=std::collections::BTreeSet::new();
+        if let Some(native)=native {for (name,count) in native {println!("  {name:<40} {count} client(s)");live.insert(name);}}
+        else {println!("  (no sessions)");}
+        for row in value["sessions"].as_array().ok_or_else(||Error::new(1,"Invalid session listing"))? {
+            if !live.contains(state::display_name(row)) && row["state"]!="archived" {
+                println!("  {:40} {} (hgs resume)",state::display_name(row),row["state"].as_str().unwrap_or("stopped"));
+            }
+        }
         return Ok(());
     }
     match terminal().attached_counts().map_err(|e| Error::new(1, e))? {
@@ -2468,7 +2490,15 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
             return Ok(0);
         }
         let archives = !has(args,"--no-archives");
-        let local = local_json_archives(config, archives)?;
+        let paged=has(args,"--paged");
+        let cursor=args.iter().position(|arg|arg=="--cursor").map(|n|require(args,n+1,"--cursor needs a token").map(str::to_owned)).transpose()?;
+        let page_size=args.iter().position(|arg|arg=="--page-size").map(|n|require(args,n+1,"--page-size needs 1..128").and_then(|value|value.parse::<usize>().map_err(|_|Error::new(1,"Invalid --page-size")))).transpose()?.unwrap_or(64);
+        if !(1..=128).contains(&page_size) || (cursor.is_some() && !paged) || (paged && !has(args,"--local")) {return Err(Error::new(1,"Paged ls requires --json --local, --page-size 1..128 and an optional --cursor"));}
+        let query=state::ListingQuery {paged,cursor,page_size};
+        let local = if cfg!(target_os="linux") {local_json_archives_with(config,archives,Some(&query))?} else {
+            if paged {return Err(Error::new(1,"Indexed session listing is not qualified on this platform"));}
+            local_json_archives(config,archives)?
+        };
         if has(args, "--local") {
             println!("{local}");
         } else {

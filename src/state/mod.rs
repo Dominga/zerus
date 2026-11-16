@@ -84,6 +84,11 @@ mod process_index;
 // Advisory display data only; no production reader uses it in this slice.
 mod listing_metadata;
 pub(crate) use listing_metadata::control::MARKER as LISTING_METADATA_MARKER;
+pub(crate) use listing_metadata::listing::Query as ListingQuery;
+pub(crate) fn display_name(row: &Value) -> &str { string(row,"name") }
+pub(crate) fn merge_ordinary_listing(value: Value, ids: &BTreeMap<String,String>, archives: bool, query: &ListingQuery) -> Result<Value> {
+    listing_metadata::listing::merge(value, ids, archives, query)
+}
 pub(crate) fn listing_index(args: &[String]) -> Result<Value> {
     listing_metadata::control::dispatch(args)
 }

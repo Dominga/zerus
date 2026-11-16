@@ -44,7 +44,27 @@ impl Key {
     pub fn matches(&self, record: &Value) -> bool {
         let path = Path::new(&self.0);
         let id = path.file_stem().and_then(|v| v.to_str()).unwrap_or("");
-        record["version"] == 1
+        let native = if self.0.starts_with("dsh/") {
+            Some("dsh")
+        } else if self.0.starts_with("opencode/") {
+            Some("opencode")
+        } else {
+            None
+        };
+        let schema = match native {
+            Some(agent) => {
+                record["backend"] == agent
+                    && string(record, "name").starts_with(&format!("{agent}/"))
+                    && if agent == "dsh" {
+                        string(record, "conversation_id").starts_with("session-")
+                            && string(record, "conversation_id").len() <= 2048
+                    } else {
+                        opencode::native_id(string(record, "conversation_id"), "ses_")
+                    }
+            }
+            None => record["version"] == 1 && AGENTS.contains(&string(record, "agent")),
+        };
+        schema
             && !string(record, "name").is_empty()
             && if self.0.contains("sessions/") {
                 storage::is_id_layout_record(record, id)

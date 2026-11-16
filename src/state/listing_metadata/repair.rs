@@ -38,9 +38,14 @@ fn scan(db: &Connection) -> anyhow::Result<Option<Scan>> {
 }
 // Fixed seven directory witnesses, never a full directory inventory here.
 pub(super) fn directories(store: &Store) -> anyhow::Result<String> {
+    let stamps = directories_at(&store.root)?;
+    store.verify()?;
+    Ok(stamps)
+}
+pub(super) fn directories_at(root: &Directory) -> anyhow::Result<String> {
     let mut stamps = Vec::new();
     for folder in storage::BINDING_DIRS.into_iter().chain(CONTROL_DIRS) {
-        let mut parent = checked(Directory::open(&store.root.path))?;
+        let mut parent = checked(Directory::open(&root.path))?;
         let mut missing = false;
         for part in Path::new(folder).components() {
             let name = part
@@ -74,7 +79,7 @@ pub(super) fn directories(store: &Store) -> anyhow::Result<String> {
             ]));
         }
     }
-    store.verify()?;
+    checked(root.verify())?;
     Ok(serde_json::to_string(&stamps)?)
 }
 pub(super) fn gap_stamp(store: &Store) -> anyhow::Result<String> {

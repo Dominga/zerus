@@ -17,6 +17,10 @@ pub(super) struct Page {
 }
 impl Store {
     pub fn page(&self, cursor: Option<&Cursor>) -> anyhow::Result<Page> {
+        self.page_limit(cursor, ROWS)
+    }
+    pub fn page_limit(&self, cursor: Option<&Cursor>, limit: usize) -> anyhow::Result<Page> {
+        anyhow::ensure!((1..=ROWS).contains(&limit), "Invalid display page size");
         self.verify()?;
         let (epoch, active, ready): (String, i64, bool) = self.db.query_row(
             "SELECT epoch,generation,ready FROM meta WHERE id=1",
@@ -44,8 +48,8 @@ impl Store {
             && repair::directories(self)? == dirs
             && repair::gap_stamp(self)? == gap;
         let after = cursor.map_or("", |c| c.after.as_str());
-        let mut statement=self.db.prepare_cached("SELECT source,CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128")?;
-        let mut query = statement.query(params![generation, after])?;
+        let mut statement=self.db.prepare_cached("SELECT source,CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT ?3")?;
+        let mut query = statement.query(params![generation, after, limit])?;
         let mut rows = Vec::new();
         let mut bytes = 0;
         let until = Instant::now() + Duration::from_millis(250);
@@ -101,7 +105,10 @@ impl Reader {
         Ok(Self(Store::read(root)?))
     }
     pub fn page(&self, cursor: Option<&Cursor>) -> anyhow::Result<Page> {
-        let mut page = self.0.page(cursor)?;
+        self.page_limit(cursor, ROWS)
+    }
+    pub fn page_limit(&self, cursor: Option<&Cursor>, limit: usize) -> anyhow::Result<Page> {
+        let mut page = self.0.page_limit(cursor, limit)?;
         // The retained RO transaction pins generation data, not current readiness.
         // Read current metadata separately without taking the publisher gate.
         let check = || -> anyhow::Result<bool> {
@@ -121,5 +128,69 @@ impl Reader {
         };
         page.fresh &= check().unwrap_or(false);
         Ok(page)
+    }
+}
+
+impl Reader {
+    pub fn parent(&self, link: &Value) -> anyhow::Result<Option<Value>> {
+        let generation: i64 =
+            self.0
+                .db
+                .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))?;
+        let (sql, key) = if !string(link, "session_id").is_empty() {
+            ("SELECT source,seed,stamp FROM snapshots INDEXED BY snapshots_session WHERE generation=?1 AND json_extract(seed,'$.record.session_id')=?2 LIMIT 3",string(link,"session_id"))
+        } else {
+            ("SELECT source,seed,stamp FROM snapshots INDEXED BY snapshots_conversation WHERE generation=?1 AND json_extract(seed,'$.record.conversation_id')=?2 LIMIT 3",string(link,"conversation_id"))
+        };
+        if key.is_empty() {
+            return Ok(None);
+        }
+        let mut query = self.0.db.prepare_cached(sql)?;
+        let found = query
+            .query_map(params![generation, key], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            found.len() <= 1,
+            "Parent display identity is ambiguous; refresh the listing"
+        );
+        let Some((source, seed, stamp)) = found.into_iter().next() else {
+            return Ok(None);
+        };
+        let key = Key(source);
+        anyhow::ensure!(
+            self.0.source_stamp(&key)?.as_deref() == Some(stamp.as_str()),
+            "Parent display source changed"
+        );
+        let value = Seed::decode(&key, &seed)?;
+        Ok(Some(value["record"].clone()))
+    }
+    pub fn generation(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .0
+            .db
+            .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))?)
+    }
+}
+
+impl Cursor {
+    pub fn encode(&self) -> anyhow::Result<String> {
+        use base64::Engine;
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(self)?))
+    }
+    pub fn decode(value: &str) -> anyhow::Result<Self> {
+        use base64::Engine;
+        anyhow::ensure!(value.len() <= 2048, "Display cursor exceeds its bound");
+        Ok(serde_json::from_slice(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(value)?,
+        )?)
+    }
+    pub fn generation(&self) -> i64 {
+        self.generation
     }
 }

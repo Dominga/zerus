@@ -530,6 +530,12 @@ pub(super) fn connect() -> std::result::Result<Service, Unavailable> {
 }
 
 fn connect_from(read: RegistrationRead) -> std::result::Result<Service, Unavailable> {
+    connect_from_until(read,Instant::now()+Duration::from_secs(2),false)
+}
+pub(super) fn connect_within(deadline: Instant) -> std::result::Result<Service, Unavailable> {
+    connect_from_until(read_registration(),deadline,true)
+}
+fn connect_from_until(read: RegistrationRead, deadline: Instant, listing: bool) -> std::result::Result<Service, Unavailable> {
     let reg = match read {
         RegistrationRead::Missing => {
             return Err(if service_disabled() {
@@ -549,7 +555,7 @@ fn connect_from(read: RegistrationRead) -> std::result::Result<Service, Unavaila
         "GET",
         "/api/info",
         None,
-        Instant::now() + Duration::from_secs(2),
+        deadline,
     )
     .map_err(|_| Unavailable::Unreachable(NOT_RESPONDING.into()))?;
     if info.status != 200 {
@@ -566,7 +572,13 @@ fn connect_from(read: RegistrationRead) -> std::result::Result<Service, Unavaila
         )));
     }
     let service = Service { reg };
-    let missing = compatibility(&service).map_err(Unavailable::Unreachable)?;
+    let missing=if listing {
+        compatibility_in(&root().join("opencode/compat"),&service.reg,&requirement_digest(),|| {
+            let reply=request(&service.reg,"GET","/openapi.json",None,deadline)?;
+            if !(200..300).contains(&reply.status) {return Err("OpenCode API description unavailable".into());}
+            Ok(reply.body)
+        })
+    } else {compatibility(&service)}.map_err(Unavailable::Unreachable)?;
     if let Some(first) = missing.first() {
         return Err(Unavailable::Incompatible(format!(
             "OpenCode {version} lacks {first}; update OpenCode or Zerus"
@@ -623,7 +635,7 @@ pub(super) fn compatibility_in(
         )
     );
     let cache = dir.join(format!("{key}.json"));
-    if let Ok(bytes) = fs::read(&cache) {
+    if let Ok(Some(bytes)) = labels::read_file(&cache, 4 << 20) {
         if let Ok(value) = serde_json::from_slice::<Vec<String>>(&bytes) {
             return Ok(value);
         }

@@ -6,6 +6,25 @@ use crate::teams::ops::{
 use zerus_replica::{Actor as TaskActor, Position, ProjectStore, Stage, Target, TaskDoc};
 use zerus_team_plan::model::{NodeState, TaskRef};
 
+/// A positive Person setup is an explicitly modeled window original. Bare
+/// Person refusal controls below continue to call `super::send` directly.
+fn send(
+    caller: &Caller<'_>,
+    task: &TaskRef,
+    team: &str,
+    role: Option<&str>,
+    pipeline: Option<&str>,
+) -> Result<intake::Intake> {
+    #[cfg(unix)]
+    {
+        super::models::send(caller, task, team, role, pipeline)
+    }
+    #[cfg(not(unix))]
+    {
+        super::send(caller, task, team, role, pipeline)
+    }
+}
+
 /// The direct tests below have no command project lock open; the meeting
 /// still writes through one caller-owned store, never a second one.
 fn guard(caller: &Caller<'_>, doc: &TaskDoc, action: &str) -> Result<()> {
@@ -760,7 +779,7 @@ fn person_gesture_intake_refuses_before_task_metadata_or_queue_writes() {
     let reference = document(&h);
     let before = task(&h, &reference);
     let revision = before.revision();
-    let error = send(
+    let error = super::send(
         &caller(&h, &TaskActor::Person),
         &reference,
         TEAM,

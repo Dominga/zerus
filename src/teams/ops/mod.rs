@@ -36,7 +36,9 @@ use super::store::{self, rows, DecisionState, Store};
 pub(crate) use apply::apply_with_repository;
 #[allow(unused_imports)]
 pub use apply::{apply, apply_with_config};
-pub(crate) use apply::{apply_with_gesture, apply_with_native, apply_with_native_context, replay};
+pub(crate) use apply::{apply_with_gesture, apply_with_native_context, observe_native_intake, replay};
+#[cfg(test)]
+pub(crate) use apply::apply_with_native;
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

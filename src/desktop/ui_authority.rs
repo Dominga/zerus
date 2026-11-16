@@ -304,6 +304,8 @@ struct Metadata {
     ownership: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
     application: String,
+    #[cfg(all(test, unix))]
+    expired: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 pub(super) struct Validated(Request, Freshness, Metadata);
 
@@ -673,6 +675,15 @@ impl Validated {
         self.0.operation()
     }
     fn check(&self) -> Result<()> {
+        #[cfg(all(test, unix))]
+        ensure!(
+            !self
+                .2
+                .expired
+                .as_ref()
+                .is_some_and(|expired| expired.load(std::sync::atomic::Ordering::Acquire)),
+            "model original expired"
+        );
         match &self.1 {
             Freshness::Native {
                 caller,
@@ -1023,6 +1034,17 @@ impl Validated {
             Metadata::default(),
         )
     }
+    /// Deterministic expiry at a real writer/commit boundary. This is only a
+    /// model clock; production still checks native processes and Instant.
+    #[cfg(all(test, unix))]
+    pub fn fixture_clock(
+        value: &Value,
+        expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.2.expired = Some(expired);
+        permit
+    }
     /// Actor policy model only: production observations obtain this Origin
     /// from authenticate(), never from a supplied value.
     #[cfg(test)]
@@ -1295,6 +1317,8 @@ impl Authorized {
                 ownership: self.ownership_origin,
                 notification: self.notification,
                 application: self.application,
+                #[cfg(all(test, unix))]
+                expired: None,
             },
         ))
     }

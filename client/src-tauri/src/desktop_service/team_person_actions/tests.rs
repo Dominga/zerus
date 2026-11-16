@@ -2,7 +2,7 @@
 use super::*;
 use zerus_client_core::{desktop::creation_clone::Scope, teams::action::TeamAction};
 
-fn call() -> TeamCall {
+pub(super) fn call() -> TeamCall {
     TeamCall {
         team: uuid::Uuid::new_v4().to_string(),
         team_name: "Untrusted caption".into(),
@@ -14,7 +14,7 @@ fn call() -> TeamCall {
         request_id: uuid::Uuid::new_v4().to_string(),
     }
 }
-fn review(call: &TeamCall) -> wire::Review {
+pub(super) fn review(call: &TeamCall) -> wire::Review {
     wire::Review {
         intent: wire::Intent {
             scope: Scope {

@@ -255,39 +255,9 @@ pub(crate) fn run(
             "The exact team action is unavailable or changed. Read it again.",
         );
     };
-    let Some(window) = crate::main_window(&app) else {
-        return failed(
-            &call,
-            "person_gesture_required",
-            "The main window is unavailable.",
-        );
-    };
-    let title = crate::native_text::render(&zerus_client_core::text!("Confirm team action"));
-    let details = review
-        .details
-        .iter()
-        .map(|(key, value)| format!("{key}:\n{value}"))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let body=format!("{}\n\n{}\n\nTeam: {}\nComputer: {}\nRevision: {}\n\nReviewed values begin\n{}\nReviewed values end",
-        review.team_name,review.subject,plan.team,review.intent.machine,plan.expected_revision,details);
-    let accepted = app
-        .dialog()
-        .message(body)
-        .title(title.clone())
-        .parent(&window)
-        .kind(MessageDialogKind::Warning)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            title,
-            crate::native_text::render(&zerus_client_core::text!("Cancel")),
-        ))
-        .blocking_show();
-    let Some(confirmed) = Confirmed::after_dialog(review, accepted) else {
-        return failed(
-            &call,
-            "person_gesture_cancelled",
-            "The team action was cancelled. Nothing was sent.",
-        );
+    let confirmed = match confirm(&app, &plan, review) {
+        Ok(confirmed) => confirmed,
+        Err(message) => return failed(&call, "person_gesture_cancelled", &message),
     };
     if !read.current() {
         return failed(
@@ -320,6 +290,39 @@ pub(crate) fn run(
     }
     result
 }
+
+fn confirm(
+    app: &tauri::AppHandle,
+    plan: &wire::Plan,
+    review: wire::Review,
+) -> Result<Confirmed, String> {
+    let window = crate::main_window(app).ok_or("The main window is unavailable.")?;
+    let title = crate::native_text::render(&zerus_client_core::text!("Confirm team action"));
+    let details = review
+        .details
+        .iter()
+        .map(|(key, value)| format!("{key}:\n{value}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let body=format!("{}\n\n{}\n\nTeam: {}\nComputer: {}\nRevision: {}\n\nReviewed values begin\n{}\nReviewed values end",
+        serde_json::to_string(&review.team_name).unwrap_or_default(),review.subject,plan.team,review.intent.machine,plan.expected_revision,details);
+    let accepted = app
+        .dialog()
+        .message(body)
+        .title(title.clone())
+        .parent(&window)
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            title,
+            crate::native_text::render(&zerus_client_core::text!("Cancel")),
+        ))
+        .blocking_show();
+    Confirmed::after_dialog(review, accepted)
+        .ok_or_else(|| "The team action was cancelled. Nothing was sent.".into())
+}
+
+mod tasks;
+pub(crate) use tasks::run_task;
 
 #[cfg(test)]
 mod tests;

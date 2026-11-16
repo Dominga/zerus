@@ -34,6 +34,9 @@ pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
         matches!(
             word.as_str(),
             "create"
+                | "start-planning"
+                | "advance-base"
+                | "validation-settings"
                 | "decide"
                 | "settings"
                 | "add-member"

@@ -44,6 +44,11 @@ impl Teams {
     pub fn new() -> Self {
         Self::default()
     }
+    pub(crate) fn native_actions(
+        &self,
+    ) -> std::sync::Arc<crate::desktop_service::team_person_actions::Actions> {
+        self.actions.clone()
+    }
 
     fn poller(&self) -> MutexGuard<'_, Option<TeamsPoller>> {
         self.poller.lock().unwrap_or_else(PoisonError::into_inner)

@@ -44,7 +44,7 @@ fn admission_actor(store: &Store, header: &Header, who: &TaskActor) -> Result<Ac
         },
     })
 }
-fn check(
+pub(super) fn check(
     store: &Store,
     caller: &Caller<'_>,
     project: &str,
@@ -171,7 +171,7 @@ pub(crate) fn preflight(
     let store = Store::open(caller.state)?;
     check(&store, caller, project, team, role, pipeline, existing).map(|_| ())
 }
-fn foreign(caller: &Caller<'_>, document: &TaskDoc) -> Result<()> {
+pub(super) fn foreign(caller: &Caller<'_>, document: &TaskDoc) -> Result<()> {
     let invalid = document.team_invalid();
     let remote = document
         .team()
@@ -346,7 +346,7 @@ pub(crate) fn send(
     }
 }
 
-fn prepare(
+pub(super) fn prepare(
     store: &Store,
     caller: &Caller<'_>,
     task: &TaskRef,

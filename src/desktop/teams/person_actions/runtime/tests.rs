@@ -63,7 +63,7 @@ fn stage(runtime: &mut Runtime, plan: &wire::Plan) {
     let result = runtime.stage(Validated::fixture(
         &json!({"op":"team_person_plan_piece","piece":piece}),
     ));
-    assert_eq!(result["ok"], true);
+    assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["complete"], true);
 }
 
@@ -85,6 +85,10 @@ fn native_v2_worker_prepares_executes_and_only_reads_original_results() {
             2,
         )
         .unwrap();
+    assert!(
+        runtime.plans.get(&review.intent.plan).is_err(),
+        "spent action data must not fill the bounded staging cache"
+    );
     let original = take(&queue)["value"].clone();
     assert_eq!(original["reply"]["ok"], true, "{original}");
     assert_eq!(
@@ -169,4 +173,88 @@ fn native_v2_workers_are_bounded_and_one_wait_does_not_block_the_actor() {
     drop(runtime);
     assert_eq!(Arc::strong_count(&owner), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn native_task_original_is_reserved_before_document_and_only_its_receipt_recovers() {
+    let (h, mut runtime, _, _owner) = sample();
+    let home = h.store.team(TEAM).unwrap().unwrap().home;
+    crate::swarm::fixture_project(&runtime.config, &home, "example-project");
+    {
+        let tx = h
+            .store
+            .db
+            .as_ref()
+            .unwrap()
+            .unchecked_transaction()
+            .unwrap();
+        store::person_actions::migrate(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let draft = wire::TaskDraft {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        team: TEAM.into(),
+        action: wire::Action::NewTask {
+            project: "example-project".into(),
+            title: "Native task original".into(),
+            backlog: true,
+        },
+    };
+    let queue = Arc::new(Queue::default());
+    runtime
+        .query(
+            &json!({"op":"team_person_task_prepare","scope":runtime.scope,"draft":draft}),
+            queue.clone(),
+            1,
+        )
+        .unwrap();
+    let value = take(&queue)["value"].clone();
+    assert_eq!(value["ok"], true, "{value}");
+    let plan: wire::Plan = serde_json::from_value(value["plan"].clone()).unwrap();
+    let review: wire::Review = serde_json::from_value(value["review"].clone()).unwrap();
+    stage(&mut runtime, &plan);
+    let queue = Arc::new(Queue::default());
+    runtime
+        .action(
+            Validated::fixture(&json!({"op":"team_person_action","intent":review.intent})),
+            queue.clone(),
+            2,
+        )
+        .unwrap();
+    let original = take(&queue)["value"].clone();
+    assert_eq!(original["reply"]["ok"], true, "{original}");
+    assert_eq!(original["reply"]["task"]["uuid"], draft.request_id);
+    assert_eq!(original["reply"]["team"]["queued"], true, "{original}");
+    let project =
+        zerus_replica::ProjectStore::open(&h.temp.path().join("replica"), "example-project")
+            .unwrap();
+    let doc = project
+        .admit_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+        .unwrap()
+        .load_complete(&draft.request_id)
+        .unwrap();
+    assert_eq!(doc.team().unwrap().unwrap().team, TEAM);
+    assert_eq!(doc.stage().unwrap(), zerus_replica::Stage::Backlog);
+    drop(project);
+    runtime.scope.service_epoch = uuid::Uuid::new_v4().to_string();
+    let queue = Arc::new(Queue::default());
+    runtime
+        .query(
+            &json!({"op":"team_person_action_result","intent":review.intent}),
+            queue.clone(),
+            3,
+        )
+        .unwrap();
+    assert_eq!(take(&queue)["value"], original);
+    runtime.plans = Cache::new(runtime.scope.clone());
+    stage(&mut runtime, &plan);
+    let queue = Arc::new(Queue::default());
+    runtime
+        .action(
+            Validated::fixture(&json!({"op":"team_person_action","intent":review.intent})),
+            queue.clone(),
+            4,
+        )
+        .unwrap_err();
+    assert_eq!(h.store.queue(TEAM, 200, None).unwrap().rows.len(), 1);
 }

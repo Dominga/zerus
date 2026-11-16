@@ -1317,7 +1317,11 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         let result = if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
-                                Some("team_person_action_prepare" | "team_person_action_result")
+                                Some(
+                                    "team_person_action_prepare"
+                                        | "team_person_action_result"
+                                        | "team_person_task_prepare"
+                                )
                             )
                         }) {
                             match person_actions.query(

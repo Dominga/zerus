@@ -46,6 +46,11 @@ enum Query {
     Prepare { scope: Scope, plan: wire::Reference },
     #[serde(rename = "team_person_action_result")]
     Result { intent: wire::Intent },
+    #[serde(rename = "team_person_task_prepare")]
+    TaskPrepare {
+        scope: Scope,
+        draft: wire::TaskDraft,
+    },
 }
 
 impl Runtime {
@@ -83,6 +88,7 @@ impl Runtime {
             Query::Prepare { scope, plan } if scope == &self.scope => {
                 Some(self.plans.get(plan).map_err(store::storage)?)
             }
+            Query::TaskPrepare { scope, draft } if scope == &self.scope && draft.valid() => None,
             Query::Result { intent }
                 if intent.valid() && intent.scope.configuration == self.scope.configuration =>
             {
@@ -96,6 +102,7 @@ impl Runtime {
             let result = match query {
                 Query::Prepare { .. } => review(&config,&scope,plan.expect("checked native plan")),
                 Query::Result { intent } => lookup(&config,&scope,&intent),
+                Query::TaskPrepare {draft,..} => super::intake::review(&config,&scope,draft),
             };
             result.unwrap_or_else(|_| json!({"ok":false,"code":"team_person_action_evidence_unavailable","message":"The exact native team action evidence is unavailable. Nothing was replayed."}))
         })
@@ -113,13 +120,17 @@ impl Runtime {
         let config = self.config.clone();
         let scope = self.scope.clone();
         let stopped = self.stopped.clone();
-        self.start(queue, seq, move || {
+        let reference = intent.plan.clone();
+        let started = self.start(queue, seq, move || {
             let result = (|| -> Result<Value> {
                 if !cfg!(unix) || stopped.load(Ordering::Acquire) {
                     return Err(required());
                 }
                 let prepared = Arc::new(Prepared::resolve(&config, plan)?);
                 let request = prepared.request.clone();
+                if !matches!(prepared.plan.action, wire::Action::Team { .. }) {
+                    return super::intake::execute(&config, scope, stopped, authority, prepared);
+                }
                 let admission = Admission::new(authority, prepared, config.clone(), scope, stopped);
                 // Before opening a writer (which may migrate an existing
                 // schema), check the exact original and canonical request.
@@ -139,7 +150,11 @@ impl Runtime {
             result.unwrap_or_else(
                 |problem| json!({"intent":intent,"reply":refusal(&intent.plan.request_id,problem)}),
             )
-        })
+        });
+        if started.is_ok() {
+            self.plans.discard(&reference);
+        }
+        started
     }
 
     pub fn poll(&mut self) {
@@ -207,27 +222,51 @@ impl Drop for Runtime {
 fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value> {
     let prepared = Prepared::resolve(config, plan.clone())?;
     let store = Store::person_evidence(&config.state)?;
-    let db = store.db.as_ref().ok_or_else(required)?;
-    let tx = db.unchecked_transaction().map_err(store::storage)?;
-    let (team, facts) = prepared.bound_facts(&tx, Some(config))?;
-    let team = team.ok_or_else(required)?;
-    ops::authority(&prepared::actor(), &prepared.request.operation, &team)?;
-    if team.revision != plan.expected_revision {
-        return Err(Problem::new(
-            code::STALE_REVISION,
-            "Read the current team before confirming its action.",
-        ));
-    }
+    let tx = store
+        .db
+        .as_ref()
+        .map(|db| db.unchecked_transaction())
+        .transpose()
+        .map_err(store::storage)?;
+    let (team, facts) = if let Some(tx) = &tx {
+        prepared.bound_facts(tx, Some(config))?
+    } else {
+        (None, prepared.empty_facts()?)
+    };
+    let team_name = if let Some(team) = team {
+        ops::authority(&prepared::actor(), &prepared.request.operation, &team)?;
+        if team.revision != plan.expected_revision {
+            return Err(Problem::new(
+                code::STALE_REVISION,
+                "Read the current team before confirming its action.",
+            ));
+        }
+        team.name
+    } else {
+        match &prepared.request.operation {
+            ops::Operation::Create { name, .. } | ops::Operation::StartPlanning { name, .. }
+                if plan.expected_revision == 0 =>
+            {
+                name.clone()
+            }
+            _ => return Err(required()),
+        }
+    };
+    let binding = if let Some(tx) = &tx {
+        wire::StoreBinding::Existing {
+            fingerprint: super::super::person_gesture::identity(tx, store.state())?,
+        }
+    } else {
+        wire::StoreBinding::Absent {
+            root: super::birth::root(store.state())?,
+        }
+    };
     let wire::Action::Team { change } = &plan.action else {
         return Err(required());
     };
     let mut details = Vec::new();
     for (key, value) in change.input() {
-        let text = if let Value::String(s) = value {
-            s
-        } else {
-            serde_json::to_string_pretty(&value).map_err(store::storage)?
-        };
+        let text = serde_json::to_string_pretty(&value).map_err(store::storage)?;
         // The complete bounded payload is displayed; no truncation can hide
         // a permission, dependency or phase node from native confirmation.
         let mut start = 0;
@@ -245,18 +284,25 @@ fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value
             part += 1;
         }
     }
+    if let zerus_client_core::teams::action::TeamAction::Create { template, .. }
+    | zerus_client_core::teams::action::TeamAction::StartPlanning { template, .. } =
+        change.as_ref()
+    {
+        details.push((
+            "Template".into(),
+            serde_json::to_string(template).map_err(store::storage)?,
+        ));
+    }
     let review = wire::Review {
         intent: wire::Intent {
             scope: scope.clone(),
             machine: original::machine(config)?,
-            store: wire::StoreBinding::Existing {
-                fingerprint: super::super::person_gesture::identity(&tx, store.state())?,
-            },
+            store: binding,
             facts,
             request: wire::digest(&prepared.request).ok_or_else(required)?,
             plan: plan.reference().ok_or_else(required)?,
         },
-        team_name: team.name,
+        team_name,
         title: "Confirm team action".into(),
         subject: change.op().replace('-', " "),
         details,
@@ -277,14 +323,22 @@ fn lookup(config: &Config, scope: &Scope, intent: &wire::Intent) -> Result<Value
     let store = Store::person_evidence(&config.state)?;
     let db = store.db.as_ref().ok_or_else(required)?;
     let tx = db.unchecked_transaction().map_err(store::storage)?;
-    let wire::StoreBinding::Existing { fingerprint } = &intent.store else {
-        return Err(required());
-    };
-    if super::super::person_gesture::identity(&tx, store.state())? != *fingerprint {
+    if let wire::StoreBinding::Existing { fingerprint } = &intent.store {
+        if super::super::person_gesture::identity(&tx, store.state())? != *fingerprint {
+            return Err(required());
+        }
+        if store::person_actions::reserved(&tx, &intent.plan.request_id)? {
+            let saved = store::person_actions::original(&tx, intent)?;
+            return Ok(
+                json!({"intent":intent,"reply":saved.result.unwrap_or_else(||json!({"ok":false,"code":"team_person_action_unknown","request_id":intent.plan.request_id,"message":"The original task intake is unconfirmed. Nothing was replayed."}))}),
+            );
+        }
+    }
+    let original_store = original::original(&tx, intent)?;
+    if super::super::person_gesture::identity(&tx, store.state())? != original_store {
         return Err(required());
     }
     original::receipt_bound(&tx, &intent.plan.request_id)?;
-    original::original(&tx, intent)?;
     let body: Option<String> = tx
         .query_row(
             "SELECT content FROM requests WHERE id=?1 AND length(CAST(content AS BLOB))<=262144",

@@ -394,6 +394,25 @@ stays Unknown. Retain the existing partial outcome when the task exists but
 its team queue refuses or cannot be confirmed. Preserve the existing Session
 and Service intake checks and settlement rules.
 
+The reserved UUID also fences the common Teams writer for every other actor;
+changing the actor or operation cannot spend it during the document-side gap.
+Only the original intake custodian may enter that reserved writer. Its permit
+borrows the original's project/document custody, so the outer original retains
+the project lock through the actual Teams commit. Finalization can restore a
+known refused intake's previous document binding and save its exact partial
+receipt in that same transaction. A storage-uncertain result keeps the durable
+Unknown reservation; no saved header can reconstruct the borrowed custodian.
+
+A still-current original may record a closed semantic refusal while holding
+its exact project and Teams writer, including a stale reviewed revision.
+That records data only: it creates no execution custodian and saves no task.
+A verified new-task absence may then be shown as not created; missing or
+storage-uncertain evidence stays Unknown. Final replies come from the durable
+original after commit, never an in-memory result tentatively written inside
+a transaction that final consent consumption may still roll back. The initial
+saved-task observation shares the queue/result transaction; a storage failure
+keeps the original Unknown rather than swallowing the observation error.
+
 The New task form must checkpoint its exact native original before any
 authority-bearing request is sent. Its recovery action reads the original
 receipt only; it cannot invoke `task add --team` again. A legacy or missing

@@ -1,8 +1,5 @@
 //! A live native original, never a serialized actor or saved receipt.
-use super::{
-    prepared::{self, Prepared},
-    required,
-};
+use super::{prepared::Prepared, required};
 use crate::{
     config::Config,
     desktop::ui_authority::Validated,
@@ -25,6 +22,7 @@ pub(super) struct Admission {
     authority: Validated,
     prepared: Arc<Prepared>,
     context: Context,
+    birth: Option<super::birth::Birth>,
 }
 enum Context {
     Service {
@@ -41,6 +39,7 @@ pub(crate) struct Evidence {
     prepared: Arc<Prepared>,
     config: Option<Box<Config>>,
     stopped: Option<Arc<AtomicBool>>,
+    store: String,
 }
 
 impl Admission {
@@ -59,6 +58,7 @@ impl Admission {
                 scope,
                 stopped,
             },
+            birth: None,
         }
     }
 
@@ -92,6 +92,43 @@ impl Admission {
             .map_err(|_| required())
     }
 
+    pub fn prepare_store(&mut self, state: &Path) -> Result<()> {
+        let intent = self
+            .authority
+            .team_person_action_intent()
+            .ok_or_else(required)?;
+        let wire::StoreBinding::Absent { root } = &intent.store else {
+            return Ok(());
+        };
+        if !matches!(
+            self.prepared.request.operation,
+            ops::Operation::Create { .. } | ops::Operation::StartPlanning { .. }
+        ) || self.prepared.request.expected_revision != 0
+        {
+            return Err(required());
+        }
+        match &self.context {
+            Context::Service { config, .. } => {
+                if crate::platform::canonical(&config.state).map_err(store::storage)? != state {
+                    return Err(required());
+                }
+            }
+            #[cfg(test)]
+            Context::Fixture => (),
+        }
+        self.authority
+            .check_team_person_action()
+            .map_err(|_| required())?;
+        if let Some(birth) = &self.birth {
+            birth.verify(state)?;
+        } else {
+            self.birth = Some(super::birth::Birth::create(state, root)?);
+        }
+        // Finish initializing this original's private empty store even if
+        // its consent expires now; the writer still refuses every team row.
+        Ok(())
+    }
+
     pub fn consume(
         self,
         db: &Connection,
@@ -107,11 +144,15 @@ impl Admission {
             .authority
             .team_person_action_intent()
             .ok_or_else(required)?;
-        let wire::StoreBinding::Existing { fingerprint } = &intent.store else {
-            return Err(required());
-        };
-        if super::super::person_gesture::identity(db, state)? != *fingerprint {
-            return Err(required());
+        let fingerprint = super::super::person_gesture::identity(db, state)?;
+        match &intent.store {
+            wire::StoreBinding::Existing {
+                fingerprint: expected,
+            } if &fingerprint == expected => (),
+            wire::StoreBinding::Absent { .. } => {
+                self.birth.as_ref().ok_or_else(required)?.verify(state)?
+            }
+            _ => return Err(required()),
         }
         let (config, stopped) = match self.context {
             Context::Service {
@@ -143,6 +184,7 @@ impl Admission {
             prepared: self.prepared,
             config,
             stopped,
+            store: fingerprint,
         })
     }
 
@@ -170,13 +212,16 @@ impl Admission {
             authority: Validated::fixture(&json!({"op":"team_person_action","intent":intent})),
             prepared,
             context: Context::Fixture,
+            birth: None,
         }
     }
 }
 
 impl Evidence {
     pub fn original(&self, db: &Connection) -> Result<()> {
-        original(db, &self.intent)?;
+        if original(db, &self.intent)? != self.store {
+            return Err(required());
+        }
         self.current()
     }
     pub fn fresh(&self, db: &Connection) -> Result<()> {
@@ -189,7 +234,7 @@ impl Evidence {
         }
         self.current()
     }
-    fn current(&self) -> Result<()> {
+    pub(super) fn current(&self) -> Result<()> {
         if self
             .stopped
             .as_ref()
@@ -201,6 +246,31 @@ impl Evidence {
             .check_team_person_action()
             .map_err(|_| required())
     }
+    /// A closed intake refusal has no operation request row and grants no
+    /// execution custody. Its own immutable ledger is the exact receipt.
+    pub(super) fn record_refusal(self, db: &Connection) -> Result<()> {
+        if db.is_autocommit() {
+            return Err(required());
+        }
+        let saved = store::person_actions::original(db, &self.intent)?;
+        if saved.request != self.prepared.request
+            || !saved
+                .result
+                .as_ref()
+                .is_some_and(|reply| reply["team"]["queued"] == false)
+        {
+            return Err(required());
+        }
+        self.current()?;
+        let consumed = self
+            .authority
+            .team_person_action()
+            .map_err(|_| required())?;
+        if consumed != self.intent {
+            return Err(required());
+        }
+        Ok(())
+    }
     pub fn record(self, db: &Connection) -> Result<()> {
         self.current()?;
         let intent = self
@@ -209,7 +279,13 @@ impl Evidence {
             .map_err(|_| required())?;
         db.execute(
             "INSERT INTO person_gestures(request_id,intent) VALUES(?1,?2)",
-            params![intent.plan.request_id, store::encode(&intent)?],
+            params![
+                intent.plan.request_id,
+                store::encode(&Stored {
+                    intent: intent.clone(),
+                    store: self.store
+                })?
+            ],
         )
         .map_err(store::storage)?;
         Ok(())
@@ -230,21 +306,40 @@ pub(super) fn receipt_bound(db: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn original(db: &Connection, intent: &wire::Intent) -> Result<()> {
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Stored {
+    intent: wire::Intent,
+    store: String,
+}
+
+pub(super) fn original(db: &Connection, intent: &wire::Intent) -> Result<String> {
     let saved: Option<String> = db.query_row(
         "SELECT intent FROM person_gestures WHERE request_id=?1 AND length(CAST(intent AS BLOB))<=65536",
         [&intent.plan.request_id], |r| r.get(0)).optional().map_err(store::storage)?;
-    if saved.as_deref() != Some(store::encode(intent)?.as_str()) {
+    let saved: Option<Stored> = saved
+        .as_deref()
+        .and_then(|body| serde_json::from_str(body).ok());
+    let saved = saved.filter(|saved| {
+        &saved.intent == intent
+            && saved.store.len() == 64
+            && saved
+                .store
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    });
+    if saved.is_none() {
         return Err(Problem::new(
             zerus_team_plan::problem::code::DUPLICATE,
             "The original native team action evidence is unavailable or different.",
         ));
     }
-    Ok(())
+    Ok(saved.expect("checked original").store)
 }
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::prepared;
     use super::*;
     use crate::teams::ops::tests::{self as producers, Harness, TEAM};
     use zerus_client_core::teams::action::TeamAction;
@@ -475,5 +570,303 @@ mod tests {
                 .unwrap();
             assert_eq!(count, 0);
         }
+    }
+
+    fn first_create(h: &Harness) -> (Arc<Prepared>, wire::Intent, Admission) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(h.temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut request = producers::request(0, producers::create());
+        if let ops::Operation::Create {
+            bundle,
+            expected_template,
+            delegations,
+            ..
+        } = &mut request.operation
+        {
+            *expected_template = Some(crate::teams::catalog::template_digest(bundle).unwrap());
+            *delegations = Some(zerus_team_plan::model::Delegations::default());
+        }
+        let ops::Operation::Create {
+            project,
+            name,
+            goal,
+            home,
+            bundle,
+            integration_branch,
+            base_commit,
+            ..
+        } = &request.operation
+        else {
+            unreachable!()
+        };
+        let delegations = serde_json::from_value(
+            serde_json::to_value(zerus_team_plan::model::Delegations::default()).unwrap(),
+        )
+        .unwrap();
+        let plan = wire::Plan {
+            request_id: request.request_id.clone(),
+            team: request.team.clone(),
+            expected_revision: 0,
+            action: wire::Action::Team {
+                change: Box::new(TeamAction::Create {
+                    template: bundle.template.id.clone(),
+                    project: project.clone(),
+                    name: name.clone(),
+                    goal: goal.clone(),
+                    home: home.clone(),
+                    integration_branch: integration_branch.clone(),
+                    base_commit: base_commit.clone(),
+                    integration: bundle.template.settings.integration,
+                    expected_template: crate::teams::catalog::template_digest(bundle).unwrap(),
+                    delegations,
+                }),
+            },
+        };
+        assert!(plan.valid());
+        let prepared = Arc::new(Prepared {
+            plan: Arc::new(plan),
+            request,
+        });
+        let intent = wire::Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: uuid::Uuid::new_v4().to_string(),
+            },
+            machine: uuid::Uuid::new_v4().to_string(),
+            store: wire::StoreBinding::Absent {
+                root: super::super::birth::root(h.store.state()).unwrap(),
+            },
+            facts: prepared.empty_facts().unwrap(),
+            request: wire::digest(&prepared.request).unwrap(),
+            plan: prepared.plan.reference().unwrap(),
+        };
+        let admission = Admission {
+            authority: Validated::fixture(
+                &serde_json::json!({"op":"team_person_action","intent":intent}),
+            ),
+            prepared: prepared.clone(),
+            context: Context::Fixture,
+            birth: None,
+        };
+        (prepared, intent, admission)
+    }
+
+    #[test]
+    fn native_v2_model_first_create_binds_absence_and_records_the_born_store() {
+        let mut h = Harness::empty();
+        let (prepared, intent, admission) = first_create(&h);
+        assert!(!h.temp.path().join("teams/teams-v1.sqlite3").exists());
+        let result = ops::apply_with_native(
+            &mut h.store,
+            &prepared::actor(),
+            &prepared.request,
+            1234,
+            Some(admission.into()),
+        )
+        .unwrap();
+        assert_eq!(result.revision, 1);
+        assert_eq!(
+            h.store.team(TEAM).unwrap().unwrap().name,
+            producers::fixture().team.name
+        );
+        assert_eq!(
+            original(h.store.db.as_ref().unwrap(), &intent).unwrap(),
+            super::super::super::person_gesture::identity(
+                h.store.db.as_ref().unwrap(),
+                h.store.state()
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn native_v2_model_first_create_refuses_a_store_arriving_after_review() {
+        let mut h = Harness::empty();
+        let (prepared, _intent, admission) = first_create(&h);
+        h.run_for(producers::TEAM_B, &producers::person(), producers::create())
+            .unwrap();
+        let before = super::super::super::person_gesture::identity(
+            h.store.db.as_ref().unwrap(),
+            h.store.state(),
+        )
+        .unwrap();
+        let problem = ops::apply_with_native(
+            &mut h.store,
+            &prepared::actor(),
+            &prepared.request,
+            1234,
+            Some(admission.into()),
+        )
+        .unwrap_err();
+        assert_eq!(problem.code, "person_gesture_required");
+        assert!(h.store.team(TEAM).unwrap().is_none());
+        assert_eq!(
+            super::super::super::person_gesture::identity(
+                h.store.db.as_ref().unwrap(),
+                h.store.state()
+            )
+            .unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn native_v2_model_first_create_refuses_a_replaced_directory() {
+        let mut h = Harness::empty();
+        let (prepared, _intent, admission) = first_create(&h);
+        let teams = h.temp.path().join("teams");
+        std::fs::rename(&teams, h.temp.path().join("original-teams")).unwrap();
+        crate::platform::private_dir(&teams).unwrap();
+        std::fs::write(teams.join("preview"), "on").unwrap();
+        assert_eq!(
+            ops::apply_with_native(
+                &mut h.store,
+                &prepared::actor(),
+                &prepared.request,
+                1234,
+                Some(admission.into())
+            )
+            .unwrap_err()
+            .code,
+            "person_gesture_required"
+        );
+        assert!(!teams.join("teams-v1.sqlite3").exists());
+    }
+
+    #[test]
+    fn native_v2_model_expiry_after_mutation_rolls_back_every_row() {
+        use rusqlite::functions::FunctionFlags;
+        let mut h = Harness::new();
+        let prepared = sample(&h);
+        let original_name = h.store.team(TEAM).unwrap().unwrap().name;
+        let mut admission = Admission::fixture(&h.store, prepared.clone());
+        let intent = admission
+            .authority
+            .team_person_action_intent()
+            .unwrap()
+            .clone();
+        let expired = Arc::new(AtomicBool::new(false));
+        let reached = Arc::new(AtomicBool::new(false));
+        admission.authority = Validated::fixture_clock(
+            &serde_json::json!({"op":"team_person_action","intent":intent}),
+            expired.clone(),
+        );
+        let observed = reached.clone();
+        h.store
+            .db
+            .as_ref()
+            .unwrap()
+            .create_scalar_function(
+                "expire_native_original",
+                0,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                move |_| {
+                    observed.store(true, Ordering::Release);
+                    expired.store(true, Ordering::Release);
+                    Ok(0i64)
+                },
+            )
+            .unwrap();
+        h.store.db.as_ref().unwrap().execute_batch("CREATE TEMP TRIGGER expiry_after_saved_request AFTER INSERT ON main.requests BEGIN SELECT expire_native_original(); END;").unwrap();
+        assert_eq!(
+            ops::apply_with_native(
+                &mut h.store,
+                &prepared::actor(),
+                &prepared.request,
+                1234,
+                Some(admission.into())
+            )
+            .unwrap_err()
+            .code,
+            "person_gesture_required"
+        );
+        assert!(
+            reached.load(Ordering::Acquire),
+            "expiry must occur after the real mutation and request insert"
+        );
+        let team = h.store.team(TEAM).unwrap().unwrap();
+        assert_eq!(team.name, original_name);
+        assert_eq!(team.revision, prepared.request.expected_revision);
+        let db = h.store.db.as_ref().unwrap();
+        for table in ["requests", "person_gestures"] {
+            let key = if table == "requests" {
+                "id"
+            } else {
+                "request_id"
+            };
+            let count: u32 = db
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE {key}=?1"),
+                    [&prepared.request.request_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    type WriterGate = (
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    );
+    thread_local! { static WRITER:std::cell::RefCell<Option<WriterGate>>=const {std::cell::RefCell::new(None)}; }
+    fn wait_for_writer(_: i32) -> bool {
+        WRITER.with(|slot| {
+            slot.borrow_mut().take().is_some_and(|(blocked, resume)| {
+                blocked.send(()).is_ok()
+                    && resume
+                        .recv_timeout(std::time::Duration::from_secs(15))
+                        .is_ok()
+            })
+        })
+    }
+    #[test]
+    fn native_v2_model_expiry_during_writer_wait_is_rechecked_inside_the_writer() {
+        let mut h = Harness::new();
+        let prepared = sample(&h);
+        let mut admission = Admission::fixture(&h.store, prepared.clone());
+        let intent = admission
+            .authority
+            .team_person_action_intent()
+            .unwrap()
+            .clone();
+        let expired = Arc::new(AtomicBool::new(false));
+        admission.authority = Validated::fixture_clock(
+            &serde_json::json!({"op":"team_person_action","intent":intent}),
+            expired.clone(),
+        );
+        let writer = Connection::open(h.temp.path().join("teams/teams-v1.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = std::sync::mpsc::sync_channel(1);
+        let request = prepared.request.clone();
+        let worker = std::thread::spawn(move || {
+            WRITER.with(|slot| *slot.borrow_mut() = Some((blocked_tx, resume_rx)));
+            h.store
+                .db
+                .as_ref()
+                .unwrap()
+                .busy_handler(Some(wait_for_writer))
+                .unwrap();
+            let result = ops::apply_with_native(
+                &mut h.store,
+                &prepared::actor(),
+                &request,
+                1234,
+                Some(admission.into()),
+            );
+            (h, result)
+        });
+        let blocked = blocked_rx.recv_timeout(std::time::Duration::from_secs(15));
+        expired.store(true, Ordering::Release);
+        writer.execute_batch("COMMIT").unwrap();
+        let _ = resume_tx.send(());
+        let (h, result) = worker.join().unwrap();
+        blocked.expect("native original must actually wait for the writer");
+        assert_eq!(result.unwrap_err().code, "person_gesture_required");
+        assert_eq!(
+            h.store.team(TEAM).unwrap().unwrap().revision,
+            prepared.request.expected_revision
+        );
     }
 }

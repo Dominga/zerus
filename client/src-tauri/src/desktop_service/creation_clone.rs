@@ -145,7 +145,11 @@ impl Read {
             Some(Request::TeamPersonAction { .. } | Request::TeamPersonPlanPiece { .. })
         ) || matches!(
             input["op"].as_str(),
-            Some("team_person_action_prepare" | "team_person_action_result")
+            Some(
+                "team_person_action_prepare"
+                    | "team_person_action_result"
+                    | "team_person_task_prepare"
+            )
         ) {
             zerus_client_core::desktop::team_person_actions::BYTES
         } else if matches!(request, Some(Request::TeamPersonDecide { .. }))

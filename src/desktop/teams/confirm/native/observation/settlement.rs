@@ -36,7 +36,7 @@ impl WriterPorts {
         crate::platform::private_dir(&config.state.join("teams")).unwrap();
         std::fs::write(config.state.join("teams/preview"), "on\n").unwrap();
         let mut store = Store::open(&config.state).unwrap();
-        ops::apply(
+        setup::apply_fixture(
             &mut store,
             &setup::person(),
             &setup::request(0, setup::create()),

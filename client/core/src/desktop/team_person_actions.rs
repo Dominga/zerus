@@ -104,7 +104,9 @@ impl Plan {
                         .call()
                         .is_some_and(|call| crate::teams::action::prepare(&call).is_ok())
             }
-            Action::NewTask { project, title, .. } => text(project, 256) && text(title, 512),
+            Action::NewTask { project, title, .. } => {
+                text(project, 128) && text(title, 512) && !title.trim().is_empty()
+            }
             Action::Intake {
                 project,
                 task,
@@ -119,6 +121,81 @@ impl Plan {
                     && pipeline.as_deref().is_none_or(|value| text(value, 256))
             }
         }
+    }
+}
+
+/// A new task-intake review asks the service for the canonical team revision
+/// before confirmation. Recovery never calls this preparation again.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskDraft {
+    pub request_id: String,
+    pub team: String,
+    pub action: Action,
+}
+impl TaskDraft {
+    pub fn valid(&self) -> bool {
+        let mut action = self.action.clone();
+        if let Action::Intake { revision, .. } = &mut action {
+            // Only the data-only read draft may leave this unset. The
+            // returned Plan always binds the canonical task clock before
+            // the native dialog, and Plan::valid still refuses an empty one.
+            if revision.is_empty() {
+                *revision = "unread draft".into();
+            }
+        }
+        !matches!(action, Action::Team { .. })
+            && Plan {
+                request_id: self.request_id.clone(),
+                team: self.team.clone(),
+                expected_revision: 0,
+                action,
+            }
+            .valid()
+    }
+    pub fn matches_plan(&self, plan: &Plan) -> bool {
+        if !self.valid() || !plan.valid() {
+            return false;
+        }
+        let mut expected = self.clone();
+        if let (
+            Action::Intake { revision, .. },
+            Action::Intake {
+                revision: actual, ..
+            },
+        ) = (&mut expected.action, &plan.action)
+        {
+            if revision.is_empty() {
+                *revision = actual.clone();
+            }
+        }
+        expected.plan(plan.expected_revision).as_ref() == Some(plan)
+    }
+    pub fn plan(&self, expected_revision: u64) -> Option<Plan> {
+        let plan = Plan {
+            request_id: self.request_id.clone(),
+            team: self.team.clone(),
+            expected_revision,
+            action: self.action.clone(),
+        };
+        (self.valid() && plan.valid()).then_some(plan)
+    }
+}
+
+/// Persisted data for one task original. It grants no execution authority:
+/// reopening a form can only read the exact recorded original result.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskOriginal {
+    pub plan: Plan,
+    pub intent: Intent,
+}
+impl TaskOriginal {
+    pub fn valid(&self) -> bool {
+        !matches!(self.plan.action, Action::Team { .. })
+            && self.intent.valid()
+            && self.plan.reference().as_ref() == Some(&self.intent.plan)
+            && matches!(self.intent.store, StoreBinding::Existing { .. })
     }
 }
 
@@ -300,6 +377,125 @@ mod tests {
         assert_ne!(digest(&plan), digest(&changed));
         changed.request_id = "not-a-request".into();
         assert!(!changed.valid());
+    }
+
+    #[test]
+    fn both_creation_kinds_pin_zero_revision_without_a_prior_team() {
+        let action = TeamAction::StartPlanning {
+            template: "queue-default".into(),
+            project: "example".into(),
+            name: "Reviewed team".into(),
+            goal: "Prepare the initial plan".into(),
+            home: uuid::Uuid::new_v4().to_string(),
+            integration_branch: "teams/example".into(),
+            base_commit: "a".repeat(40),
+            integration: zerus_team_plan::model::Integration::Branch,
+            expected_template: "b".repeat(64),
+            delegations: serde_json::from_value(json!({
+                "accept_results":false,"answer_members":false,"confirm_trust":false,
+                "resume_exited":false,"merge_accepted":false
+            }))
+            .unwrap(),
+        };
+        for kind in ["start_planning", "create"] {
+            let mut value = serde_json::to_value(&action).unwrap();
+            value["kind"] = serde_json::json!(kind);
+            let call = TeamCall {
+                team: uuid::Uuid::new_v4().to_string(),
+                team_name: String::new(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                action: serde_json::from_value(value).unwrap(),
+                expected_revision: None,
+                confirmed: false,
+            };
+            let mut plan = Plan::from_call(&call).unwrap();
+            assert_eq!(plan.expected_revision, 0);
+            assert!(plan.valid());
+            plan.expected_revision = 1;
+            assert!(!plan.valid());
+        }
+    }
+
+    #[test]
+    fn task_draft_may_request_a_fresh_read_but_an_executable_plan_requires_the_exact_revision() {
+        let draft = TaskDraft {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            team: uuid::Uuid::new_v4().to_string(),
+            action: Action::Intake {
+                project: "example".into(),
+                task: uuid::Uuid::new_v4().to_string(),
+                revision: String::new(),
+                role: None,
+                pipeline: None,
+            },
+        };
+        assert!(
+            draft.valid(),
+            "a read-only preparation can ask for the canonical revision"
+        );
+        assert!(
+            draft.plan(8).is_none(),
+            "a draft has no executable plan before its exact task read"
+        );
+        let mut exact = draft.clone();
+        if let Action::Intake { revision, .. } = &mut exact.action {
+            *revision = "a".repeat(64);
+        }
+        let plan = exact.plan(8).unwrap();
+        assert!(draft.matches_plan(&plan));
+        assert!(exact.matches_plan(&plan));
+        let mut changed = plan.clone();
+        if let Action::Intake { revision, .. } = &mut changed.action {
+            *revision = "b".repeat(64);
+        }
+        assert!(
+            !exact.matches_plan(&changed),
+            "a saved original never adopts another task clock"
+        );
+    }
+    #[test]
+    fn task_preparation_and_saved_originals_are_data_and_bind_the_exact_plan() {
+        let draft = TaskDraft {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            team: uuid::Uuid::new_v4().to_string(),
+            action: Action::NewTask {
+                project: "example".into(),
+                title: "Reviewed task".into(),
+                backlog: false,
+            },
+        };
+        assert!(draft.valid());
+        let plan = draft.plan(7).unwrap();
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: uuid::Uuid::new_v4().to_string(),
+            },
+            machine: uuid::Uuid::new_v4().to_string(),
+            store: StoreBinding::Existing {
+                fingerprint: "b".repeat(64),
+            },
+            facts: "c".repeat(64),
+            request: "d".repeat(64),
+            plan: plan.reference().unwrap(),
+        };
+        let mut original = TaskOriginal { plan, intent };
+        assert!(original.valid());
+        original.plan.expected_revision += 1;
+        assert!(!original.valid());
+        let mut raw = json!(draft);
+        raw["actor"] = json!("person");
+        assert!(serde_json::from_value::<TaskDraft>(raw).is_err());
+        let mut wrong = draft;
+        wrong.action = Action::Team {
+            change: Box::new(TeamAction::RenameTeam {
+                name: "Different".into(),
+            }),
+        };
+        assert!(
+            !wrong.valid(),
+            "task preparation cannot discover a revision for a general team action"
+        );
     }
     #[test]
     fn native_responder_requires_service_mode_and_exact_configuration_for_both_kinds() {

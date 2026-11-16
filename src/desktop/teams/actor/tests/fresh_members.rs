@@ -270,7 +270,7 @@ impl World {
             };
             store.save(&mut doc).unwrap();
             drop(store);
-            crate::teams::tasks::send(
+            crate::teams::tasks::models::send(
                 &crate::teams::tasks::Caller {
                     state: &n.config.state,
                     machine: &team.home,

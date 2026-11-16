@@ -102,6 +102,18 @@ impl Cache {
         self.get_at(reference, Instant::now())
     }
 
+    /// Retiring data cannot renew or revoke an admitted original; the one
+    /// worker already owns its immutable plan. Receipt reads need no cache.
+    pub fn discard(&mut self, reference: &wire::Reference) {
+        if self
+            .rows
+            .get(&reference.request_id)
+            .is_some_and(|row| &row.reference == reference)
+        {
+            self.rows.remove(&reference.request_id);
+        }
+    }
+
     fn get_at(&self, reference: &wire::Reference, now: Instant) -> Result<Arc<wire::Plan>> {
         ensure!(reference.valid(), "invalid native plan reference");
         let row = self

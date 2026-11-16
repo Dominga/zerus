@@ -339,6 +339,10 @@ impl TaskWrites {
 #[tauri::command]
 pub async fn task_board_action(
     state: State<'_, TaskWrites>,
+    app: State<'_, crate::commands::AppState>,
+    teams: State<'_, crate::teams::Teams>,
+    composers: State<'_, crate::composer::Composers>,
+    window: tauri::AppHandle,
     project: String,
     task: String,
     expected_stage: String,
@@ -348,8 +352,25 @@ pub async fn task_board_action(
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
     let permit = state.begin()?;
+    let service = app.desktop_service();
+    let native_actions = teams.native_actions();
+    let composers = composers.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
+        if let zerus_client_core::task_board::Action::SendToTeam { team } = &action {
+            return crate::task_team::run(
+                crate::task_team::Context {
+                    app: &window,
+                    service,
+                    actions: &native_actions,
+                    composers: &composers,
+                },
+                &project,
+                &task,
+                &expected_stage,
+                team,
+            );
+        }
         zerus_client_core::task_board::apply(&project, &task, &expected_stage, &action, |call| {
             tasks_write::run(&zerus_client_core::default_hgs(), call)
         })

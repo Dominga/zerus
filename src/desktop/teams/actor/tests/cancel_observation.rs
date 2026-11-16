@@ -39,7 +39,7 @@ fn fixture() -> (Harness, Native, TaskRef, super::super::cancel::Pending) {
     };
     tasks.save(&mut doc).unwrap();
     drop(tasks);
-    let node = crate::teams::tasks::send(
+    let node = crate::teams::tasks::models::send(
         &crate::teams::tasks::Caller {
             state: h.temp.path(),
             machine: &team.home,

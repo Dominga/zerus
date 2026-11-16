@@ -131,6 +131,8 @@ impl Validated {
                     },
                 ),
                 application: String::new(),
+                #[cfg(unix)]
+                expired: None,
             },
         )
     }

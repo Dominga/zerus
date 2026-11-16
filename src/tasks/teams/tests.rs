@@ -273,14 +273,61 @@ impl Fixture {
         serde_json::from_slice(&std::fs::read(reply).unwrap()).unwrap()
     }
 
+    fn config(&self) -> Config {
+        Config {
+            home: self.h.temp.path().display().to_string(),
+            dir: self.h.temp.path().join("config"),
+            state: self.h.temp.path().to_owned(),
+            selves: vec!["test".into()],
+            peers: vec![],
+            base_peers: vec![],
+            peers_from_environment: false,
+            machines: BTreeMap::new(),
+            tab: false,
+            tab_colors: String::new(),
+        }
+    }
+    /// Ordinary task rows are produced in Rust; queue admission explicitly
+    /// models the native window. No detached CLI Person write is used here.
     fn add(&self) -> Value {
-        let out = self.run(
-            &["add", "--project", "example", "--team", TEAM, "--json"],
-            "A queued task",
+        let config = self.config();
+        let machines = super::super::machines(&config).unwrap();
+        let (id, name) = super::super::project(&config, "example-project").unwrap();
+        let tasks = ProjectStore::open(&config.state.join("replica"), &id).unwrap();
+        let mut document = tasks
+            .new_task(
+                "A queued task",
+                Stage::Todo,
+                Target::Any,
+                Actor::Person,
+                &zerus_replica::Position::End,
+                &name,
+                1,
+            )
+            .unwrap();
+        tasks.save(&mut document).unwrap();
+        let reference = zerus_team_plan::model::TaskRef {
+            project: id,
+            uuid: document.uuid().into(),
+        };
+        drop(tasks);
+        let home = self.h.store.team(TEAM).unwrap().unwrap().home;
+        let admitted = crate::teams::tasks::models::send(
+            &crate::teams::tasks::Caller {
+                state: &config.state,
+                machine: &home,
+                actor: Actor::Person,
+            },
+            &reference,
+            TEAM,
             None,
-        );
-        assert_eq!(out["ok"], true, "{out}");
-        out["value"]["task"].clone()
+            None,
+        )
+        .unwrap();
+        assert!(admitted.queued, "{admitted:?}");
+        let tasks = ProjectStore::open(&config.state.join("replica"), &reference.project).unwrap();
+        let document = tasks.load(&reference.uuid).unwrap();
+        super::super::view(&document, &name, true, &machines).unwrap()
     }
 
     fn document(&self, task: &Value) -> TaskDoc {

@@ -27,7 +27,7 @@ fn intake(f: &Fixture, uuid: &str, team: &str, step: &str) -> Value {
         project: "example-project".into(),
         uuid: uuid.to_string(),
     };
-    let result = crate::teams::tasks::send(
+    let result = crate::teams::tasks::models::send(
         &crate::teams::tasks::Caller {
             state: &f.config.state,
             machine: &crate::swarm::local_node_id(&f.config).unwrap(),

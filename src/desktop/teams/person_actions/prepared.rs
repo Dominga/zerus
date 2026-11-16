@@ -29,12 +29,43 @@ pub(super) fn actor() -> ops::Actor {
 }
 
 impl Prepared {
+    pub fn empty_facts(&self) -> Result<String> {
+        wire::digest(&(&self.request, vec![Value::Null])).ok_or_else(required)
+    }
     pub fn resolve(config: &Config, plan: Arc<wire::Plan>) -> Result<Self> {
         if !plan.valid() {
             return Err(required());
         }
         let wire::Action::Team { change } = &plan.action else {
-            return Err(required());
+            let (project, uuid, role, pipeline) = match &plan.action {
+                wire::Action::NewTask { project, .. } => {
+                    (project, plan.request_id.clone(), None, None)
+                }
+                wire::Action::Intake {
+                    project,
+                    task,
+                    role,
+                    pipeline,
+                    ..
+                } => (project, task.clone(), role.clone(), pipeline.clone()),
+                wire::Action::Team { .. } => unreachable!(),
+            };
+            // Pure canonical encoding: catalog reads are done before project
+            // custody, never while rechecking under a project/Teams writer.
+            let request = ops::Request {
+                request_id: plan.request_id.clone(),
+                team: plan.team.clone(),
+                expected_revision: plan.expected_revision,
+                operation: ops::Operation::AddTask {
+                    task: zerus_team_plan::model::TaskRef {
+                        project: project.clone(),
+                        uuid,
+                    },
+                    role,
+                    pipeline,
+                },
+            };
+            return Ok(Self { plan, request });
         };
         let call = plan.call().ok_or_else(required)?;
         let (invocation, _) =
@@ -120,6 +151,47 @@ impl Prepared {
             "id,project,name,goal,home,owner,status,lead,settings,bundle,integration_branch,base_commit,revision,person_paused,next_node", 262_144)?;
         let fields = serde_json::to_value(&self.request).map_err(store::storage)?;
         let mut facts = vec![team.clone()];
+        if let ops::Operation::AddTask { task, .. } = &self.request.operation {
+            let project = json!(task.project);
+            let live = point(
+                db,
+                "live_tasks",
+                "task_uuid",
+                &task.uuid,
+                Some(("task_project", &project)),
+                "team,node",
+                512,
+            )?;
+            if let Some(values) = live.as_array() {
+                let home = values
+                    .first()
+                    .and_then(Value::as_str)
+                    .ok_or_else(required)?;
+                let node = values.get(1).ok_or_else(required)?;
+                facts.push(point(
+                    db,
+                    "nodes",
+                    "team",
+                    home,
+                    Some(("id", node)),
+                    "data,task_revision,task_stage,task_cancelled,generation",
+                    65536,
+                )?);
+                facts.push(point(
+                    db,
+                    "task_observations",
+                    "team",
+                    home,
+                    Some(("node", node)),
+                    "data,released,attempt,attempt_id,last_attempt_id,attempt_conflict",
+                    65536,
+                )?);
+                // Pending cancellation is independently service-written.
+                let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM decisions d WHERE d.team=?1 AND d.node=?2 AND d.state<>'settled' AND d.kind='cancel' AND d.state='pending' AND d.generation=(SELECT generation FROM nodes WHERE team=d.team AND id=d.node) AND NOT EXISTS(SELECT 1 FROM cancel_outcomes c WHERE c.decision=d.seq))",params![home,key_number(node)?],|r|r.get(0)).map_err(store::storage)?;
+                facts.push(json!(pending));
+            }
+            facts.push(live);
+        }
         if let Some(node) = fields.get("node") {
             let live = point(db, "nodes", "team", id, Some(("id",node)),
                 "data,rank,admitted,routed,hold,hold_owner,hand_back,task_revision,task_stage,task_cancelled,generation,decided_by,integrated,integration_commit,requested,integration_required", 65536)?;
@@ -191,4 +263,8 @@ fn point(
             "The exact team action exceeds its native review bound.",
         )),
     }
+}
+
+fn key_number(value: &Value) -> Result<i64> {
+    value.as_i64().ok_or_else(required)
 }

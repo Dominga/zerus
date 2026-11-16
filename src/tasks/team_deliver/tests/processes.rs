@@ -378,7 +378,7 @@ impl Fixture {
             f.task.uuid = task.uuid().into();
             tasks.save(&mut task).unwrap();
         }
-        let reply = crate::teams::tasks::send(
+        let reply = crate::teams::tasks::models::send(
             &crate::teams::tasks::Caller {
                 state: &f.config.state,
                 machine: &home,
@@ -1038,7 +1038,7 @@ fn an_effect_cannot_authorize_a_different_valid_node_or_member() {
             };
             store.save(&mut doc).unwrap();
             drop(store);
-            let reply = crate::teams::tasks::send(
+            let reply = crate::teams::tasks::models::send(
                 &crate::teams::tasks::Caller {
                     state: &f.config.state,
                     machine: &f.lead.machine,

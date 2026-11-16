@@ -34,6 +34,7 @@ mod messages;
 mod history;
 mod index;
 mod teams;
+pub(crate) mod native_team;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod person;
 mod team_deliver;

@@ -63,6 +63,7 @@ def exercise(case):
     test_input.InputTransport.wait_until(case, named_footer, 15,
         lambda: 'The private named status did not reach its two-row frame: '+case.screen())
     styled = case.tmux('capture-pane', '-ep', '-t', case.pane)
+    case.assertIn('\x1b]8;', styled, 'The native history must contain a real OSC-8 hyperlink')
     if artifact := os.environ.get('ZERUS_NATIVE_WRAPPED_CAPTURE'):
         Path(artifact).write_text(styled)  # This fixture owns all visible data.
     plain = [ansi.sub('', row) for row in styled.splitlines()]
@@ -140,6 +141,12 @@ class NativeWrappedTitle(unittest.TestCase):
         config = self.native_home / 'config.toml'
         config.write_text(config.read_text() + '\n[tui]\n'
                           'status_line=["model-with-reasoning","current-dir","thread-name"]\n')
+        # Keep a genuine rendered link above the composer. A capture contains
+        # its hidden target as well as its short displayed label.
+        history = self.native_home / 'sessions/2026/10/09' / ('rollout-fixture-' + self.conversation_id + '.jsonl')
+        history.write_text(history.read_text().replace(
+            'Previous fixture answer',
+            'Previous fixture answer [Review](https://example.invalid/' + 'a'*160 + ')'))
 
     def test_wrapped_native_title_keeps_guarded_input_and_drafts(self):
         exercise(self)

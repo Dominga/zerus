@@ -262,6 +262,7 @@ export function sessionMenu(s: Session, inspected?: import("../../types").Detail
     act.rename,
     moveEntry(s),
     { separator: true },
+    ...(act.archive ? [act.archive] : []),
     act.end,
   ];
 }

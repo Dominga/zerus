@@ -17,6 +17,38 @@ if os.name == 'posix':
 HGS = Path(os.environ.get('HGS_TEST_BIN', Path(__file__).resolve().parents[1] / 'target/debug/hgs')).resolve()
 
 
+def worker_leased(state):
+    with (state/'listing-metadata/worker.lock').open('rb') as handle:
+        try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:return True
+    return False
+
+
+def seed_aggregate(state,generation):
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(f'file:{state}/listing-metadata/index.sqlite3?mode=ro',uri=True)) as db:
+        return db.execute('SELECT count(*),sum(length(CAST(seed AS BLOB))),max(length(CAST(seed AS BLOB))) FROM snapshots WHERE generation=?',(generation,)).fetchone()
+
+
+def resident_body_after(test,state,previous):
+    deadline=time.monotonic()+8;attempts=[]
+    while time.monotonic()<deadline:
+        status=subprocess.run([str(HGS),'listing-index','status','--json'],env=test.env,capture_output=True,text=True,timeout=12)
+        test.assertEqual(status.returncode,0,status.stderr);status=json.loads(status.stdout)
+        if status.get('state')!='ready' or status.get('generation',0)<=previous:
+            time.sleep(.02);continue
+        test.assertTrue(worker_leased(state),'resident worker lost its lease before ls')
+        result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives'],env=test.env,capture_output=True,text=True,timeout=12)
+        test.assertTrue(worker_leased(state),'resident worker lost its lease after ls')
+        attempts.append(dict(code=result.returncode,bytes=len(result.stdout.encode()),reason=result.stderr.strip()))
+        if result.returncode==0:return status,json.loads(result.stdout),result.stdout,attempts
+        test.assertEqual(result.stdout,'','a stale cut published a partial body')
+        test.assertTrue(any(reason in result.stderr for reason in ['Session listing is building, stale or unavailable','Session listing changed before publication']),result.stderr)
+        time.sleep(.02)
+    test.fail(f'resident worker failed to publish a later complete body: {attempts[-3:]}')
+
+
 @unittest.skipUnless(sys.platform.startswith('linux') and shutil.which('tmux'), 'qualified Linux listing activation')
 class ListingIndex(unittest.TestCase):
     def setUp(self):
@@ -195,6 +227,35 @@ class ListingIndex(unittest.TestCase):
         body=self.complete();self.assertEqual(len(body['sessions']),1)
         self.assertFalse((self.state/'listing-metadata/index.sqlite3').exists())
         self.assertFalse(json.loads(self.call('listing-index','status','--json').stdout)['enabled'])
+
+    def test_resident_worker_keeps_large_incremental_seed_copy_bounded_and_live(self):
+        sources=[]
+        for n in range(213):
+            record,path=self.saved(n)
+            record['recovery_user_text']='r'*(8<<10)
+            path.write_text(json.dumps(record));sources.append((record,path))
+        self.ready()
+        previous=json.loads(self.call('listing-index','status','--json').stdout)['generation']
+        aggregate=seed_aggregate(self.state,previous)
+        self.assertEqual(aggregate[0],213);self.assertGreater(aggregate[1],512<<10)
+        states=[];bodies=[]
+        for round in range(3):
+            record,path=sources[round*91]
+            record['last_event_at']=123+round
+            staged=path.with_suffix('.fixture-staged')
+            staged.write_text(json.dumps(record));staged.replace(path)
+            status,body,raw,attempts=resident_body_after(self,self.state,previous)
+            states.extend(attempts)
+            self.assertGreater(status['generation'],previous);previous=status['generation']
+            expected={str(path):path.read_bytes() for _,path in sources}
+            rows=body['sessions']
+            self.assertEqual(len(rows),213)
+            self.assertEqual({row['name'] for row in rows},{record['name'] for record,_ in sources})
+            self.assert_rows(self.canonical(),rows)
+            self.assertEqual({str(path):path.read_bytes() for _,path in sources},expected,'repair changed canonical bytes')
+            self.assertTrue(worker_leased(self.state),'resident worker lost its lease after ls')
+            bodies.append(len(json.dumps(body).encode()))
+        print(json.dumps(dict(control='resident-incremental-large-seeds',sessions=213,rounds=3,current=status['generation'],observations=len(states),seed_aggregate=aggregate,body_bytes=bodies)),flush=True)
 
     def test_qualified_linux_ordinary_listing_bootstraps_without_a_switch(self):
         expected={self.saved(n)[0]['name'] for n in range(300)}
@@ -786,6 +847,34 @@ class LiveListingIndex(test_pause.Harness):
         finally:
             stop.set();thread.join(timeout=2);server.close()
             for client in clients:client.join(timeout=2)
+
+    def test_resident_large_seed_worker_follows_a_genuine_hook_writer_across_three_cuts(self):
+        name=self.start('claude','incremental-seed-writer')
+        self.state=self.root/'state'
+        path=self.state/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+        sources=[(self.binding(name),path)]+[ListingIndex.saved(self,n) for n in range(212)]
+        for record,path in sources:
+            record['recovery_user_text']='r'*(8<<10);path.write_text(json.dumps(record))
+        self.hgs('listing-index','enable','--json')
+        def status():return json.loads(self.hgs('listing-index','status','--json'))
+        self.wait(lambda:status()['state']=='ready')
+        previous=status()['generation'];aggregate=seed_aggregate(self.state,previous)
+        self.assertEqual(aggregate[0],213);self.assertGreater(aggregate[1],512<<10)
+        accepted=[]
+        for event,fields in [('UserPromptSubmit',dict(prompt='Private current writer')),('PreToolUse',dict(tool_name='Bash',tool_use_id='incremental-private',tool_input={'command':'printf fixture'})),('Stop',dict(last_assistant_message='Private settled reply'))]:
+            self.send_event(name,event,**fields) # genuine native-producer ancestry
+            current,body,raw,attempts=resident_body_after(self,self.state,previous)
+            previous=current['generation'];rows=body['sessions']
+            expected={str(path):path.read_bytes() for _,path in sources}
+            self.assertEqual(len(rows),213);self.assertEqual({row['name'] for row in rows},{record['name'] for record,_ in sources})
+            native=self.binding(name);row=next(row for row in rows if row['name']==name)
+            for key in ['session_id','run_id','conversation_id']:self.assertEqual(row[key],native[key])
+            oracle=subprocess.run([str(HGS),'__state','merge'],input=raw,env=self.env,capture_output=True,text=True,timeout=12)
+            self.assertEqual(oracle.returncode,0,oracle.stderr);self.assert_rows(json.loads(oracle.stdout)['sessions'],rows)
+            self.assertEqual({str(path):path.read_bytes() for _,path in sources},expected,'readiness replayed a canonical write')
+            self.assertTrue(worker_leased(self.state),'worker died after the full listing')
+            accepted.append(dict(generation=current['generation'],body_bytes=len(raw.encode()),attempts=attempts))
+        print(json.dumps(dict(control='resident-current-hook-writer',sessions=213,seed_aggregate=aggregate,cuts=accepted)),flush=True)
 
     def test_idle_claude_native_limit_panel_keeps_the_canonical_full_row(self):
         frame=(Path(__file__).parent/'fixtures/claude-usage-limit.txt').read_text()

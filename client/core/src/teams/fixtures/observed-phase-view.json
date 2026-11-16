@@ -325,6 +325,85 @@
     },
     "draft_failure": null,
     "epoch": 2,
+    "estimates": {
+      "cohort_complete": true,
+      "epoch": 1,
+      "rows": [
+        {
+          "estimate_minutes": 30,
+          "kind": "task",
+          "node": 1,
+          "task": {
+            "project": "example-project",
+            "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+          },
+          "title": "Task 1",
+          "unknown": null
+        }
+      ],
+      "scope": {
+        "basis": "frozen_publication",
+        "home": "00000000-0000-4000-8000-0000000000aa",
+        "revision": 12,
+        "team": "00000000-0000-4000-8000-00000000beef",
+        "version": {
+          "draft_generation": 1,
+          "phase": 1,
+          "publication": "00000000-0000-4000-8000-000000015350"
+        }
+      },
+      "units": [
+        {
+          "coverage": {
+            "coverage": "sampled",
+            "implementation_observed_ms": null,
+            "key": {
+              "attempt": null,
+              "binding": null,
+              "effect": "00000000-0000-4000-8000-000000015351",
+              "home": "00000000-0000-4000-8000-0000000000aa",
+              "kind": "implementation",
+              "node": 1,
+              "node_generation": 1,
+              "phase": 1,
+              "publication": null,
+              "task": {
+                "project": "example-project",
+                "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+              },
+              "team": "00000000-0000-4000-8000-00000000beef"
+            },
+            "last_verified_ms": 1700000000000,
+            "reasons": [
+              "native_unsupported",
+              "old_data",
+              "missing_attempt",
+              "missing_binding",
+              "publication_unavailable"
+            ],
+            "supported_categories": [
+              "delivery_reserved",
+              "delivery_refused"
+            ],
+            "window": {
+              "from_ms": 1699913600000,
+              "to_ms": 1700000000000,
+              "window_ms": 86400000
+            }
+          },
+          "estimate_minutes": null,
+          "node": 1,
+          "unit": 11,
+          "unknown": "original_publication_unavailable"
+        }
+      ],
+      "unknown": null,
+      "window": {
+        "from_ms": 1699913600000,
+        "to_ms": 1700000000000,
+        "window_ms": 86400000
+      }
+    },
     "list": {
       "approval_available": true,
       "default_pipeline": "reviewed",

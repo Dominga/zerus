@@ -38,6 +38,8 @@ pub mod action;
 pub mod catalog;
 pub mod catalog_edit;
 pub mod drawers;
+pub mod estimate_comparison;
+pub mod estimate_projection;
 pub mod model;
 pub mod observed_timing;
 pub mod poller;

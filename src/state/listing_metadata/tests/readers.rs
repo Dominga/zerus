@@ -834,3 +834,129 @@ fn native_candidates_share_point_bytes_and_refuse_capped_ambiguity() {
         .to_string()
         .contains("ambiguous"));
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_resident_incremental_clone_shares_the_whole_step_seed_budget() {
+    let root = fixture();
+    let mut value = record();
+    value.as_object_mut().unwrap().remove("shell_jobs");
+    value["recovery_user_text"] = json!("r".repeat(64 << 10));
+    let mut selected = PathBuf::new();
+    for n in 0..16 {
+        value["name"] = json!(format!("codex/example/incremental-budget-{n}"));
+        selected = root.path().join(format!(
+            "{}.json",
+            storage::label_key(string(&value, "name"))
+        ));
+        storage::atomic(&selected, &value.to_string()).unwrap();
+    }
+    let mut work = None;
+    let mut complete = false;
+    for _ in 0..128 {
+        let stats = background_at(root.path(), &mut work).unwrap();
+        assert!(stats.seed_bytes <= 512 << 10);
+        if stats.complete {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete);
+    let generation: i64 = Store::read(root.path())
+        .unwrap()
+        .db
+        .query_row("SELECT generation FROM meta WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    value["last_event_at"] = json!(1);
+    write_at(root.path(), &selected, &value, |publication| {
+        storage::atomic_observed(&selected, &value.to_string(), publication)
+    })
+    .unwrap();
+    let expected = fs::read(&selected).unwrap();
+    let mut complete = false;
+    let mut retained_generation = None;
+    for _ in 0..128 {
+        let stats = background_at(root.path(), &mut work).unwrap();
+        assert!(
+            stats.seed_bytes <= 512 << 10,
+            "incremental step would terminate the real worker: {stats:?}"
+        );
+        assert!(stats.entries <= 256 && stats.rows <= 128 && stats.bytes <= 16 << 20);
+        assert!(
+            work.is_some(),
+            "budget yield discarded the retained native stream"
+        );
+        let store = Store::read(root.path()).unwrap();
+        let serial: i64 = store
+            .db
+            .query_row("SELECT serial FROM meta WHERE id=1", [], |row| row.get(0))
+            .unwrap();
+        if let Some(previous) = retained_generation {
+            assert_eq!(serial, previous, "budget yield restarted the census");
+        } else {
+            retained_generation = Some(serial);
+        }
+        let scan: Option<(i64, String)> = store
+            .db
+            .query_row("SELECT phase,after_key FROM scan WHERE id=1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .unwrap();
+        if let Some((6, after)) = scan {
+            let last: Option<String> = store
+                .db
+                .query_row(
+                    "SELECT max(source) FROM snapshots WHERE generation=?1",
+                    [serial],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                last.as_deref(),
+                Some(after.as_str()),
+                "cursor advanced beyond its last copied row"
+            );
+        }
+        drop(store);
+        if stats.complete {
+            complete = true;
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "bounded incremental work never regained a complete cut"
+    );
+    let reader = pages::Reader::open(root.path()).unwrap();
+    let mut rows = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = reader.page(cursor.as_ref()).unwrap();
+        assert!(page.fresh);
+        rows.extend(page.rows);
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(rows.len(), 16, "a budget boundary skipped snapshot members");
+    let current: i64 = Store::read(root.path())
+        .unwrap()
+        .db
+        .query_row("SELECT generation FROM meta WHERE id=1", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert!(current > generation);
+    assert_eq!(
+        fs::read(&selected).unwrap(),
+        expected,
+        "repair replayed a canonical write"
+    );
+    let key = Key::at(root.path(), &selected).unwrap();
+    let changed = rows.iter().find(|(source, _)| source == &key.0).unwrap();
+    assert_eq!(changed.1["record"]["last_event_at"], 1);
+}

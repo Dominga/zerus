@@ -898,6 +898,28 @@ phase live scope still includes earlier accepted work. No task is mass-reopened
 and no integration history is rewound. Read `hgs guide team-rework` for the
 strict command fields and original-request Check behavior.
 
+### Read-only implementation estimates
+
+The selected phase's **Observed timing** panel shows implementation estimates
+through its existing lazy read. An unapproved draft is labelled as a preview;
+a valid empty observation page can still show its known estimates. A reserved
+publication is a frozen selected identity, and its numbers stay unavailable
+until publication settles and the complete live membership is read. Published
+values come from that publication's frozen draft nodes, joined to their exact
+live task identities. Later edits, correction proposals and earlier tasks in
+the whole-phase live snapshot never replace those values.
+
+Zero or missing estimates, values over 525600 minutes, incomplete reads and
+prerequisites outside the selected cohort remain unknown. Estimate membership
+completeness does not certify observation coverage. Each observed unit retains
+its exact publication, task, attempt, effect and binding identity; a page's
+selected publication cannot fill missing original membership. Schema 1 records
+points and gaps, so implementation actuals remain unavailable, including when
+task states or delivery/report events are present. Estimates are not phase
+elapsed time, an ETA, or a completion promise. Hiding or changing the selected
+scope drops the derived page; a failed or mismatched read cannot retain its
+numbers.
+
 ## Controlling a planned phase
 
 The phase header's **More** menu offers a barrier, pause/resume, movement and

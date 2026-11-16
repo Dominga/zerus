@@ -83,7 +83,7 @@ export function PhasePane(props: {
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>
           <PhaseControls draft={d()} view={props.view} busy={props.busy} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         </header>
-        <ObservedPanel team={team.id} phase={d().phase.n} pane={pane()?.observed} />
+        <ObservedPanel team={team.id} phase={d().phase.n} pane={pane()?.observed} estimates={pane()?.estimates} readFailed={!!failed()} />
         <PhaseActions draft={d()} view={props.view} busy={props.busy} available={!!metadata().approval_available} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         <PhaseRework view={props.view} draft={d()} routes={routes()} busy={props.busy} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         <Show when={d().unknown_fields}><p class="notice" role="status">{tr("This draft has fields this window cannot edit.")}</p></Show>

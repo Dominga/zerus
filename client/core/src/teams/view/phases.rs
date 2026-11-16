@@ -115,6 +115,8 @@ pub struct PhaseFailure {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct PhasePane {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimates: Option<crate::teams::estimate_comparison::EstimatePane>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub observed: Option<crate::teams::observed_timing::ObservedPane>,
     pub epoch: u64,
     pub list: Option<PhaseList>,

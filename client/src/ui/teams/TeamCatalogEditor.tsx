@@ -299,7 +299,7 @@ export function ModelMenu(props: { item: Item; roles: RoleContext; value: string
 }
 
 export function EffortMenu(props: { item: Item; roles: RoleContext; model: string; value: string; onChange: (value: string) => void; label: string }) {
-  const options = () => (props.roles.tick(), effortOptions(props.model, props.roles.catalogs.get(props.item), props.value));
+  const options = () => (props.roles.tick(), effortOptions(props.model, props.roles.catalogs.get(props.item), props.value, String(props.item.agent ?? "")));
   return <Dropdown class="cat-effort" value={props.value} aria-label={props.label} onChange={props.onChange}
     options={options().map((effort) => ({ value: effort, label: effort || "—" }))} />;
 }

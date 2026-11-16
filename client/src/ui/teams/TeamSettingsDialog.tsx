@@ -64,7 +64,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     for (const member of modelMembers) catalogs.request({ ...catalogItem(member), model: "" });
   });
   const modelChoicesFor = (member: TeamMemberView) => (modelTick(), modelOptions(catalogItem(member), catalogs.get(catalogItem(member))));
-  const effortChoicesFor = (member: TeamMemberView) => (modelTick(), effortOptions(catalogItem(member).model, catalogs.get(catalogItem(member)), catalogItem(member).effort));
+  const effortChoicesFor = (member: TeamMemberView) => (modelTick(), effortOptions(catalogItem(member).model, catalogs.get(catalogItem(member)), catalogItem(member).effort, catalogItem(member).agent));
   const changeAddingModel = (member: TeamMemberView, value: string) => {
     const item = { ...catalogItem(member), model: value };
     const next = selectModel(normalizeModelCatalog(catalogs.get(item) ?? []), value, item.effort);

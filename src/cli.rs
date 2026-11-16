@@ -3692,7 +3692,7 @@ fn launch(
         }
     }
     if state::parent_link::claimed_launch() && !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen" | "dsh" | "opencode") {
-        return Err(Error::new(1, "--parent is available for Claude, Codex, Kimi, DeepSeek and OpenCode launches"));
+        return Err(Error::new(1, "--parent is available for Claude, Codex, Kimi, Qwen Code, DeepSeek and OpenCode launches"));
     }
     if command_name=="opencode" {
         if options.account.as_deref().is_some_and(|id|id!="native-opencode") {return Err(Error::new(1,"Choose native-opencode; separate OpenCode profiles are not supported"));}

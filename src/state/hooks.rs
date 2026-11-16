@@ -186,6 +186,11 @@ fn record_at(record: &Path, program: &str) -> Result<()> {
 
 /// The program a hook command line runs before hgs's two arguments.
 fn program_of(command: &str) -> Option<String> {
+    // The PowerShell form, `& "PROGRAM" __state hook; exit $LASTEXITCODE`.
+    let command = command
+        .strip_prefix("& ")
+        .and_then(|rest| rest.strip_suffix("; exit $LASTEXITCODE"))
+        .unwrap_or(command);
     let argv = shell_words::split(command).ok()?;
     (argv.len() >= 3).then(|| argv[argv.len() - 3].clone())
 }
@@ -1633,15 +1638,26 @@ mod windows {
         ))
     }
 
+    /// Qwen Code's entry. It runs a hook with `cmd /d /s /c`, and Node.js
+    /// hands cmd a quoted program as `\"…\"`, which never runs; an unquoted
+    /// path does (verified with Qwen Code 0.27.4). A path with a space or a
+    /// character cmd reads gets the PowerShell form with `"shell":
+    /// "powershell"`, which Qwen Code runs as `powershell -Command` (and so
+    /// with the user's profile).
+    pub(super) fn qwen_entry(stable: &str) -> Result<Entry> {
+        let path = path(stable)?;
+        if !path.chars().any(|c| c.is_whitespace() || "&|<>^()%!,;=\"'`$".contains(c)) {
+            return Ok(Entry::shell(format!("{path} {} {}", HOOK_ARGS[0], HOOK_ARGS[1])));
+        }
+        powershell_command(stable).map(Entry::powershell)
+    }
+
     /// Codex's entry: the shell form as `command`, and the PowerShell form as
     /// `commandWindows`, which Codex prefers on Windows and runs with the
     /// session's shell, PowerShell there (`-NoProfile -Command`, Codex 0.140 to
     /// 0.162: `build_hooks_config`, `default_user_shell`). `cmd.exe` runs it
     /// only for a session without one local environment, which hgs never
     /// starts, or on a computer without PowerShell.
-    pub(super) fn qwen_entry(stable: &str) -> Result<Entry> {
-        powershell_command(stable).map(Entry::powershell)
-    }
 
     pub(super) fn codex_entry(stable: &str) -> Result<Entry> {
         Ok(Entry {
@@ -3399,9 +3415,15 @@ mod tests {
                 shell: None,
             }
         );
+        // A plain path runs unquoted in cmd; one with a space gets PowerShell.
         assert_eq!(
-            forms::qwen_entry(STABLE).unwrap(),
-            Entry { shell: Some("powershell".into()), ..Entry::shell(POWERSHELL.into()) }
+            forms::qwen_entry(r"C:\Users\a\.local\bin\hgs.exe").unwrap(),
+            Entry::shell("C:/Users/a/.local/bin/hgs.exe __state hook".into())
+        );
+        let spaced = r"C:\Users\a b\.local\bin\hgs.exe";
+        assert_eq!(
+            forms::qwen_entry(spaced).unwrap(),
+            Entry { shell: Some("powershell".into()), ..Entry::shell(forms::powershell_command(spaced).unwrap()) }
         );
     }
 

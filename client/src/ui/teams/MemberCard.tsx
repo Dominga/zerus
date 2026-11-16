@@ -435,7 +435,7 @@ export function AddMemberDialog(props: { computer: ComputerId; close: () => void
   const selection = () => ({ computer: props.computer, agent: agent(), account: account(), model: model(), effort: effort() });
   const accounts = () => accountChoices(accountsPage(), props.computer).filter((choice) => choice.provider === agent());
   const models = () => (modelTick(), modelOptions(selection(), catalogs.get(selection())));
-  const efforts = () => (modelTick(), effortOptions(model(), catalogs.get(selection()), effort()));
+  const efforts = () => (modelTick(), effortOptions(model(), catalogs.get(selection()), effort(), agent()));
   createEffect(() => catalogs.request(selection()));
   onMount(() => { void loadAccounts(); });
   const changeAgent = (value: string) => { setAgent(value); setAccount(""); setModel(""); setEffort(""); };

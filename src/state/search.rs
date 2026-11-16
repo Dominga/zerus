@@ -763,17 +763,11 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
                 ("assistant", _) => "assistant",
                 _ => return None,
             };
-            let text = event["message"]["parts"]
-                .as_array()
-                .map(|parts| {
-                    parts
-                        .iter()
-                        .filter(|part| part["thought"] != true)
-                        .filter_map(|part| part["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("")
-                })
-                .unwrap_or_default();
+            let parts = event["message"]["parts"].as_array().cloned().unwrap_or_default();
+            let texts = parts.iter().filter(|part| part["thought"] != true).filter_map(|part| part["text"].as_str());
+            // The person's prompt is its first part: Qwen Code appends the
+            // contents of @-referenced files as further parts.
+            let text = if role == "user" { texts.take(1).collect::<String>() } else { texts.collect::<Vec<_>>().join("") };
             (role, text, string(event, "uuid"), timestamp(&event["timestamp"]), "qwen_transcript")
         }
         _ => return None,

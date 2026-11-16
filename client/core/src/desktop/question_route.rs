@@ -92,7 +92,7 @@ fn running(row: &Value) -> bool {
 }
 /// The agents whose `hgs send` types into the terminal and writes the CLI's
 /// input receipt: the only parents a route sends to.
-const TERMINAL_AGENTS: [&str; 3] = ["claude", "codex", "kimi"];
+const TERMINAL_AGENTS: [&str; 4] = ["claude", "codex", "kimi", "qwen"];
 
 /// A supervised, quiet row of this computer that may hold a routable
 /// question: the edge the service settles and then reads once.

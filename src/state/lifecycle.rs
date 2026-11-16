@@ -36,10 +36,29 @@ fn qwen_defaults() -> Result<()> {
     if nonempty_env("QWEN_CODE_SYSTEM_DEFAULTS_PATH").is_some() {
         return Ok(());
     }
+    // The administrator's own defaults file stays in force: its settings are
+    // copied, and only an unset `ui.useTerminalBuffer` becomes false.
+    let system = if cfg!(windows) {
+        PathBuf::from(r"C:\ProgramData\qwen-code\system-defaults.json")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from("/Library/Application Support/QwenCode/system-defaults.json")
+    } else {
+        PathBuf::from("/etc/qwen-code/system-defaults.json")
+    };
+    let mut defaults = std::fs::read(&system).ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(crate::state::without_bom(&bytes)).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    if !defaults["ui"].is_object() {
+        defaults["ui"] = json!({});
+    }
+    if defaults["ui"].get("useTerminalBuffer").is_none() {
+        defaults["ui"]["useTerminalBuffer"] = json!(false);
+    }
     let path = root().join("qwen-defaults.json");
-    let wanted = "{\"ui\":{\"useTerminalBuffer\":false}}\n";
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted) {
-        atomic(&path, wanted)?;
+    let wanted = format!("{defaults}\n");
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted.as_str()) {
+        atomic(&path, &wanted)?;
     }
     std::env::set_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH", &path);
     Ok(())

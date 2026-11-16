@@ -50,9 +50,11 @@ pub(crate) fn profile_selection(agent: &str, profile: &str) -> Option<String> {
         ("dsh", "write" | "build" | "commit") => native(json!({"preset":"workspace-write"})),
         ("dsh", "network" | "operate") => native(json!({"preset":"danger-full-access"})),
         ("kimi", "read") => native(json!({"plan":"on"})),
+        // Qwen Code has no answer channel: a member that asks for every shell
+        // command would stop unattended, so the wider profiles run its YOLO.
         ("qwen", "read") => native(json!({"mode":"plan"})),
-        ("qwen", "write") => native(json!({"mode":"default"})),
-        ("qwen", "build" | "commit" | "network" | "operate") => native(json!({"mode":"auto-edit"})),
+        ("qwen", "write") => native(json!({"mode":"auto-edit"})),
+        ("qwen", "build" | "commit" | "network" | "operate") => native(json!({"mode":"yolo"})),
         _ => None,
     }
 }

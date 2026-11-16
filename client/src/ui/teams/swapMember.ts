@@ -49,7 +49,7 @@ export function swapOptions(
   const current = account && !choices.some((found) => found.id === account);
   return {
     models: modelOptions({ agent, model, account }, catalog),
-    efforts: effortOptions(model, catalog, effort),
+    efforts: effortOptions(model, catalog, effort, agent),
     accounts: current
       ? [...choices, { id: account, label: account, provider: agent, signedIn: true }]
       : choices,

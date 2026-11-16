@@ -271,7 +271,7 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
   const effortsFor = (item: ModelItem) => {
     modelTick();
     models.request(item);
-    return effortOptions(item.model, models.get(item), item.effort);
+    return effortOptions(item.model, models.get(item), item.effort, item.agent);
   };
   const changedModel = (item: ModelItem, value: string) => {
     const next = selectModel(normalizeModelCatalog(models.get(item) ?? []), value, item.effort);

@@ -789,7 +789,7 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
 }
 
 /// Qwen Code 0.27.4's composer: a full-width rule, then the mode glyph at the
-/// left edge (`>` default, `*` YOLO, `!` shell) and a space, its caret an
+/// left edge (`>` default, `*` YOLO; `!` shell mode is refused) and a space, its caret an
 /// underlined cell at column 2 and, when empty, only its placeholder after it
 /// ("Type your message or @path/to/file"), drawn in a set colour. A draft is in
 /// the default colour and moves the caret past its text.
@@ -800,7 +800,8 @@ fn qwen_prompt_empty(row: &str, previous: &str, cursor: usize) -> bool {
         && previous.chars().all(|ch| "─━".contains(ch));
     cursor == 2
         && rule
-        && matches!(cells.first(), Some(('>' | '*' | '!', _)))
+        // Shell mode (`!`) would run a message as a command: never ready.
+        && matches!(cells.first(), Some(('>' | '*', _)))
         && cells.get(1).is_some_and(|(ch, _)| *ch == ' ')
         && cells.get(2).is_some_and(|(ch, style)| *ch == ' ' && (style.underline || style.inverse))
         && cells.iter().skip(3).all(|(ch, style)| ch.is_whitespace() || style.foreground || style.dim)

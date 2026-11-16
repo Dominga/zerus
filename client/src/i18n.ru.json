@@ -1173,6 +1173,7 @@
   "Balance %1": "Баланс %1",
   "Balance unknown": "Баланс неизвестен",
   "Qwen subscription %1": "Подписка Qwen %1",
+  "Qwen Code reports no usage limits here. A Qwen subscription shows its plan; an account on a model server shows its speed.": "Qwen Code не сообщает лимиты. Для подписки Qwen показывается тариф, для учётной записи на сервере моделей — скорость.",
   "Qwen reports the subscription's credits only once they run out.": "Qwen сообщает о кредитах подписки, только когда они заканчиваются.",
   "Balance: %1 %2": "Баланс: %1 %2",
   "Bare repository": "Репозиторий без рабочей копии",

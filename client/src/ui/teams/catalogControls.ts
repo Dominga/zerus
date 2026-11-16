@@ -157,7 +157,9 @@ export function modelOptions(role: Item, catalog: readonly ModelChoice[] | undef
 }
 
 /** The selected model's variants; the static fallback is only for a missing/empty catalog. */
-export function effortOptions(model: string, catalog: readonly ModelChoice[] | undefined, current = ""): string[] {
+export function effortOptions(model: string, catalog: readonly ModelChoice[] | undefined, current = "", agent = ""): string[] {
+  // Qwen Code takes no effort: only "—" (and a value saved before).
+  if (agent === "qwen") return current ? ["", current] : [""];
   if (!catalog?.length) {
     const options = ["", ...EFFORTS];
     if (current && !options.includes(current)) options.push(current);

@@ -110,9 +110,17 @@ fn card(
     Ok(card)
 }
 
+/// The tool through which `agent` asks the user: Claude Code's
+/// AskUserQuestion, or Qwen Code's ask_user_question, which takes the same
+/// `questions` (question, header, options with label and description,
+/// multiSelect; Qwen Code 0.27.4).
+pub(super) fn asks(record: &Value, tool: &str) -> bool {
+    tool == "AskUserQuestion" || (string(record, "agent") == "qwen" && tool == "ask_user_question")
+}
+
 pub(super) fn from_hook(record: &Value, event: &Value) -> Option<Value> {
     if string(event, "hook_event_name") != "PreToolUse"
-        || string(event, "tool_name") != "AskUserQuestion"
+        || !asks(record, string(event, "tool_name"))
         || !string(event, "agent_id").is_empty()
     {
         return None;
@@ -159,7 +167,7 @@ pub(super) fn observe(record: &mut Value, event: &Value) {
         let tool = tool_id(event);
         if !tool.is_empty() {
             pending.remove(tool);
-        } else if string(event, "tool_name") == "AskUserQuestion" {
+        } else if asks(record, string(event, "tool_name")) {
             pending.clear();
         }
     }
@@ -311,7 +319,7 @@ fn collect(
                 && card["conversation_id"] == record["conversation_id"]
                 && record["active_tools"]
                     .get(tool)
-                    .is_some_and(|tool| string(tool, "name") == "AskUserQuestion")
+                    .is_some_and(|tool| asks(record, string(tool, "name")))
             {
                 by_tool.insert(tool.to_owned(), card.clone());
             }
@@ -1180,6 +1188,25 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Qwen Code's ask_user_question (0.27.4) is a question card, as Claude's
+    /// AskUserQuestion; only a Qwen session asks through that name, and its
+    /// result settles the card.
+    #[test]
+    fn qwen_codes_question_tool_makes_a_card_until_its_result() {
+        let mut record = json!({"agent":"qwen","run_id":"r1","conversation_id":"c1","active_tools":{}});
+        let asked = json!({"hook_event_name":"PreToolUse","tool_name":"ask_user_question","tool_use_id":"call_1",
+            "tool_input":{"questions":[{"question":"How do I reach the model?","header":"gb10","multiSelect":false,
+                "options":[{"label":"Give the address","description":"An OpenAI endpoint"},{"label":"Work without it","description":"Alone"}]}]}});
+        let card = from_hook(&record, &asked).expect("a Qwen question");
+        assert_eq!(card["tool_call_id"], "call_1");
+        assert_eq!(card["questions"][0]["options"][1]["label"], "Work without it");
+        assert!(from_hook(&json!({"agent":"claude","run_id":"r1","conversation_id":"c1"}), &asked).is_none(), "Claude has no such tool");
+        observe(&mut record, &asked);
+        assert!(record["pending_questions"]["call_1"].is_object());
+        observe(&mut record, &json!({"hook_event_name":"PostToolUse","tool_name":"ask_user_question","tool_use_id":"call_1"}));
+        assert!(record["pending_questions"].as_object().is_some_and(|pending| pending.is_empty()));
+    }
 
     /// N20: the caller's own card is never answered by its own session, so a
     /// subagent or background job of the lead cannot decide the lead's

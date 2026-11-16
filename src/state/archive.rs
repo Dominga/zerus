@@ -545,7 +545,7 @@ pub(super) fn known_exit(record: &Value) -> bool {
     }
     matches!(
         (string(record, "agent"), string(end, "reason")),
-        ("claude", "prompt_input_exit") | ("codex", "other") | ("kimi", "exit")
+        ("claude", "prompt_input_exit") | ("codex", "other") | ("kimi", "exit") | ("qwen", "prompt_input_exit")
     )
 }
 

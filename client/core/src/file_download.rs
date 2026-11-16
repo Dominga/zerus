@@ -20,7 +20,13 @@ pub fn invocation(host: &str, remote: &str, destination: &Path) -> Result<Invoca
     {
         return Err("Choose a configured remote machine for this download.".into());
     }
-    if !(remote.starts_with('/') || remote.starts_with("~/"))
+    // A Windows peer's drive path (`D:/...` or `D:\...`), as `hgs download`
+    // itself accepts (WhiteWh fork, owner 2026-11-17).
+    let drive = remote.len() > 2
+        && remote.as_bytes()[0].is_ascii_alphabetic()
+        && remote.as_bytes()[1] == b':'
+        && matches!(remote.as_bytes()[2], b'/' | b'\\');
+    if !(remote.starts_with('/') || remote.starts_with("~/") || drive)
         || remote.len() > 32768
         || remote.chars().any(char::is_control)
     {

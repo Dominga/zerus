@@ -65,7 +65,8 @@ export function createStandardModels(h: OpenCodeHost) {
       models = [nativeModel()];
       modelValue = "";
       effortValue = "";
-      if (id) requestCatalog(key, id);
+      // Qwen Code has no account model catalog: its native model only.
+      if (id && ["claude", "codex", "kimi", "dsh"].includes(h.agent())) requestCatalog(key, id);
     }
     updateEfforts();
     updateModelButton();

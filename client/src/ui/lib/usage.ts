@@ -203,6 +203,7 @@ export function stateText(u: Usage) {
   if (!s || s === "loading") return tr("Loading account details…");
   if (s === "rate_limited") return tr("Usage refresh is rate limited. Previous limits remain visible; sign-in is unchanged.");
   if (s === "configured" && u.provider === "opencode") return tr("OpenCode uses its native provider configuration. Usage is not available here.");
+  if (s === "configured" && u.provider === "qwen") return tr("Qwen Code reports no usage limits here. A Qwen subscription shows its plan; an account on a model server shows its speed.");
   if (s === "configured") return tr("API key configured. Zerus could not read its DeepSeek balance; refresh to retry.");
   if (u.offline || s === "offline") return tr("Machine is offline. Showing the last available account data.");
   if (s === "expired") return tr("Native sign-in has expired. Open the agent or sign in again, then refresh usage.");
@@ -356,7 +357,7 @@ export function usageChipView(u: Usage, now: number, agent = ""): UsageChipView 
   }
   // A Qwen subscription reports its plan, never a remaining share: Qwen tells
   // the credits only once they run out (owner, 2026-11-17).
-  if (provider === "qwen" && u.identity?.plan && !u.windows.length) {
+  if (provider === "qwen" && u.identity?.plan && !u.windows.length && u.status !== "signed_out" && u.auth_status !== "signed_out") {
     const plan = u.identity.plan;
     return { kind: "balance", windows: [], balance: `Qwen ${plan}`, reason: tr("Qwen reports the subscription's credits only once they run out."),
       label: tr("Qwen subscription %1", plan) };

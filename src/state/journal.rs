@@ -2004,6 +2004,7 @@ pub(super) fn update_activity(record: &mut Value, event: &Value) {
             record["activity"] = json!("busy");
             record["phase"] = json!(if ["AskUserQuestion", "request_user_input", "AskUser"]
                 .contains(&tool.as_str())
+                || (string(record, "agent") == "qwen" && tool == "ask_user_question")
             {
                 "input"
             } else {

@@ -42,7 +42,7 @@ pub(crate) struct ScratchRule {
     pub request: String,
 }
 
-/// The rule a request names, checked: an absolute folder and 1 to 5 known
+/// The rule a request names, checked: an absolute folder and 1 to 6 known
 /// agents.
 pub(crate) fn rule_from(input: &Value) -> anyhow::Result<ScratchRule> {
     let folder = input["folder"].as_str().unwrap_or_default().trim().to_owned();

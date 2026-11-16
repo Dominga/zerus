@@ -94,12 +94,14 @@ pub(super) fn submit(name: &str, request: Request, prepared: Option<&Value>) -> 
         // Keep the exact command verifier below unchanged.
         // Evidence: artifacts/test-results/kimi-compact/diagnosis/RAW-SHA256SUMS
         // SHA-256: ddf8b09fc81ebfec93fdcae7a175a52e33920d6c0154ebf98e4b2ba2763ef383
-        let command = if string(&record, "agent") == "kimi" { "/compact  " } else { "/compact" };
+        // Qwen Code names it /compress (0.27.4).
+        let command = match string(&record, "agent") { "kimi" => "/compact  ", "qwen" => "/compress", _ => "/compact" };
+        let typed = command.trim_end();
         backend::current().send(string(&record,"pane"), &[backend::Key::Literal(command)])?;
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
             let current = kimi_tui_choice::identity(&record)?;
-            if clear_context::ready(&current, "/compact")? { break; }
+            if clear_context::ready(&current, typed)? { break; }
             if Instant::now() >= deadline { return Err("Native /compact input could not be verified".into()); }
             std::thread::sleep(Duration::from_millis(40));
         }
@@ -107,7 +109,7 @@ pub(super) fn submit(name: &str, request: Request, prepared: Option<&Value>) -> 
         let current = input::checked_ready(name, &request.expected_run_id, &request.expected_conversation_id)?;
         kimi_tui_choice::identity(&record)?;
         input::checked_terminal(&current, false)?;
-        if !clear_context::ready(&current, "/compact")? { return Err("The native input changed before /compact".into()); }
+        if !clear_context::ready(&current, typed)? { return Err(format!("The native input changed before {typed}")); }
         backend::current().send(string(&current,"pane"), &[backend::Key::Named("Enter")])?;
         Ok(())
     })();

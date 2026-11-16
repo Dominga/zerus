@@ -116,7 +116,8 @@ impl SessionFiles {
         let style = self.path_style(&computer);
         let target = session_file_reference::parse(&href, style);
         let shown = kind(&target.path);
-        let name = download_cache::filename(&target.path);
+        // A Windows peer's path separates with backslashes too.
+        let name = download_cache::filename(&target.path.replace('\\', "/"));
         if target.path.is_empty() {
             return error(request, "invalid", String::new(), shown, name);
         }

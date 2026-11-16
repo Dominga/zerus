@@ -7,7 +7,7 @@ use std::time::Duration;
 mod source;
 
 fn unavailable(record: &Value, live_pane: bool) -> Option<&'static str> {
-    if !AGENTS.contains(&string(record, "agent")) {
+    if !AGENTS.contains(&string(record, "agent")) || string(record, "agent") == "qwen" {
         return Some("This provider does not support session forks");
     }
     if string(record, "conversation_id").is_empty()

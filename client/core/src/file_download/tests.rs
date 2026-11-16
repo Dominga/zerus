@@ -261,3 +261,16 @@ print(json.dumps(reply))
         }
     }
 }
+
+/// WhiteWh fork: a Windows peer's drive path downloads, as `hgs download`
+/// accepts it; a relative or bare drive path still does not.
+#[test]
+fn a_windows_peers_drive_path_is_an_absolute_remote_path() {
+    for remote in [r"D:\Work\MicroBIM\v2_top.png", "D:/Work/MicroBIM/v2_top.png"] {
+        let invocation = invocation("msi-old", remote, Path::new("/tmp/v2_top.png")).unwrap();
+        assert!(invocation.args.iter().any(|arg| arg == remote), "{remote}");
+    }
+    for remote in ["D:", "D:relative.png", "Work/v2_top.png"] {
+        assert!(invocation("msi-old", remote, Path::new("/tmp/v2_top.png")).is_err(), "{remote}");
+    }
+}

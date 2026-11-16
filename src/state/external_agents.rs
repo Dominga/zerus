@@ -12,6 +12,13 @@ struct Caller {
 
 fn native_caller(pid: u32, argv: &[String]) -> Option<Caller> {
     let executable = crate::platform::program_name(Path::new(argv.first()?))?;
+    // Qwen Code runs as Node.js with its package's entry script, after any
+    // Node.js options of its own (`--expose-gc`).
+    if executable.trim_end_matches(".exe") == "node"
+        && argv.iter().skip(1).any(|arg| arg.replace('\\', "/").contains("/@qwen-code/qwen-code/"))
+    {
+        return Some(Caller { pid, provider: "qwen", headless: false });
+    }
     // macOS framework builds run python3 scripts as .../Python.app/Contents/MacOS/Python.
     let offset = if executable == "node" || executable.to_ascii_lowercase().starts_with("python") { 1 } else { 0 };
     let name = crate::platform::program_name(Path::new(argv.get(offset)?))?;
@@ -103,6 +110,12 @@ fn provider(event: &Value) -> Option<&'static str> {
         .is_some_and(|name| name.to_string_lossy().starts_with("rollout-"))
     {
         return Some("codex");
+    }
+    // Qwen Code's chat log below its home (`/clear` starts a new session ID
+    // there, after `SessionEnd("clear")`; Qwen Code 0.27.4).
+    let qwen = nonempty_env("QWEN_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".qwen"));
+    if path.is_absolute() && path.starts_with(&qwen) && uuid::Uuid::parse_str(id).is_ok() {
+        return Some("qwen");
     }
     let claude = nonempty_env("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)

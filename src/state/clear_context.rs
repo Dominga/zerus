@@ -658,7 +658,8 @@ fn command_row(agent: &str, row: &str, x: usize, command: &str) -> bool {
                 && !hint[1..hint.len()-1].contains(['<','>']))
         }),
         // Qwen Code's composer: its mode glyph at the left edge, then the command.
-        "qwen" => ["> ","* ","! "].iter().any(|glyph|before.trim_end()==format!("{glyph}{command}")) && after.trim().is_empty(),
+        // Not in shell mode (`! `), which would run the command in a shell.
+        "qwen" => ["> ","* "].iter().any(|glyph|before.trim_end()==format!("{glyph}{command}")) && after.trim().is_empty(),
         _ => false,
     }
 }

@@ -86,6 +86,16 @@ describe("the owner's compact session row menu", () => {
     ]);
   });
 
+  it.each(["stopped", "paused"])("offers Archive separately from Forget for a %s session", (state) => {
+    const saved = toSession("", "run:saved-menu", {
+      name: "codex/example/saved-menu", agent: "codex", state, status: "paused", resumable: true,
+      run_id: "saved-menu", conversation_id: "saved-conversation", allowed_actions: ["resume", "archive", "forget"],
+    });
+    const entries = sessionMenu(saved);
+    expect(menuItem("Move to archive", entries)).toMatchObject({ disabled: false, icon: "archive" });
+    expect(menuItem("Forget saved session…", entries)).toMatchObject({ danger: true });
+  });
+
   it("Clear session checks an unselected row and opens the same dialog for it", async () => {
     const row: ViewRow = { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" };
     applyBatch({ ...emptyBatch(), computers: [{ computer: "", status: "live", attempt: 0 }], upserts: [{ computer: "", key: "run:run-live", row }] });

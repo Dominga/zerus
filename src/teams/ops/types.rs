@@ -210,6 +210,10 @@ pub enum PublicationProblemKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    RecordTimingFact {
+        node: u32,
+        observation: Box<super::observed_timing::TimingInput>,
+    },
     ReconcilePhaseReview {
         phase: u32,
         generation: u64,

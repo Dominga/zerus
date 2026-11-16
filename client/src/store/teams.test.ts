@@ -241,3 +241,14 @@ it("restores a retained browser page after the native reader has ended", async (
   await teams.firstListPage();
   expect(calls.pages).toEqual([["list", null]]);
 });
+
+it("drops an observed page from the actual team batch when the core retires it", async () => {
+  const { transport } = fake(); const store = createTeams(transport);
+  await store.openTeam(TEAM_ID);
+  const view = structuredClone(teamView);
+  const producer = (await import("../../core/src/teams/fixtures/observed-pane.json")).default;
+  view.plan = { epoch: 1, list: null, draft: null, selected: 0, list_failure: null, draft_failure: null, observed: producer as unknown as import("./observed-timing").ObservedPane };
+  store.apply([entry(`team:${TEAM_ID}`, "team", view)]); expect(store.team()?.plan?.observed).toBeDefined();
+  store.apply([entry(`team:${TEAM_ID}`, "team", { ...view, plan: { ...view.plan, observed: undefined } })]);
+  expect(store.team()?.plan?.observed).toBeUndefined();
+});

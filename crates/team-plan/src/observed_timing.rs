@@ -264,3 +264,5 @@ pub struct UnitCoverage {
     pub supported_categories: Vec<Category>,
     pub implementation_observed_ms: Option<u64>,
 }
+
+pub mod validate;

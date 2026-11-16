@@ -17,6 +17,7 @@ mod integration;
 mod journal;
 pub(crate) mod lead_queue;
 mod members;
+pub(crate) mod observed_timing;
 mod phase_review;
 mod pipeline;
 mod planning;

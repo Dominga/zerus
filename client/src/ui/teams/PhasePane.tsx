@@ -6,6 +6,7 @@ import { phaseFollower, type DraftInput, type PhaseDraft, type PhaseFollow, take
 import { PhaseDraftEditor, type DraftSnapshot } from "./PhaseDraftEditor";
 import { phaseHeader } from "./phaseHeader";
 import { PlanningNotice } from "./PlanningStart";
+import { ObservedPanel } from "./ObservedPanel";
 import { PhaseMetrics } from "./PhaseMetrics";
 import { PhaseActions } from "./PhaseActions";
 import { PhaseLiveLayers } from "./PhaseLiveLayers";
@@ -100,6 +101,7 @@ export function PhasePane(props: {
           <span class="grow" /><button type="button" class="btn small" disabled={!editable()} onClick={edit}>{tr("Edit draft")}</button>
 
         </header>
+        <ObservedPanel team={team.id} phase={d().phase.n} pane={pane()?.observed} />
         <PhaseActions draft={d()} view={props.view} busy={props.busy} available={!!metadata().approval_available} readFailed={!!failed()} onChanged={() => follower.select(selected())} />
         <Show when={d().unknown_fields}><p class="notice" role="status">{tr("This draft has fields this window cannot edit.")}</p></Show>
         <Show when={d().complete} fallback={<p class="dim">{tr("This phase has no editable draft. Open the Board to see its tasks.")}</p>}><Show when={d().live} fallback={<PhaseLayers draft={d()} />}>{(live) => <PhaseLiveLayers team={team.id} draft={d()} live={live()} />}</Show></Show>

@@ -28,7 +28,8 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::AcceptPhase { .. } => person,
         Operation::Verdict { .. } => member,
         Operation::CloseCard { .. } => service,
-        Operation::ObserveTask { .. }
+        Operation::RecordTimingFact { .. }
+        | Operation::ObserveTask { .. }
         | Operation::HandoutIntent { .. }
         | Operation::HandoutOutcome { .. }
         | Operation::ReopenIntent { .. }

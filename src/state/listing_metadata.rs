@@ -1,5 +1,5 @@
 //! Advisory card inputs, never action, process or absence authority.
-//! This slice has publishers and repair but NO production listing consumer.
+//! Explicit opt-in accelerates ordinary Linux ls; watch and authority stay canonical.
 use super::*;
 use repositories::directory::Directory;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -7,11 +7,16 @@ use std::{
     fs::File,
     time::{Duration, Instant},
 };
+mod changes;
+pub(super) mod control;
+pub(super) mod listing;
 mod model;
 mod publication;
+mod reconcile;
 mod repair;
 mod store;
-// Inactive bounded API for the separately reviewed reader slice.
+pub(super) mod worker;
+// Store-side helpers also remain available to private repair controls.
 #[allow(dead_code)]
 mod pages;
 use model::{Key, Seed};
@@ -19,7 +24,7 @@ pub(super) use publication::Publication;
 pub(super) use repair::background_at;
 use store::Store;
 
-// No reader consumes this cache yet. Absent opt-in costs one metadata lookup,
+// Absent opt-in costs one metadata lookup,
 // with no directory creation, projection, SQLite, lock or coverage write.
 fn enabled(root: &Path) -> bool {
     let marker = root.join("listing-metadata/enabled");

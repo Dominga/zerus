@@ -475,3 +475,32 @@ fn closed_pause_history_cannot_be_misread_as_an_unattributed_legacy_pause() {
         code::STORAGE_FAILED
     );
 }
+
+#[test]
+fn an_incomplete_current_control_leaf_is_not_repaired_as_a_legacy_store() {
+    let h = Harness::new();
+    let db = h.store.db.as_ref().unwrap();
+    // Explicit schema fault: a real pre-S5 store has neither marker nor
+    // companions. Its normal opening is covered by the legacy store control.
+    db.execute_batch("DROP INDEX stage_tasks_target_history;")
+        .unwrap();
+    assert_eq!(
+        Store::open(h.temp.path()).unwrap_err().code,
+        code::STORAGE_FAILED
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM phase_controls_layout", [], |r| r
+            .get::<_, u32>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='stage_tasks_target_history'",
+            [],
+            |r| r.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0
+    );
+}

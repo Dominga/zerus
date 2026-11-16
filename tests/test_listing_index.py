@@ -216,6 +216,54 @@ class ListingIndex(unittest.TestCase):
         finally:
             stop.set();thread.join(timeout=2);server.close()
 
+    def test_slow_native_providers_keep_membership_with_one_bounded_observation_clock(self):
+        import http.server
+        import socket
+        import threading
+        record,path=self.native('dsh');before=path.read_bytes()
+        host=self.state/'dsh/hosts'/hashlib.sha256(record['agent_home'].encode()).hexdigest()[:16];host.mkdir(parents=True)
+        server=socket.socket(socket.AF_UNIX);server.bind(str(host/'host.sock'));server.listen();server.settimeout(.05)
+        stop=threading.Event();clients=[]
+        def reply(client):
+            with client:
+                client.recv(4096);stop.wait(3)
+                try:client.sendall(b'{"ok":true,"value":{"items":[]}}\n')
+                except BrokenPipeError:pass
+        def serve():
+            while not stop.is_set():
+                try:client,_=server.accept()
+                except socket.timeout:continue
+                thread=threading.Thread(target=reply,args=(client,),daemon=True);clients.append(thread);thread.start()
+        thread=threading.Thread(target=serve,daemon=True);thread.start()
+        try:
+            self.ready();self.complete()  # settle lazy public overlays before timing one call
+            started=time.monotonic();reply=self.call('ls','--json','--local','--no-archives');elapsed=time.monotonic()-started
+            self.assertEqual(reply.returncode,0,reply.stderr);rows=json.loads(reply.stdout)['sessions']
+            self.assertLess(elapsed,1.8,'native read ignored the shared one-second deadline')
+            self.assertEqual([row['name'] for row in rows],[record['name']]);self.assertEqual(rows[0]['activity'],'unknown')
+            self.assertEqual(path.read_bytes(),before)
+        finally:
+            stop.set();thread.join(timeout=2);server.close()
+            for client in clients:client.join(timeout=2)
+        path.unlink();record,path=self.native('opencode');record['service']='opencode2';path.write_text(json.dumps(record));before=path.read_bytes()
+        stop=threading.Event()
+        class Slow(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*_):pass
+            def do_GET(self):
+                stop.wait(3)
+                try:self.send_response(200);self.end_headers();self.wfile.write(b'{}')
+                except BrokenPipeError:pass
+        http=http.server.ThreadingHTTPServer(('127.0.0.1',0),Slow);thread=threading.Thread(target=http.serve_forever,daemon=True);thread.start()
+        registration=Path(self.env['XDG_STATE_HOME'])/'opencode/service.json';registration.parent.mkdir(parents=True,exist_ok=True)
+        registration.write_text(json.dumps(dict(id='slow-private-service',pid=os.getpid(),url=f'http://127.0.0.1:{http.server_port}',version='2.0.32',password=None)))
+        try:
+            self.complete()
+            started=time.monotonic();reply=self.call('ls','--json','--local','--no-archives');elapsed=time.monotonic()-started
+            self.assertEqual(reply.returncode,0,reply.stderr);rows=json.loads(reply.stdout)['sessions']
+            self.assertLess(elapsed,1.8,'native HTTP read ignored the shared deadline')
+            self.assertEqual([row['name'] for row in rows],[record['name']]);self.assertEqual(path.read_bytes(),before)
+        finally:stop.set();http.shutdown();http.server_close();thread.join(timeout=2)
+
     def test_opencode_current_and_legacy_rows_use_the_same_readonly_normalizer(self):
         import http.server
         import threading

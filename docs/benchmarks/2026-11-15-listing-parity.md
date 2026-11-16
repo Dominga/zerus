@@ -1,31 +1,32 @@
 # Session listing field parity
 
-Qualification in progress for zerus-63r5s.2. This inventory is the review table;
-controls and outcomes are filled from the source-bound local runs before the PR
-is marked ready. Watch activation remains in .3. Display inputs grant no native
-action, caller, confirmation, custody or cleanup authority.
+This is the field/source/control audit for zerus-63r5s.2. The full-row controls
+compare the canonical public builder with actual enabled ordinary `ls`, including
+field presence, rather than comparing only a hand-picked summary. Watch
+activation remains in .3. Display inputs grant no native action, caller,
+confirmation, custody or cleanup authority.
 
-| Public field | Existing source | Control |
+The Python control names below are methods in `tests/test_listing_index.py`;
+`summary_matrix` names the Rust
+`tests::parity::public_terminal_summaries_match_the_canonical_builder` control.
+
+| Public field | Source in the activated path | Full-row control |
 | --- | --- | --- |
-| `name`, `cmd`, `agent`, `backend`, `project`, `tag` | `state::listed_rows`, `label_row`; provider normalizers | terminal canonical-builder matrix; provider matrix |
-| `session_id`, `run_id`, `conversation_id`, `launch_id` | canonical binding identity; native terminal IDs | ID-layout/rename fixture; native row-version controls |
-| `attached`, `clients`, `created` | fresh terminal listing and binding fallback | native terminal merge fixture |
-| `activity`, `phase`, `conversation_state`, `runtime_state`, `process_state` | `journal::normalized_activity` | canonical-builder matrix; stale/pinned reader controls |
-| `activity_summary`, `activity_detail`, `current_tool`, `tool_detail` | `telemetry::summary`, active-tool metadata | children/quiet/system-prompt matrix |
-| child counts, groups, previews and completeness | `telemetry::children` | children matrix; Background/Unknown fixture |
-| `process_work` | one verified native process sample per listing batch | Background/Unknown fixture; recorded jobs do not establish work |
-| `prompt`, latest reply and reply identity | `journal::user_prompt`, indexed `latest_reply` | quiet/system-prompt matrix; journal reply control |
-| attention signature, pending questions and human-request flags | `read_marks`, native question readers, route outcomes | pending/unknown attention fixture |
-| `model`, `effort`, available choices, pending settings | `effort::summary`, bounded native history/catalog/footer reads | settings/history matrix |
-| fork source and availability | `fork::summary`, native launch-recipe presence | recipe/error/fork-origin matrix |
-| action availability/reasons; restore/pause/resume blockers | `session_action::summary`, original canonical checks | private-transition evidence control; canonical source remains unchanged |
-| provider errors and progress timestamps | `provider_errors::enrich` | provider-error matrix |
-| goals, schedules, keep-warm and question-routing views | their existing bounded overlays | shared row/overlay control |
-| read/unread state and notification preferences | `read_marks::enrich_listing`, `notifications::enrich` | shared row/overlay control |
-| parent, account and project/folder placement | `parent_link`, `workspace`, account marks | parent/account/rename matrix |
-| DeepSeek row, children and unknown host state | existing resident `list`/snapshot normalizer, unchanged compatibility | private fake-host/provider parity control |
-| OpenCode current/legacy/unavailable row | existing service inspector and normalizer | private fake-service/provider parity control |
-| archive preview and its incomplete descriptor | bounded canonical archive reader, independent of display index | existing archive preview controls |
+| `name`, `cmd`, `agent`, `backend`, `project`, `tag` | Same `listed_rows` / `label_row` builders, public seed and fresh terminal rows | `test_complete_saved_public_rows_cover_the_summary_and_private_transition_matrix`; `test_live_terminal_id_rename_reply_and_attention_keep_all_public_fields` |
+| session/run/conversation/launch identity, ID layout and renamed label | Immutable generation seed plus exact native source version; same ID/label builders | `test_live_terminal_id_rename_reply_and_attention_keep_all_public_fields`; Rust `a_generation_row_never_borrows_a_later_sources_stamp` |
+| `attached`, `clients`, `created` | Fresh bounded terminal listing and original saved-binding fallback | `test_live_terminal_id_rename_reply_and_attention_keep_all_public_fields` |
+| activity/phase/conversation/runtime/process state, `activity_summary`, details and tool fields | Same `journal::normalized_activity`, `telemetry::summary`, active-tool metadata and bounded fresh canonical reconciliation | saved matrix; `test_background_unknown_and_recorded_jobs_match_the_canonical_live_rows`; `summary_matrix` |
+| Child counts, groups, preview/completeness and `process_work` | Same `telemetry::children`, one fresh verified process batch; original Kimi roster and Claude internal-child normalization | saved matrix (`children`, Kimi-main/roster, Claude-internal, announced/external child); Background/Unknown control |
+| Prompt, latest reply, reply identity, quiet/system-prompt filtering | Same journal summary, bounded native model history, original quiet/system filters | saved matrix; live reply/attention control; `summary_matrix` (`history`, `quiet`, `system-prompt`) |
+| Attention signature, human-request flags, pending question and unread/reply fields | Same fresh read-marks/question/native route and notification overlays | live reply/attention control; `test_resident_deepseek_rows_keep_reply_and_person_attention`; Background/Unknown control |
+| Model, effort, choices and pending Settings | Same `effort::summary` and bounded original native history/catalog/footer observations | saved matrix (`settings`); `summary_matrix` (`settings`, `history`) |
+| Fork source/availability, provider errors/progress, account identity | Public seed plus same `fork::summary`, provider-error and account builders | saved matrix (`recipe`, `error`, `fork`, `provider-error`, `account`); `summary_matrix` |
+| Action availability/reasons, restore/pause/resume blockers and private transition | Public predicates; fresh selected canonical bytes for private/native transitions (shared 16-file/16-MiB limit), never a reconstructed recipe | saved matrix (`transition`); `test_a_poisoned_display_completion_cannot_authorize_canonical_archival`; Rust `private_transition_data_is_not_cached_as_a_public_launch_recipe` |
+| Goals, schedules, keep-warm, routing, preferences and notifications | Existing bounded enrichment functions after the same public builders | Complete row comparison in saved/live matrices (including default/absent values); original subsystem controls in the touched root modules |
+| Parent link/state, account/project/folder placement | Same `parent_link`, workspace/account fields; indexed pinned parent lookup with aggregate 512-KiB budget | `test_parent_outside_the_requested_page_keeps_its_state`; saved/live ID/account/rename controls; Rust `parent_point_reads_share_one_query_byte_budget` |
+| DeepSeek current/unavailable/legacy-compatible row, children, reply and person attention | Same resident snapshot normalizer, readonly bounded `list`; no binding inventory/adoption | `test_resident_deepseek_rows_keep_reply_and_person_attention`; `test_unavailable_native_and_terminal_rows_match_the_canonical_projection`; `test_slow_native_providers_keep_membership_with_one_bounded_observation_clock` |
+| OpenCode current/legacy/unavailable row | Same service inspector/normalizer, bounded readonly HTTP; no adoption | `test_opencode_current_and_legacy_rows_use_the_same_readonly_normalizer`; unavailable and slow-provider controls |
+| Archive preview/incomplete descriptor | Existing independent bounded archive reader; ordinary index does not supply archive authority | Existing archive/preview controls in the touched-module run; shared watch and archive-preview reader remain unchanged |
 
 Raw shell output, tool arguments, transcripts, permission/confirmation tokens and
 original custody are never copied into the display seed. A private transition

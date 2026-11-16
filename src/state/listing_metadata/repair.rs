@@ -763,9 +763,13 @@ pub(in crate::state) fn background_at(
     }
     let mut result = state.as_mut().unwrap().step();
     if let Err(error) = &result {
-        if Store::recover(&state.as_ref().unwrap().root, error)? {
+        let selected = state.as_ref().unwrap().root.clone();
+        // An unexpected step may already have consumed native events. Discard
+        // before fallible recovery too: callers other than worker::entry retain
+        // their slot on Err. Only typed pre-consumption contention returned Ok.
+        *state = None;
+        if Store::recover(&selected, error)? {
             result = Ok(Stats::default());
-            *state = None;
         }
     }
     if result.is_err() || (result.as_ref().is_ok_and(|s| s.done) && !changes::qualified()) {

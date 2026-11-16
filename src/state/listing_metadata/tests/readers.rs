@@ -213,6 +213,58 @@ fn a_sqlite_failure_after_native_hints_forces_a_new_census() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn failed_cache_recovery_also_discards_consumed_native_state() {
+    let root = fixture();
+    let selected = path(root.path());
+    let mut value = record();
+    storage::atomic(&selected, &value.to_string()).unwrap();
+    let mut work = None;
+    for _ in 0..128 {
+        if background_at(root.path(), &mut work).unwrap().complete {
+            break;
+        }
+    }
+    let store = Store::open(root.path()).unwrap();
+    assert!(store.page(None).unwrap().fresh);
+    // The resident idle drain consumes the actual replacement hint before the
+    // missing snapshot table fails SQL. Recovery then fails on an invalid
+    // private quarantine destination, outside worker::entry's extra reset.
+    store.db.execute_batch("DROP TABLE snapshots").unwrap();
+    drop(store);
+    let invalid_backup = root.path().join("listing-metadata/retained-index.sqlite3");
+    fs::create_dir(&invalid_backup).unwrap();
+    value["phase"] = json!("working");
+    storage::atomic(&selected, &value.to_string()).unwrap();
+    let outcome = background_at(root.path(), &mut work);
+    assert!(
+        outcome.is_err(),
+        "the injected recovery failure did not run"
+    );
+    assert!(
+        work.is_none(),
+        "failed cache recovery retained already-consumed native state: {outcome:?}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&selected).unwrap()).unwrap(),
+        value
+    );
+    fs::remove_dir(invalid_backup).unwrap();
+    for _ in 0..128 {
+        if background_at(root.path(), &mut work).unwrap().complete {
+            let page = pages::Reader::open(root.path())
+                .unwrap()
+                .page(None)
+                .unwrap();
+            assert!(page.fresh);
+            assert_eq!(page.rows[0].1["record"]["phase"], "working");
+            return;
+        }
+    }
+    panic!("failed recovery did not resume a fresh canonical census");
+}
+
+#[test]
 fn later_pages_do_not_reuse_a_pinned_ready_bit_after_a_publisher() {
     let root = fixture();
     let mut changed = record();

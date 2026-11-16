@@ -104,6 +104,22 @@ def main():
             if status.returncode==0 and json.loads(status.stdout)['state']=='ready':break
             time.sleep(.1)
         else:raise AssertionError('bounded private worker never finished the cold census')
+        # The first public projection may initialize non-binding telemetry/cache
+        # namespaces. Keep those truthful refusals and include their bounded
+        # catch-up before calling a subsequent observation "warm". A one-row
+        # page admits no full-record or whole-inventory foreground prewarm.
+        probes=[]
+        while time.monotonic()<deadline:
+            probe_started=time.monotonic()
+            probe=call('ls','--json','--local','--no-archives','--paged','--page-size','1')
+            probes.append(dict(seconds=time.monotonic()-probe_started,exit=probe.returncode,stderr=probe.stderr[:1024]))
+            if probe.returncode==0:
+                body=json.loads(probe.stdout)
+                assert body['listing_page']['coverage']=='ready' and len(body['sessions'])<=1
+                break
+            assert not probe.stdout,'readiness probe published a partial body'
+            time.sleep(.1)
+        else:raise AssertionError('bounded public projection never obtained a ready cut')
         readiness=time.monotonic()-bootstrap_started
         bootstrap=worker_sample()
         evict(directory/name for name in ['index.sqlite3','index.sqlite3-wal'] if (directory/name).exists())
@@ -114,7 +130,7 @@ def main():
         assert stamps()==before
         assert {p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in sample}==digests
         sizes={name:(directory/name).stat().st_size for name in ['index.sqlite3','index.sqlite3-wal','index.sqlite3-shm'] if (directory/name).exists()}
-        args.output.write_text(json.dumps(dict(sessions=args.count,cold='canonical data files fadvise DONTNEED after fsync; derived index absent; namespace metadata warm',worker_bootstrap=bootstrap,readiness_seconds=readiness,index_files_bytes=sizes,canonical_native_versions_unchanged=len(before),canonical_sha256_samples=len(sample),results=results),indent=2)+'\n')
+        args.output.write_text(json.dumps(dict(sessions=args.count,cold='canonical data files fadvise DONTNEED after fsync; derived index absent; namespace metadata warm',worker_bootstrap=bootstrap,readiness_seconds=readiness,readiness_probes=probes,index_files_bytes=sizes,canonical_native_versions_unchanged=len(before),canonical_sha256_samples=len(sample),results=results),indent=2)+'\n')
     finally:
         disabled()
         if worker is not None:worker.wait(timeout=5)

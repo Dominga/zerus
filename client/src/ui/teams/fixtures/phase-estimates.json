@@ -1,0 +1,284 @@
+{
+  "accepted": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": {
+          "project": "example-project",
+          "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+        },
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": {
+          "project": "example-project",
+          "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+        },
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "frozen_publication",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 15,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": "00000000-0000-4000-8000-00000000938b"
+      }
+    },
+    "unknown": null
+  },
+  "awaiting": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": {
+          "project": "example-project",
+          "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+        },
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": {
+          "project": "example-project",
+          "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+        },
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "frozen_publication",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 14,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": "00000000-0000-4000-8000-00000000938b"
+      }
+    },
+    "unknown": null
+  },
+  "draft": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": null,
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": null,
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "unapproved_preview",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 4,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 1,
+        "phase": 1,
+        "publication": null
+      }
+    },
+    "unknown": null
+  },
+  "partial": {
+    "cohort_complete": false,
+    "rows": [
+      {
+        "estimate_minutes": null,
+        "kind": "task",
+        "node": 1,
+        "task": null,
+        "title": "Task 1",
+        "unknown": "unsettled_publication"
+      },
+      {
+        "estimate_minutes": null,
+        "kind": "task",
+        "node": 2,
+        "task": null,
+        "title": "Task 2",
+        "unknown": "unsettled_publication"
+      }
+    ],
+    "scope": {
+      "basis": "frozen_publication",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 8,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": "00000000-0000-4000-8000-00000000938b"
+      }
+    },
+    "unknown": "unsettled_publication"
+  },
+  "published": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": {
+          "project": "example-project",
+          "uuid": "849e16f0-12fd-841c-949e-5191c3fa89e5"
+        },
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": {
+          "project": "example-project",
+          "uuid": "bab330bc-4311-8ace-99b4-3faa11d38773"
+        },
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "frozen_publication",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 11,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": "00000000-0000-4000-8000-00000000938b"
+      }
+    },
+    "unknown": null
+  },
+  "publishing": {
+    "cohort_complete": false,
+    "rows": [
+      {
+        "estimate_minutes": null,
+        "kind": "task",
+        "node": 1,
+        "task": null,
+        "title": "Task 1",
+        "unknown": "unsettled_publication"
+      },
+      {
+        "estimate_minutes": null,
+        "kind": "task",
+        "node": 2,
+        "task": null,
+        "title": "Task 2",
+        "unknown": "unsettled_publication"
+      }
+    ],
+    "scope": {
+      "basis": "frozen_publication",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 8,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": "00000000-0000-4000-8000-00000000938b"
+      }
+    },
+    "unknown": "unsettled_publication"
+  },
+  "rejected": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": null,
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": null,
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "unapproved_preview",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 5,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 1,
+        "phase": 1,
+        "publication": null
+      }
+    },
+    "unknown": null
+  },
+  "revised": {
+    "cohort_complete": true,
+    "rows": [
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 1,
+        "task": null,
+        "title": "Task 1",
+        "unknown": null
+      },
+      {
+        "estimate_minutes": 30,
+        "kind": "task",
+        "node": 2,
+        "task": null,
+        "title": "Task 2",
+        "unknown": null
+      }
+    ],
+    "scope": {
+      "basis": "unapproved_preview",
+      "home": "00000000-0000-4000-8000-0000000000aa",
+      "revision": 7,
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "version": {
+        "draft_generation": 2,
+        "phase": 1,
+        "publication": null
+      }
+    },
+    "unknown": null
+  }
+}

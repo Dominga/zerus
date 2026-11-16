@@ -17,6 +17,7 @@
 //! shown page, and the projected view names the next page's cursor.
 use super::read::{TeamError, TeamRead};
 use super::view::{self, TeamList, TeamView, WaitingView};
+mod estimates;
 mod observed;
 mod phases;
 use crate::ComputerId;
@@ -587,6 +588,7 @@ impl TeamsModel {
             plan: self.phases_enabled.then(|| view::phases::PhasePane {
                 epoch: self.phase_epoch,
                 observed: self.observed_page.clone(),
+                estimates: self.estimates(),
                 list: parts.phases.clone(),
                 draft: parts.draft.clone(),
                 selected: self.phase_selected,

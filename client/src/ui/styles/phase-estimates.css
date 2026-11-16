@@ -1,0 +1,8 @@
+@layer components {
+  .phase-estimates { min-width: 0; padding: 12px 0; }
+  .phase-estimate-source { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .phase-estimates table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  .phase-estimates th, .phase-estimates td { padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  .phase-estimates th { border-bottom: 1px solid var(--z-color-divider); }
+  .phase-estimates td p { margin: 4px 0 0; }
+}

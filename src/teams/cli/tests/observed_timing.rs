@@ -611,4 +611,5 @@ fn current_writer_reopens_after_older_canonical_write_without_changing_companion
     assert_eq!(layout, 4);
 }
 
+#[cfg(unix)]
 mod published;

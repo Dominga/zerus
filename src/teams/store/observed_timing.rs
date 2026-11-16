@@ -337,8 +337,19 @@ impl Store {
         let tx = db.unchecked_transaction().map_err(storage)?;
         let header = rows::team(db, team)?
             .ok_or_else(|| Problem::new(code::NOT_FOUND, "Team does not exist."))?;
-        let phase_exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM phases WHERE team=?1 AND n=?2)",params![team,phase],|r|r.get(0)).map_err(storage)?;
-        if !phase_exists {return Err(Problem::new(code::NOT_FOUND,"The selected observation phase is unavailable."));}
+        let phase_exists: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM phases WHERE team=?1 AND n=?2)",
+                params![team, phase],
+                |r| r.get(0),
+            )
+            .map_err(storage)?;
+        if !phase_exists {
+            return Err(Problem::new(
+                code::NOT_FOUND,
+                "The selected observation phase is unavailable.",
+            ));
+        }
         let available = present(db)?;
         let identity = if available { Some(stream(db)?) } else { None };
         let position = if let Some(after) = after {

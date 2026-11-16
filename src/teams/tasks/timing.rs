@@ -11,6 +11,9 @@ pub(crate) struct TimingRead {
     pub _held: ProjectStore,
 }
 
+// The native Teams adapter is Unix-only today; keep this pure source reader
+// type-checked on other targets without advertising a Windows observer.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn observe(
     state: &Path,
     task: &TaskRef,

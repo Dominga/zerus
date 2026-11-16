@@ -477,6 +477,46 @@ fn changed_source(
 }
 
 #[test]
+fn native_seven_current_consent_matches_shared_base_during_reserved_new_approval() {
+    use zerus_client_core::{desktop::team_person_actions::Action, teams::action::TeamAction};
+    let (f, plan, new_approval, _) = consent_source_fixture(true);
+    let Action::Team { change } = &plan.action else {
+        unreachable!()
+    };
+    let TeamAction::ApprovePhaseCorrections {
+        publication: base, ..
+    } = change.as_ref()
+    else {
+        unreachable!()
+    };
+    assert_ne!(base, &new_approval);
+    let read = f.h.store.phase_draft(TEAM, 1).unwrap();
+    assert_eq!(read.publication.unwrap().id, *base);
+    assert_eq!(
+        read.rework.unwrap().draft.unwrap().publication.unwrap().id,
+        new_approval
+    );
+    for (publication, available) in [(base.clone(), true), (new_approval, false)] {
+        let mut current = plan.clone();
+        current.action = Action::Team {
+            change: Box::new(TeamAction::AcceptPhase {
+                phase: 1,
+                publication,
+            }),
+        };
+        assert_eq!(
+            crate::desktop::teams::person_actions::phase_facts_fixture(
+                &f.config,
+                f.h.store.db.as_ref().unwrap(),
+                &current
+            )
+            .is_ok(),
+            available
+        );
+    }
+}
+
+#[test]
 fn native_seven_correction_sources_refuse_foreign_base_episode_and_stale_generation() {
     use zerus_client_core::{desktop::team_person_actions::Action, teams::action::TeamAction};
     let (f, plan, _, _) = consent_source_fixture(false);

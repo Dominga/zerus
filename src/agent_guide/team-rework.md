@@ -4,7 +4,8 @@ The person, or the exact lead with Lead acceptance and accept_results,
 can send a waiting phase back: phase, publication and a required comment.
 The person confirms in the Zerus window; Person CLI writes, including @host,
 return person_gesture_required. The exact delegated lead may use
-send-back-phase through its existing session authority. Keep the phase's acceptance gate, barrier and policy.
+send-back-phase through its existing session authority. Keep the phase's
+acceptance gate, barrier and policy.
 Accepted tasks and commits are not reopened. Phase 0 remains intake.
 
 Read the same phase again. Its rework.id and base_publication identify the

@@ -39,7 +39,7 @@ fn recorded() -> Harness {
             generation: 1,
         },
     );
-    let (reply,exit)=h.cli(&Caller::Person,"approve-phase",&json!({"request_id":uid(50_000),"team":TEAM,"expected_revision":h.revision(),"phase":1,"generation":1,"confirm_initial":true}).to_string());
+    let (reply,exit)=h.native_command("approve-phase",&json!({"request_id":uid(50_000),"team":TEAM,"expected_revision":h.revision(),"phase":1,"generation":1,"confirm_initial":true}).to_string());
     assert_eq!(exit, 0, "{reply}");
     for r in h.store().publication_work(TEAM).unwrap() {
         assert_eq!(

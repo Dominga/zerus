@@ -18,6 +18,7 @@ pub(crate) mod layout;
 pub(crate) mod phase_snapshot;
 pub(crate) mod planning;
 pub(crate) mod publication;
+pub(crate) mod rework;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
 mod native_person;
@@ -46,8 +47,8 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-// Ordinary opens migrate native evidence to 4. Only an approved publication
-// raises the execution floor to 5; raising the ceiling must not opt queues in.
+// Ordinary opens migrate native evidence to 4. Publication raises its floor
+// to 5 and SendBack to 6; raising the ceiling never opts ordinary queues in.
 pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = versions::CORE_LEGACY;
 pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = versions::CORE_PLANNING;
 pub(crate) const NATIVE_PERSON_LAYOUT: u32 = versions::CORE_NATIVE_PERSON;
@@ -349,9 +350,8 @@ fn initialize(db: &mut Connection) -> Result<()> {
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT | NATIVE_PERSON_LAYOUT | SCHEMA_VERSION => {
-            None
-        }
+        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT => None,
+        native if layout::native(native) => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
@@ -417,6 +417,7 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     drafts::extend(db)?;
     planning::extend(db)?;
     publication::extend(db)?;
+    rework::validate(db)?;
     read_indexes(db)?;
     timers::extend(db)
 }

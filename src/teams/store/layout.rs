@@ -5,7 +5,7 @@ pub(crate) const LEGACY_QUEUE: u32 = super::versions::CORE_LEGACY;
 pub(crate) const LEGACY_PLANNING: u32 = super::versions::CORE_PLANNING;
 pub(crate) const NATIVE_PERSON: u32 = super::versions::CORE_NATIVE_PERSON;
 pub(crate) const PUBLICATION: u32 = super::versions::CORE_PUBLICATION;
-/// Reserved for slice 4; this engine must still refuse it.
+/// Activated only by the first SendBack fact in slice 4.
 pub(crate) const REWORK: u32 = super::versions::CORE_REWORK;
 /// Reserved for .31 slice 2; this engine must still refuse it.
 pub(crate) const NATIVE_PERSON_CONTROL: u32 = super::versions::CORE_NATIVE_FLOOR;
@@ -21,9 +21,9 @@ pub(crate) const ALLOCATED: [u32; 7] = [
 pub(crate) const fn supported(version: u32) -> bool {
     matches!(
         version,
-        LEGACY_QUEUE | LEGACY_PLANNING | NATIVE_PERSON | PUBLICATION
+        LEGACY_QUEUE | LEGACY_PLANNING | NATIVE_PERSON | PUBLICATION | REWORK
     )
 }
 pub(crate) const fn native(version: u32) -> bool {
-    matches!(version, NATIVE_PERSON | PUBLICATION)
+    matches!(version, NATIVE_PERSON | PUBLICATION | REWORK)
 }

@@ -26,6 +26,7 @@ mod queue;
 #[cfg(test)]
 pub(crate) use queue::injected;
 mod readiness;
+pub(crate) mod rework;
 mod stage_task;
 mod talk;
 mod team;

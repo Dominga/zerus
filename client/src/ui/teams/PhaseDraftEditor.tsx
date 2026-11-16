@@ -8,6 +8,7 @@ import { removeDraftNode, type DraftInput, type DraftNode, type DraftRoute } fro
 // never enter this editor; the whole save retains its original revision.
 export interface DraftSnapshot {
   phase: number; revision: number; generation: number | null; next_node: number; input: DraftInput;
+  correction?: { publication: string; rework: string };
 }
 
 export function PhaseDraftEditor(props: {
@@ -58,11 +59,11 @@ export function PhaseDraftEditor(props: {
   };
   return (
     <dialog ref={dialog} class="dlg phase-editor" aria-labelledby="phase-editor-title" onCancel={(e) => { e.preventDefault(); if (!pending()) props.close(); }}>
-      <div class="dlg-head"><h2 id="phase-editor-title">{frozen.generation === null ? tr("New phase draft") : tr("Edit phase draft")}</h2></div>
+      <div class="dlg-head"><h2 id="phase-editor-title">{frozen.correction ? tr("Phase corrections") : frozen.generation === null ? tr("New phase draft") : tr("Edit phase draft")}</h2></div>
       <div class="dlg-body">
         <p class="dim">{tr("Drafts create no tasks until the phase is approved.")}</p>
         <label class="phase-field">{tr("Phase title")}<TextInput class="field" value={title()} maxLength={200} disabled={pending()} data-phase-title onInput={(e) => setTitle(e.currentTarget.value)} /></label>
-        <label><input type="checkbox" checked={barrier()} disabled={pending()} onChange={(e) => setBarrier(e.currentTarget.checked)} /> {tr("Waits for earlier phases (barrier)")}</label>
+        <label><input type="checkbox" checked={barrier()} disabled={pending() || !!frozen.correction} onChange={(e) => setBarrier(e.currentTarget.checked)} /> {tr("Waits for earlier phases (barrier)")}</label>
         <div class="phase-editor-grid">
           <nav class="phase-editor-list" aria-label={tr("Draft tasks")}>
             <For each={nodes()}>{(n) => <button type="button" class="btn ghost" aria-pressed={selected() === n.id} disabled={pending()} onClick={() => setSelected(n.id)}>{n.title || tr("Draft task #%1", n.id)}</button>}</For>

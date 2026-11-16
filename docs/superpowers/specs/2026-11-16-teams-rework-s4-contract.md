@@ -1,9 +1,9 @@
 # Phase rework: slice 4 interface
 
 Implementation contract for `zerus-63rru.161.4`, based on admitted main
-`8e6e792ec9e0eef51cdf68fab0087e572bd1c1c3`. This reserves the interface for
-the separate rework implementation; it does not claim that the operations
-below are already executable. The governing state and authority contract is
+`8e6e792ec9e0eef51cdf68fab0087e572bd1c1c3`. This pins the interface implemented by
+the separate rework slice; its complete qualification remains in the slice
+report, rather than being inferred from this contract. The governing state and authority contract is
 [M2 slice 4](2026-11-15-teams-phases-m2.md).
 
 ## Actions
@@ -33,7 +33,12 @@ from the phase's existing draft counter; it is never reset for another episode.
 Comments are nonblank, bounded by the existing 16,384-byte reason limit and
 use the existing forbidden-character rules. A comment never rewrites a task.
 
-The correction `draft` uses the existing complete `DraftInput` shape. New node
+The correction `draft` uses the existing complete `DraftInput` shape. Its
+barrier must match the existing phase. Approval preserves acceptance,
+approval policy, barrier, pause/ownership, order, kind and mode; it grants no
+S5 control change. Header reuse is checked again at publication, and retained
+earlier facts remain part of the final completion predicate.
+ New node
 IDs come from `next_node` and are never aliases of accepted tasks. The
 operations above are separate variants so ordinary saved S3 requests keep
 their exact pre-change shape. No Person authority is inferred from payload
@@ -120,3 +125,28 @@ An older hgs without the capability leaves SendBack/correction UI unavailable.
 An older core encountering these unknown draft fields follows its existing
 read-only/unknown-field behavior. No unknown field grants an action or causes
 a silent downgrade to S3 semantics. Exact old/new read controls will pin this.
+
+## Canonical native row bounds
+
+The exact current episode is `phase_reworks(team,phase)` selected by descending
+`seq`, then bound to its `id` and `base_publication`. Relevant fields are
+`state`, `generation`, `header`, `approval` and immutable `comment`. Header
+JSON is limited to 4,096 bytes and comment to 16,384 bytes before loading.
+The original actor/creation stamp are immutable attribution, not new authority.
+The current draft counter remains `phase_drafts(team,phase).generation`.
+
+Before approval, proposal rows are `phase_draft_nodes(team,phase,id).data`: at
+most 200 rows and 262,144 aggregate data bytes, checked before loading. The
+retained base is `phase_publications.id=base_publication`; the reserved new
+approval is `phase_publications.id=approval`. Each exact `snapshot` is at most
+262,144 bytes. `phase_publication_nodes(publication,node)` retains each
+original request, with the existing 530,000-byte per-request read bound.
+The base and proposal are distinct canonical sources; do not concatenate them
+into an assumed old 262,144-byte single row or omit a source from consent.
+Bind the exact row/reference identities before consent and under the writer.
+
+The first-floor migration preserves raw snapshots/requests and rebuilds only
+the publication parent to permit distinct generations. Its one-time scan
+bounds at 65,536 publications and 256 MiB of snapshot data, returning over_cap
+before changing a gate/floor beyond that bound. SQL storage errors roll the
+parent rebuild and floor back together. Normal opens never perform this rewrite.

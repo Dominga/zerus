@@ -64,7 +64,8 @@
     "previous": null,
     "publication": null,
     "rejection": null,
-    "revision": 2
+    "revision": 2,
+    "rework_available": true
   },
   "ok": true,
   "team": "00000000-0000-4000-8000-00000000beef"

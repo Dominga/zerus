@@ -53,7 +53,7 @@ pub(crate) fn reserved(h: &mut Harness, ids: &[u32]) -> String {
 }
 
 #[test]
-fn phase_person_operations_refuse_bound_sessions_and_service_facts_keep_their_own_authority() {
+fn phase_review_operations_refuse_bound_sessions_and_service_facts_keep_their_own_authority() {
     let mut h = Harness::new();
     let lead = h.bind("lead");
     let member = h.bind("m1");
@@ -77,15 +77,25 @@ fn phase_person_operations_refuse_bound_sessions_and_service_facts_keep_their_ow
             generation: 1,
             rejection: id.clone(),
         },
-        Operation::AcceptPhase {
-            phase: 1,
-            publication: id.clone(),
-        },
     ];
     for op in operations {
         for actor in [&lead, &member, &other(), &service()] {
             refused(h.run(actor, op.clone()), code::NOT_ALLOWED);
         }
+    }
+    // Acceptance now has its own Lead-policy/delegation matrix. Nonlead,
+    // unrelated and service actors still have no phase-decision authority.
+    for actor in [&member, &other(), &service()] {
+        refused(
+            h.run(
+                actor,
+                Operation::AcceptPhase {
+                    phase: 1,
+                    publication: id.clone(),
+                },
+            ),
+            code::NOT_ALLOWED,
+        );
     }
     let approve = Operation::ApprovePhase {
         phase: 1,

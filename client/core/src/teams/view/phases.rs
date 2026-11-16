@@ -5,9 +5,11 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use zerus_team_plan::{draft::DraftNode, model::Phase};
 
+mod rework;
 mod snapshot;
 use super::graph::{self, PlanGraph};
 use super::phase_metrics::{self, PhaseMetrics, Unavailable};
+pub use rework::PhaseRework;
 pub use snapshot::PhaseNodeSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,6 +75,9 @@ struct DraftRead {
     rejection: Option<Rejection>,
     previous: Option<PreviousDraft>,
     live: Option<Value>,
+    #[serde(default)]
+    rework_available: bool,
+    rework: Option<Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -92,6 +97,9 @@ pub struct PhaseDraft {
     pub rejection: Option<Rejection>,
     pub previous: Option<PreviousDraft>,
     pub live: Option<PhaseNodeSnapshot>,
+    pub rework_available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rework: Option<PhaseRework>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -142,9 +150,17 @@ pub fn list(value: &Value) -> Result<PhaseList, String> {
 
 pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
     let data = value.get("draft").ok_or("The phase read gives no draft.")?;
+    draft_value(data, wanted, true)
+}
+
+fn draft_value(data: &Value, wanted: u32, allow_rework: bool) -> Result<PhaseDraft, String> {
+    if !allow_rework && data.get("rework").is_some() {
+        return Err("Correction proposals cannot contain another rework episode.".into());
+    }
     let mut frozen = data.clone();
     if let Some(fields) = frozen.as_object_mut() {
         fields.remove("live");
+        fields.remove("rework");
     }
     if data
         .get("nodes")
@@ -231,6 +247,11 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
             | zerus_team_plan::PhaseState::AwaitingAcceptance
             | zerus_team_plan::PhaseState::Done
     );
+    let rework = out
+        .rework
+        .as_ref()
+        .map(|r| rework::read(r, &out))
+        .transpose()?;
     let live = out
         .live
         .map(|value| snapshot::read(value, wanted, out.revision))
@@ -292,6 +313,8 @@ pub fn draft(value: &Value, wanted: u32) -> Result<PhaseDraft, String> {
         rejection: out.rejection,
         previous: out.previous,
         live,
+        rework_available: out.rework_available,
+        rework,
     })
 }
 

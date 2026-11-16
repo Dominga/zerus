@@ -169,7 +169,8 @@
           "total": 2
         },
         "rejection": null,
-        "revision": 15
+        "revision": 15,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -574,7 +575,8 @@
           "total": 2
         },
         "rejection": null,
-        "revision": 14
+        "revision": 14,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -902,7 +904,8 @@
         "previous": null,
         "publication": null,
         "rejection": null,
-        "revision": 4
+        "revision": 4,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -1289,7 +1292,8 @@
           "total": 2
         },
         "rejection": null,
-        "revision": 8
+        "revision": 8,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -1698,7 +1702,8 @@
           "total": 2
         },
         "rejection": null,
-        "revision": 11
+        "revision": 11,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -2114,7 +2119,8 @@
           "total": 2
         },
         "rejection": null,
-        "revision": 8
+        "revision": 8,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -2423,7 +2429,8 @@
           "generation": 1,
           "id": "00000000-0000-4000-8000-000000009388"
         },
-        "revision": 5
+        "revision": 5,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"
@@ -2775,7 +2782,8 @@
         },
         "publication": null,
         "rejection": null,
-        "revision": 7
+        "revision": 7,
+        "rework_available": true
       },
       "ok": true,
       "team": "00000000-0000-4000-8000-00000000beef"

@@ -871,3 +871,23 @@ execution/acceptance policy, so older clients/services keep their existing task
 behavior. Old hgs versions show inspection as unavailable, never a successful
 empty configuration. An uncertain save keeps its original action for Check in the
 Team tab; it is never automatically reposted.
+
+## Correcting an awaiting phase
+
+**Send phase back** requires a comment and keeps the phase awaiting acceptance.
+Its earlier accepted tasks and commits stay unchanged. The person can send back
+a hard gate; the exact lead can decide only a Lead gate with the Accept results
+delegation. **Draft corrections** opens a separate nonempty proposal with new
+task IDs. **Edit corrections**, **Approve corrections**, rejection and undo
+retain that proposal's exact publication, episode and generation. The phase
+returns to Approved only after every new task is confirmed and publication
+settles. A partial or unknown outcome never causes an automatic replay.
+
+Corrections preserve the existing acceptance, approval policy, barrier, pause,
+order, kind and mode. The barrier shown in their editor is read-only. The
+existing phase reader/poller keeps the retained base snapshot separate from
+the proposal, then switches to the new frozen publication after confirmation.
+Older unreturned publications remain unavailable to estimate views; the whole
+phase live scope still includes earlier accepted work. No task is mass-reopened
+and no integration history is rewound. Read `hgs guide team-rework` for the
+strict command fields and original-request Check behavior.

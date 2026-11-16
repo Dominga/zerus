@@ -70,7 +70,36 @@ pub struct Rejection {
 }
 
 pub(crate) fn publication(db: &Connection, team: &str, phase: u32) -> Result<Option<Publication>> {
-    db.query_row("SELECT p.id,p.generation,p.state,count(n.node),COALESCE(sum(n.state='created'),0),COALESCE(sum(n.state IN ('refused','uncertain') OR n.reason<>''),0),(SELECT NULLIF(reason,'') FROM phase_publication_nodes WHERE publication=p.id AND reason<>'' ORDER BY node LIMIT 1) FROM phase_publications p LEFT JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.phase=?2 GROUP BY p.id",params![team,phase],|r| Ok(Publication { id:r.get(0)?,generation:r.get(1)?,state:r.get(2)?,total:r.get(3)?,created:r.get(4)?,blocked:r.get(5)?,reason:r.get(6)? })).optional().map_err(storage)
+    let id: Option<String> = db.query_row("SELECT id FROM phase_publications WHERE team=?1 AND phase=?2 ORDER BY generation DESC LIMIT 1",params![team,phase],|r|r.get(0)).optional().map_err(storage)?;
+    id.map(|id| by_id(db, team, &id))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub(crate) fn by_id(db: &Connection, team: &str, id: &str) -> Result<Option<Publication>> {
+    db.query_row("SELECT p.id,p.generation,p.state,count(n.node),COALESCE(sum(n.state='created'),0),COALESCE(sum(n.state IN ('refused','uncertain') OR n.reason<>''),0),(SELECT NULLIF(reason,'') FROM phase_publication_nodes WHERE publication=p.id AND reason<>'' ORDER BY node LIMIT 1) FROM phase_publications p LEFT JOIN phase_publication_nodes n ON n.publication=p.id WHERE p.team=?1 AND p.id=?2 GROUP BY p.id",params![team,id],|r| Ok(Publication { id:r.get(0)?,generation:r.get(1)?,state:r.get(2)?,total:r.get(3)?,created:r.get(4)?,blocked:r.get(5)?,reason:r.get(6)? })).optional().map_err(storage)
+}
+
+pub(crate) fn snapshot(db: &Connection, team: &str, id: &str) -> Result<Vec<DraftNode>> {
+    let bytes: usize = db
+        .query_row(
+            "SELECT length(CAST(snapshot AS BLOB)) FROM phase_publications WHERE team=?1 AND id=?2",
+            params![team, id],
+            |r| r.get(0),
+        )
+        .map_err(storage)?;
+    if bytes > 262_144 {
+        return Err(Problem::new(
+            code::OVER_CAP,
+            "The saved publication exceeds its draft bound.",
+        ));
+    }
+    db.query_row(
+        "SELECT snapshot FROM phase_publications WHERE team=?1 AND id=?2",
+        params![team, id],
+        |r| sql_json(r, 0),
+    )
+    .map_err(storage)
 }
 
 pub(crate) fn rejection(db: &Connection, team: &str, phase: u32) -> Result<Option<Rejection>> {

@@ -100,25 +100,35 @@ pub(super) fn approve(ctx: &mut Context<'_>) -> Result<()> {
     {
         return Err(invalid("Automatic approval is not enabled for this phase."));
     }
-    let lead = ctx
-        .member(&ctx.team.lead)?
-        .session
-        .filter(|s| s.machine == ctx.team.home && !s.session_id.is_empty())
-        .ok_or_else(|| invalid("The lead needs its local session binding before approval."))?;
     let nodes = store::drafts::nodes(ctx.db, &ctx.team.id, *phase)?;
     if nodes.is_empty() {
         return Err(invalid("An empty phase cannot be approved."));
     }
     drafts::revalidate(ctx, &record, &nodes)?;
-    phase_review::close(ctx, *phase, "review")?;
+    reserve(ctx, *phase, *generation, initial, &nodes)
+}
+
+pub(super) fn reserve(
+    ctx: &Context<'_>,
+    phase: u32,
+    generation: u64,
+    initial: bool,
+    nodes: &[zerus_team_plan::draft::DraftNode],
+) -> Result<()> {
+    let lead = ctx
+        .member(&ctx.team.lead)?
+        .session
+        .filter(|s| s.machine == ctx.team.home && !s.session_id.is_empty())
+        .ok_or_else(|| invalid("The lead needs its local session binding before approval."))?;
+    phase_review::close(ctx, phase, "review")?;
     let id = review_id(ctx)?;
     store::raise_execution_floor(ctx.db, PUBLICATION_LAYOUT)?;
     ctx.db.execute("INSERT INTO phase_publications(id,team,phase,generation,snapshot,initial,state,created_ms) VALUES(?1,?2,?3,?4,?5,?6,'reserved',?7)",params![id,ctx.team.id,phase,generation,encode(&nodes)?,initial,ctx.now]).map_err(storage)?;
-    for node in nodes {
+    for node in nodes.iter().cloned() {
         let request = PlannedTaskRequest {
             publication: id.clone(),
             team: ctx.team.id.clone(),
-            phase: *phase,
+            phase,
             task: TaskRef {
                 project: ctx.team.project.clone(),
                 uuid: task_id(&ctx.team.id, &id, node.id),
@@ -264,7 +274,7 @@ pub(super) fn publish(ctx: &mut Context<'_>) -> Result<()> {
         return Err(invalid("Publication is paused or stopped."));
     }
     if record.state != PhaseState::Draft {
-        return Err(invalid("The publication phase is no longer a draft."));
+        record = rework::promotion(ctx, &record, publication)?;
     }
     let requests = {
         let mut stmt=ctx.db.prepare("SELECT request FROM phase_publication_nodes WHERE publication=?1 ORDER BY node LIMIT 201").map_err(storage)?;
@@ -340,6 +350,17 @@ pub(super) fn publish(ctx: &mut Context<'_>) -> Result<()> {
             [publication],
         )
         .map_err(storage)?;
+    if let Some(row) = store::rework::open(ctx.db, &ctx.team.id, *phase)? {
+        if row.approval.as_deref() != Some(publication) {
+            return Err(invalid("The correction publication identity changed."));
+        }
+        ctx.db
+            .execute(
+                "UPDATE phase_reworks SET state='published' WHERE id=?1 AND approval=?2",
+                params![row.id, publication],
+            )
+            .map_err(storage)?;
+    }
     record.state = PhaseState::Approved;
     save_phase(ctx, &record)?;
     if ctx.team.status == TeamStatus::Planning {
@@ -374,13 +395,23 @@ fn save_phase(ctx: &Context<'_>, record: &Phase) -> Result<()> {
 /// The authoritative fact used both by reconciliation and the fresh kernel
 /// projection at hand-out. Never infer completion from an empty live queue.
 pub(crate) fn complete(db: &Connection, team: &str, phase: u32) -> Result<bool> {
-    let Some(p) = store::publication::publication(db, team, phase)? else {
-        return Ok(false);
-    };
-    if p.state != "published" || p.total == 0 || p.created != p.total || p.blocked != 0 {
+    if store::rework::open(db, team, phase)?.is_some() {
         return Ok(false);
     }
-    let snapshot = store::phase_snapshot::load(db, team, phase, 0)?;
+    complete_facts(db, team, phase, None)
+}
+
+pub(super) fn complete_facts(
+    db: &Connection,
+    team: &str,
+    phase: u32,
+    excluded: Option<&str>,
+) -> Result<bool> {
+    let exists:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM phase_publications WHERE team=?1 AND phase=?2 AND (?3 IS NULL OR id<>?3))",params![team,phase,excluded],|r|r.get(0)).map_err(storage)?;
+    if !exists {
+        return Ok(false);
+    }
+    let snapshot = store::phase_snapshot::load_except(db, team, phase, 0, excluded)?;
     if !snapshot.complete || snapshot.nodes.is_empty() {
         return Ok(false);
     }
@@ -435,6 +466,7 @@ pub(super) fn accept(ctx: &mut Context<'_>) -> Result<()> {
     };
     ctx.active()?;
     let mut record = phase_record(ctx, *phase)?;
+    rework::acceptance_authority(ctx, &record)?;
     let p = store::publication::publication(ctx.db, &ctx.team.id, *phase)?.ok_or_else(missing)?;
     if p.id != *publication
         || record.kind != PhaseKind::Plan

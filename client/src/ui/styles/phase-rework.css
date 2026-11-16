@@ -1,0 +1,3 @@
+.phase-corrections { border: 1px solid var(--z-color-border); border-radius: 8px; padding: 12px; margin: 12px 0; min-width: 0; }
+.phase-corrections > h3 { margin-top: 0; }
+.phase-corrections .phase-actions { margin: 8px 0; }

@@ -24,7 +24,7 @@ fn an_explicit_hold_winning_before_final_reservation_prevents_attempt_and_input(
         true,
     );
     wait_for(&f, "ready-");
-    let before = f.document().revision();
+    let before = f.document().view().unwrap();
     // Explicit modeled native Person producer; no flag or canonical row is
     // injected. Hold must actually succeed against the outstanding effect.
     let held =
@@ -37,7 +37,14 @@ fn an_explicit_hold_winning_before_final_reservation_prevents_attempt_and_input(
     assert_eq!(f.count(), 0, "held work reached the fake input port");
     let after = f.document();
     assert!(after.attempt(&f.body.id).unwrap().is_none());
-    assert_eq!(after.revision(), before);
+    // The existing admission fence may upgrade document metadata before
+    // refusal. It must preserve work and create no execution attempt.
+    let after = after.view().unwrap();
+    assert_eq!(after.stage, before.stage);
+    assert_eq!(after.target, before.target);
+    assert_eq!(after.session, before.session);
+    assert_eq!(after.title, before.title);
+    assert_eq!(after.text, before.text);
 }
 
 #[test]

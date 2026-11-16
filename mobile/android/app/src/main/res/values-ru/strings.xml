@@ -72,4 +72,11 @@
     <string name="task_edit_refresh_failed">Задача сохранена. Обновите проект, чтобы увидеть изменения.</string>
     <string name="task_media_exchange_update">Обновите Zerus на этом компьютере, чтобы передать вложения задачи.</string>
     <string name="task_send_unknown_hold">Возможно, задача уже отправлена. Дождитесь обновления её состояния.</string>
+    <string name="task_content_open">Изменить запрос и файлы</string>
+    <string name="task_content_new">Новая задача с файлами</string>
+    <string name="task_content_upload">Обновите Zerus на выбранном компьютере задачи, чтобы прикрепить файлы. Черновик сохранён.</string>
+    <string name="task_content_stale">Задача изменилась во время редактирования. Исходный черновик сохранён; сначала проверьте текущую задачу.</string>
+    <string name="task_content_held">Не удалось подтвердить сохранение. Исходный черновик сохранён; проверьте задачу перед новым изменением.</string>
+    <string name="task_content_comment_files">Посмотреть файлы комментария</string>
+    <string name="task_content_comment_close">Закрыть файлы комментария</string>
 </resources>

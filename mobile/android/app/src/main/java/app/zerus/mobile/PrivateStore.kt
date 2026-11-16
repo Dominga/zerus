@@ -27,6 +27,13 @@ class PrivateStore(context: Context) {
             try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
         })
     }
+    internal val taskContentDrafts by lazy {
+        val root = File(notificationContext.noBackupFilesDir, "task-content-drafts-v1")
+        TaskContentDraftFiles(root, { key }, syncDirectory = {
+            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+        })
+    }
     companion object { private val keyCreationLock=Any(); internal val notificationLock=Any(); private val pushLock=Any() }
     private val key: SecretKey by lazy { synchronized(keyCreationLock) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

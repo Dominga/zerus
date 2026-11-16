@@ -128,10 +128,10 @@ import org.json.JSONObject
 }
 
 @Composable internal fun TaskMediaLink(model: ZerusViewModel, key: ProjectKey, task: String,
-    file: app.zerus.mobile.replica.TaskMediaInfo, modifier: Modifier = Modifier) {
-    val state = model.taskMediaState(key, task, file)
+    file: app.zerus.mobile.replica.TaskMediaInfo, modifier: Modifier = Modifier, entry: String? = null) {
+    val state = model.taskMediaState(key, task, file, entry)
     Column(modifier) {
-        TextButton(onClick = { model.previewTaskMedia(key, task, file) }, enabled = state?.loading != true) {
+        TextButton(onClick = { model.previewTaskMedia(key, task, file, entry) }, enabled = state?.loading != true) {
             Text(file.name)
             if (state?.loading == true) { Spacer(Modifier.width(8.dp)); CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp) }
         }

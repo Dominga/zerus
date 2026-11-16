@@ -10,6 +10,8 @@ pub(super) struct Selection {
     plan_generation: Option<u64>,
 }
 impl TeamsModel {
+    // Keep scope, cleanup lease and injected clock explicit at this boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn follow_observed(
         &mut self,
         team: &str,

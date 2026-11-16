@@ -120,7 +120,7 @@ fn assert_absent(updates: Vec<(String, TeamsUpdate)>) {
             TeamsUpdate::Team(v) => Some(v),
             _ => None,
         })
-        .last()
+        .next_back()
         .expect("retirement publishes actual frontend state");
     assert!(view.plan.as_ref().unwrap().observed.is_none());
 }

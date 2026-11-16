@@ -30,8 +30,8 @@ use zerus_client_core::teams::{TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
 
-mod settings;
 pub mod observed;
+mod settings;
 
 /// The one Teams reader of this computer and the intents whose actions it
 /// sent.

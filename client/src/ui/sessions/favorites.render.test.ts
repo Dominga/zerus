@@ -14,7 +14,7 @@ import { emptyBatch, type ViewRow } from "../../types";
 import { emptyGrouping } from "../../store/organization";
 import { listRows, filterCounts } from "./model";
 import { favorite, setFavorite } from "../../store/favorites";
-import { setTeamCollapsed } from "../../store/teamCollapse";
+import { setTeamCollapsed, teamCollapsed } from "../../store/teamCollapse";
 import { menu, setMenu, setStateFilter, setStripMode, setMachineFilter, setProjectFilter, setAccountFilter, setFolderFilter } from "../../store/ui";
 
 const MACHINE = "11111111-1111-4111-8111-111111111111";
@@ -40,7 +40,7 @@ function setup() {
   ] }] });
   grouping(false); setStateFilter("all"); setStripMode(false);
   for (const s of Object.values(catalog.rows)) setFavorite(s, false);
-  setTeamCollapsed(key(1), false);
+  for (const n of [1, 2, 3, 4]) setTeamCollapsed(key(n), false);
   const host = document.createElement("div"); document.body.append(host);
   stop = render(() => createComponent(SessionList, {}), host);
   return host;
@@ -49,6 +49,25 @@ afterEach(() => { stop?.(); document.body.replaceChildren(); setMenu(undefined);
 const cards = () => listRows().flatMap((r) => r.type === "card" ? [r.id] : []);
 
 describe("actual session-row favorites menu and model", () => {
+  it("toggles a favorite's own children while its ancestor stays collapsed", () => {
+    const host = setup();
+    applyBatch({ ...emptyBatch(), upserts: [{ computer: "", key: "run:favorite-4", row: raw(4, { parent: {
+      machine: MACHINE, session_id: id(2), conversation_id: "conversation-2", run_id: "favorite-2", name: raw(2).name, state: "live",
+    } }) }] });
+    setFavorite(catalog.rows[key(2)], true); setTeamCollapsed(key(1), true); setTeamCollapsed(key(2), true);
+    const toggle = () => host.querySelector<HTMLButtonElement>(`.vrow[data-key='${CSS.escape(key(2))}'] button[title$='subagents and child sessions']`)!;
+    expect(cards()).toEqual([key(1), key(2)]);
+    expect(toggle()).not.toBeNull(); toggle().click();
+    expect(teamCollapsed(key(1))).toBe(true);
+    expect(teamCollapsed(key(2))).toBe(false);
+    expect(cards()).toEqual([key(1), key(2), key(4)]);
+    expect(host.querySelector(`.vrow[data-key='${CSS.escape(key(4))}']`)).not.toBeNull();
+    toggle().click();
+    expect(cards()).toEqual([key(1), key(2)]);
+    setTeamCollapsed(key(1), false);
+    expect(cards()).toEqual([key(1), key(2), key(3)]);
+    expect(teamCollapsed(key(2))).toBe(true);
+  });
   it("adds from a real child row menu, keeps it in collapsed groups, then removes it there", () => {
     const host = setup(); const before = { ...filterCounts() };
     const child = host.querySelector<HTMLElement>(`.vrow[data-key='${CSS.escape(key(2))}'] .rowhit`)!;

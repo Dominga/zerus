@@ -61,9 +61,53 @@ describe("favorite sessions stay in the existing hierarchy (zerus-ux18t)", () =>
     expect(rows.find((r) => r.type === "container")).toMatchObject({ container: { key: lead.key } });
     expect(keys(arg)).toEqual([middle.key, favorite.key, other.key]);
   });
-  it("does not expand native internal subagents inside a collapsed project", () => {
+  it("lets a favorite show its native subagents inside a collapsed project", () => {
     const arg = input(true, [middle.key]); arg.roster = (s) => s.key === middle.key ? [{ id: "native-child", name: "Native", summary: "", state: "ready", inactive: false }] : [];
+    expect(groupRows(arg).some((r) => r.type === "child")).toBe(true);
+    expect(keys(arg)).toEqual([lead.key, middle.key, favorite.key, sibling.key, other.key]);
+  });
+  it.each([false, true])("keeps a favorite's own child-session toggle independent of collapsed ancestors (project collapsed: %s)", (projectCollapsed) => {
+    const arg = input(projectCollapsed);
+    const child = row(6, 3), grandchild = row(7, 6);
+    const rows = [...arg.members.get("project")!, child, grandchild];
+    arg.members.set("project", rows); arg.parentKey = parentIndex(rows, () => MACHINE);
+    const collapsed = new Set([lead.key]); arg.teamCollapsed = (key) => collapsed.has(key);
+    expect(keys(arg)).toEqual([lead.key, middle.key, favorite.key, child.key, grandchild.key, other.key]);
+    collapsed.add(favorite.key);
+    expect(keys(arg)).toEqual([lead.key, middle.key, favorite.key, other.key]);
+    collapsed.delete(lead.key);
+    expect(keys(arg)).toEqual(projectCollapsed ? [lead.key, middle.key, favorite.key, other.key]
+      : [lead.key, middle.key, favorite.key, sibling.key, other.key]);
+    collapsed.add(lead.key); collapsed.delete(favorite.key);
+    expect(keys(arg)).toEqual([lead.key, middle.key, favorite.key, child.key, grandchild.key, other.key]);
+    arg.favorite = () => false;
+    expect(keys(arg)).toEqual(projectCollapsed ? [other.key] : [lead.key, other.key]);
+  });
+  it("obeys nested collapsed branches and reveals a deeper favorite without unrelated siblings", () => {
+    const arg = input();
+    const child = row(6, 3), deepFavorite = row(7, 6), hiddenSibling = row(8, 6), deepChild = row(9, 7);
+    const rows = [...arg.members.get("project")!, child, deepFavorite, hiddenSibling, deepChild];
+    arg.members.set("project", rows); arg.parentKey = parentIndex(rows, () => MACHINE);
+    arg.favorite = (s) => s.key === favorite.key || s.key === deepFavorite.key;
+    arg.teamCollapsed = (key) => key === lead.key || key === child.key;
+    expect(keys(arg)).toEqual([lead.key, middle.key, favorite.key, child.key, deepFavorite.key, deepChild.key, other.key]);
+    const result = groupRows(arg);
+    expect(new Set(result.map((r) => r.id)).size).toBe(result.length);
+    expect(result.find((r) => r.id === favorite.key)).toMatchObject({ team: { total: 4, collapsed: false } });
+    expect(result.find((r) => r.id === deepFavorite.key)).toMatchObject({ lastChild: true });
+    arg.visible = (s) => s.key !== deepChild.key;
+    expect(keys(arg)).not.toContain(deepChild.key);
+  });
+  it("keeps native subagents on the favorite's own toggle when its ancestor changes", () => {
+    const arg = input();
+    arg.roster = (s) => s.key === favorite.key ? [{ id: "native-child", name: "Native", summary: "", state: "ready", inactive: false }] : [];
+    const collapsed = new Set([lead.key]); arg.teamCollapsed = (key) => collapsed.has(key);
+    expect(groupRows(arg).filter((r) => r.type === "child").map((r) => r.id)).toEqual([`${favorite.key}/native-child`]);
+    collapsed.add(favorite.key);
     expect(groupRows(arg).some((r) => r.type === "child")).toBe(false);
-    expect(keys(arg)).toEqual([lead.key, middle.key, other.key]);
+    collapsed.delete(lead.key);
+    expect(groupRows(arg).some((r) => r.type === "child")).toBe(false);
+    collapsed.delete(favorite.key);
+    expect(groupRows(arg).some((r) => r.type === "child")).toBe(true);
   });
 });

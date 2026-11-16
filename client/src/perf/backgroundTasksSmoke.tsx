@@ -18,6 +18,7 @@ import "../ui/styles/sessions.css";
 import "../ui/styles/motion.css";
 
 const failures: string[] = [];
+const counterGeometry: { width: number; scale: number; count: number; centerOffset: number; clipped: boolean }[] = [];
 const check = (condition: unknown, message: string) => { if (!condition) failures.push(message); };
 const frame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 const settle = async () => { await frame(); await frame(); };
@@ -110,6 +111,20 @@ async function walk() {
   check(getComputedStyle(review()).color !== idleColor, "the held-folder count did not change the footer icon colour");
   check(review().getBoundingClientRect().width >= 26 && review().scrollWidth <= review().clientWidth, "the footer count clipped or overlapped its icon");
   check(result()!.getBoundingClientRect().right <= bar().getBoundingClientRect().right, "the status bar clipped the held result");
+  const footer = review().closest<HTMLElement>(".sp-foot")!;
+  for (const width of [220, 320]) for (const scale of [1, 1.5, 2]) for (const count of [1, 12, 9999]) {
+    footer.style.width = `${width}px`; footer.style.zoom = String(scale);
+    await show([row("running"), kept], { kept: count, text: "Working folders need review" });
+    const box = review().getBoundingClientRect(), icon = review().querySelector("svg")!.getBoundingClientRect();
+    const label = review().querySelector<HTMLElement>(".worktree-review-count")!.getBoundingClientRect();
+    const centerOffset = Math.abs((icon.top + icon.bottom - label.top - label.bottom) / 2);
+    const clipped = [icon, label].some((part) => part.top < box.top - 1 || part.bottom > box.bottom + 1 || part.left < box.left - 1 || part.right > box.right + 1);
+    counterGeometry.push({ width, scale, count, centerOffset, clipped });
+    check(centerOffset <= 1, `worktree icon/count wrapped: ${width}px ${scale}x count ${count}, offset ${centerOffset}`);
+    check(!clipped, `worktree icon/count clipped: ${width}px ${scale}x count ${count}`);
+    check(label.left >= icon.right, "worktree count overlaps its icon");
+  }
+  footer.style.width = "320px"; footer.style.zoom = "";
   await show([row("running")], { unknown: 1, text: "Working folders: 1 unknown" });
   check(result()?.textContent === "Working folders: 1 unknown", "running work hid a result past the row cap");
 
@@ -139,5 +154,5 @@ async function walk() {
     await new Promise((resolve) => setTimeout(resolve, hold));
   }
 }
-const report = () => (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify({ failures }));
+const report = () => (window as unknown as { webkit: { messageHandlers: { result: { postMessage(text: string): void } } } }).webkit.messageHandlers.result.postMessage(JSON.stringify({ failures, counterGeometry }));
 void walk().catch((error) => { failures.push(String(error)); }).finally(report);

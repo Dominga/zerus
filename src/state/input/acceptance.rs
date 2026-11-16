@@ -291,7 +291,8 @@ fn stored_receipt(record: &Value) -> Option<Value> {
 fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
     let receipt = stored_receipt(record)?;
     (receipt["conversation_id"] == record["conversation_id"]
-        || (codex_tasks::recovered_pending(record)
+        || (receipt["transport"] == "terminal"
+            && codex_tasks::recovered_pending(record)
             && receipt["conversation_id"] == record["codex_binding_recovery"]["from"])
         || (bootstrap
             && receipt["first_message"] == true
@@ -409,6 +410,13 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let Some(receipt) = receipt(record) else {
         return Ok(());
     };
+    // A terminal receipt could name the old mistaken binding while input
+    // reached the original TUI. A native queue UUID instead names its actual
+    // recipient; neither a binding repair nor parent text can rehome it.
+    if receipt["conversation_id"] != record["conversation_id"] && receipt["transport"] != "terminal"
+    {
+        return Ok(());
+    }
     if uncertainty::load(record).blocks(string(&receipt, "submitted_text")) {
         return Ok(());
     }

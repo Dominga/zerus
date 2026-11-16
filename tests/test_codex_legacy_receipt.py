@@ -166,6 +166,37 @@ class RestoredMainReceipt(unittest.TestCase):
             stream.write('{"not_complete":"'+'x'*(2<<20)+'\n')
         self.assertEqual(self.observe().get('input_seen_at', 0), 0)
 
+    def queued_receipt(self, parent=False):
+        self.retained()
+        self.receipt.update(transport='codex_queue', native_queued_message_id=str(uuid.uuid4()))
+        if parent:
+            self.receipt['conversation_id'] = self.conversation_id
+        self.receipt_bytes = json.dumps(self.receipt).encode()
+        self.receipt_path.write_bytes(self.receipt_bytes)
+        self.accepted()
+
+    def test_parent_input_cannot_confirm_a_queue_for_its_child(self):
+        self.queued_receipt()
+        self.assertEqual(self.observe().get('input_seen_at', 0), 0)
+
+    def test_a_real_binding_repair_cannot_rehome_a_child_queue(self):
+        self.queued_receipt()
+        self.record.update(conversation_id=self.successor, transcript=str(self.transcript))
+        self.write_record()
+        current = self.emit(self.parent_event)
+        self.assertEqual(current['conversation_id'], self.conversation_id)
+        self.assertEqual(current['codex_binding_recovery']['source'], 'original_native_prompt')
+        self.assertEqual(current.get('input_seen_at', 0), 0)
+        self.assertEqual(self.receipt_path.read_bytes(), self.receipt_bytes)
+
+    def test_same_recipient_queue_keeps_exact_native_input_confirmation(self):
+        self.queued_receipt(parent=True)
+        current = self.observe()
+        self.assertGreater(current['input_seen_at'], self.pending)
+        self.assertEqual(current['input_acceptance']['request_id'], self.request)
+        self.assertEqual(current['input_acceptance']['conversation_id'], self.conversation_id)
+        self.assertNotIn('receipt_conversation_id', current['input_acceptance'])
+
 
 if __name__ == '__main__':
     unittest.main()

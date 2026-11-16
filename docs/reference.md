@@ -9057,6 +9057,9 @@ its 64 KiB header, 16 MiB total tail and 16,384-row bounds. An individual Codex
 tool-output row may use the remaining aggregate tail instead of the former
 1 MiB row ceiling; malformed, clipped, changed or unseen evidence still refuses.
 The Kimi per-row bound is unchanged.
+This historical-context exception applies only to terminal receipts. A native
+queue UUID remains bound to its original recipient; a repaired binding or
+matching input in the parent cannot confirm a message queued to a child.
 
 An inspection indexes the Codex question transcript and recovers earlier
 submitted answers from this session's question receipts within one shared

@@ -66,7 +66,8 @@ impl Store {
             }
             bytes += source.len() + seed.len() + stamp.len();
             let key = Key(source.clone());
-            let value = Seed::decode(&key, &seed)?;
+            let mut value = Seed::decode(&key, &seed)?;
+            value["native_stamp"] = json!(stamp);
             fresh &= self.source_stamp(&key).ok().flatten().as_deref() == Some(stamp.as_str());
             rows.push((source, value));
         }
@@ -100,6 +101,25 @@ impl Reader {
         Ok(Self(Store::read(root)?))
     }
     pub fn page(&self, cursor: Option<&Cursor>) -> anyhow::Result<Page> {
-        self.0.page(cursor)
+        let mut page = self.0.page(cursor)?;
+        // The retained RO transaction pins generation data, not current readiness.
+        // Read current metadata separately without taking the publisher gate.
+        let check = || -> anyhow::Result<bool> {
+            let pinned: (String, i64, i64) = self.0.db.query_row(
+                "SELECT epoch,generation,writes FROM meta WHERE id=1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            let current = Store::read(&self.0.root.path)?;
+            let (epoch, generation, writes, ready): (String, i64, i64, bool) =
+                current.db.query_row(
+                    "SELECT epoch,generation,writes,ready FROM meta WHERE id=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
+            Ok(ready && pinned == (epoch, generation, writes))
+        };
+        page.fresh &= check().unwrap_or(false);
+        Ok(page)
     }
 }

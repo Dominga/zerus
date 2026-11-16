@@ -70,6 +70,19 @@ mod linux {
     }
     impl Changes {
         pub fn new(root: &Path) -> anyhow::Result<Option<Self>> {
+            Self::install(root, |fd, name, mask| {
+                let result = unsafe { libc::inotify_add_watch(fd, name.as_ptr(), mask) };
+                if result < 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(result)
+                }
+            })
+        }
+        fn install(
+            root: &Path,
+            mut watch: impl FnMut(i32, &CString, u32) -> io::Result<i32>,
+        ) -> anyhow::Result<Option<Self>> {
             let raw = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
             if raw < 0 {
                 return Err(unavailable(io::Error::last_os_error()));
@@ -105,15 +118,13 @@ mod linux {
                     ),
                 }
                 let name = CString::new(path.as_os_str().as_bytes())?;
-                let wd = unsafe { libc::inotify_add_watch(fd.as_raw_fd(), name.as_ptr(), MASK) };
-                if wd < 0 {
-                    let error = io::Error::last_os_error();
-                    return Err(if error.raw_os_error() == Some(libc::ENOSPC) {
+                let wd = watch(fd.as_raw_fd(), &name, MASK).map_err(|error| {
+                    if error.raw_os_error() == Some(libc::ENOSPC) {
                         unavailable("the native inotify watch limit is exhausted")
                     } else {
                         unavailable(error)
-                    });
-                }
+                    }
+                })?;
                 watches.insert(wd, path.clone());
             }
             Ok(Some(Self {
@@ -216,4 +227,6 @@ mod linux {
             Ok(batch)
         }
     }
+    #[cfg(test)]
+    mod tests;
 }

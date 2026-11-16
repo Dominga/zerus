@@ -211,6 +211,9 @@ fn project(store: &Store, s: &mut Scan, key: &Key, stats: &mut Stats) -> anyhow:
                         "INSERT OR REPLACE INTO snapshots(generation,source,seed,stamp) VALUES(?1,?2,?3,?4)",
                         params![s.generation, key.0, seed, stamp],
                     )?;
+                } else {
+                    store.db.execute("DELETE FROM snapshots WHERE generation=?1 AND source=?2",
+                        params![s.generation,key.0])?;
                 }
             } else {
                 store.db.execute(

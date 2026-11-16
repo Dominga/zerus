@@ -1,5 +1,13 @@
 use super::*;
 use fs2::FileExt;
+const WAL_LIMIT: u64 = 64 << 20;
+const WAL_QUOTA: &str = "Display WAL quota reached; background checkpoint required";
+fn wal_budget(dir: &Directory) -> anyhow::Result<()> {
+    if let Some(file) = checked(dir.read_private_optional("index.sqlite3-wal"))? {
+        anyhow::ensure!(file.metadata()?.len() <= WAL_LIMIT, WAL_QUOTA);
+    }
+    Ok(())
+}
 pub(super) struct Store {
     pub db: Connection,
     pub root: Directory,
@@ -10,6 +18,9 @@ pub(super) struct Store {
 }
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_for(path, false)
+    }
+    fn open_for(path: &Path, checkpoint: bool) -> anyhow::Result<Self> {
         let root = checked(Directory::open(&crate::platform::canonical(path)?))?;
         let dir = checked(root.ensure_child("listing-metadata"))?;
         anyhow::ensure!(
@@ -18,6 +29,9 @@ impl Store {
         );
         let gate = checked(dir.open_private_lock("writer.lock"))?;
         gate.try_lock_exclusive()?;
+        if !checkpoint {
+            wal_budget(&dir)?;
+        }
         let (file, new) = match checked(dir.read_private_optional("index.sqlite3"))? {
             Some(f) => (f, false),
             None => {
@@ -75,6 +89,7 @@ impl Store {
                 PRAGMA user_version=2;
                 COMMIT;")?;
         }
+        anyhow::ensure!(version != 0, "Incomplete display cache schema");
         anyhow::ensure!(matches!(version, 1 | 2), "Unknown display cache version");
         let identity: String =
             db.query_row("SELECT root FROM meta WHERE id=1 AND version=1", [], |r| {
@@ -105,6 +120,7 @@ impl Store {
         anyhow::ensure!(enabled(path), "Display index is disabled");
         let root = checked(Directory::open(&crate::platform::canonical(path)?))?;
         let dir = checked(root.child("listing-metadata"))?;
+        wal_budget(&dir)?;
         let file = checked(dir.read_private("index.sqlite3"))?;
         let db = Connection::open_with_flags(
             dir.path.join("index.sqlite3"),
@@ -252,6 +268,19 @@ impl Store {
     /// Recover only this component's disposable cache, never canonical files.
     /// One retained cache set bounds quarantine storage across repeated faults.
     pub fn recover(path: &Path, error: &anyhow::Error) -> anyhow::Result<bool> {
+        if error.to_string() == WAL_QUOTA {
+            // Only the background owner may checkpoint. A pinned reader makes
+            // this nonblocking attempt report busy; canonical writers do not wait.
+            let store = Self::open_for(path, true)?;
+            let (busy, _, _): (i64, i64, i64) =
+                store
+                    .db
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?;
+            store.verify()?;
+            return Ok(busy == 0);
+        }
         let eligible = match error.downcast_ref::<rusqlite::Error>() {
             Some(rusqlite::Error::SqliteFailure(code, message)) => {
                 let code = code.extended_code & 0xff;
@@ -265,7 +294,9 @@ impl Store {
             Some(rusqlite::Error::QueryReturnedNoRows) => true,
             _ => matches!(
                 error.to_string().as_str(),
-                "Display root/store identity changed" | "Orphaned display journal files"
+                "Display root/store identity changed"
+                    | "Orphaned display journal files"
+                    | "Incomplete display cache schema"
             ),
         };
         if !eligible {

@@ -646,6 +646,16 @@ fn label_row(session: &mut Value, record: &Value) {
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
     // An approval answered in Terminal sends no hook.
     let record = kimi_completion::reconcile(claude_approval::reconcile(record));
+    live_display_row(session, record, shared, process_work)
+}
+
+// Display-only inputs must never enter the canonical reconciliation above.
+fn live_display_row(
+    session: &mut Value,
+    record: Value,
+    shared: &Shared,
+    process_work: &mut processes::WorkSample,
+) -> Result<()> {
     session["resumable"] = json!(
         !string(&record, "conversation_id").is_empty()
             && string(&record, "error").is_empty()

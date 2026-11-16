@@ -20,6 +20,31 @@ pub(crate) fn supported(agent: &str) -> bool {
     matches!(agent, "claude" | "codex" | "kimi")
 }
 
+/// Read-only listing precheck, never an input/admission proof. An unfamiliar
+/// draft/layout retains the canonical path rather than proving no native menu.
+pub(in crate::state) fn codex_public_frame(record: &Value, screen: &str) -> bool {
+    let lines: Vec<_> = screen.trim_end().lines().collect();
+    let Some(last) = lines.last() else {
+        return false;
+    };
+    if !(codex_status_row(last, codex_footer_model(record))
+        || codex_shortcuts_footer(last)
+        || codex_warning_footer(last))
+    {
+        return false;
+    }
+    let Some(y) = lines
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(n, row)| codex_prompt(row).map(|_| n))
+    else {
+        return false;
+    };
+    codex_draft(record, &lines.join("\n"), y)
+        .is_some_and(|draft| draft.is_empty() || draft == "Ask Codex to do anything")
+}
+
 pub(crate) fn read(record: &Value, screen: &str, cursor_x: usize, cursor_y: usize) -> Composer {
     let agent = string(record, "agent");
     if !supported(agent) {
@@ -132,6 +157,23 @@ mod tests {
         assert_eq!(read(&record("kimi"), kimi, 26, 1), Composer::Text("[paste #1 +36 lines]\nsecond line".into()));
         let kimi_empty = " ╭──────────────────────────────╮\n │ >                            │\n ╰──────────────────────────────╯\n Never Ask  fixture";
         assert_eq!(read(&record("kimi"), kimi_empty, 5, 1), Composer::Empty);
+    }
+
+    #[test]
+    fn listing_codex_negative_needs_the_complete_known_composer_footer() {
+        let record = json!({"agent":"codex","model":"gpt-6"});
+        let frame = "› \n\n  gpt-6 high · /srv/example\n";
+        assert!(codex_public_frame(&record, frame));
+        for frame in [
+            "",
+            "unknown frame",
+            "› 1. Yes\n  2. No\n\n  gpt-6 high · /srv/example\n",
+            "› \n\n  gpt-6 high · /srv/example\nUnrecognized choice",
+            "› \n\nnot a model footer",
+            "› incomplete",
+        ] {
+            assert!(!codex_public_frame(&record, frame), "{frame:?}");
+        }
     }
 
     #[test]

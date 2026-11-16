@@ -4,6 +4,8 @@ use super::*;
 use std::cell::RefCell;
 use std::time::Instant;
 
+pub(in crate::state) const ENTRY_LIMIT: usize = 256;
+
 struct Budget {
     until: Instant,
     bytes: usize,
@@ -13,6 +15,33 @@ struct Budget {
 thread_local! {
     static BUDGET: RefCell<Option<Budget>> = const {RefCell::new(None)};
     static ROUTE: RefCell<Option<(String,PathBuf)>> = const {RefCell::new(None)};
+    static PUBLIC: RefCell<Option<(String,String)>> = const {RefCell::new(None)};
+}
+/// One already-observed ordinary composer, only for display normalization.
+/// Native question/admission helpers must not consume the compact record.
+pub(in crate::state) struct Public(Option<(String, String)>);
+impl Public {
+    pub fn enter(record: &Value) -> Self {
+        Self(PUBLIC.with(|slot| {
+            slot.replace(Some((
+                string(record, "name").into(),
+                string(record, "run_id").into(),
+            )))
+        }))
+    }
+}
+impl Drop for Public {
+    fn drop(&mut self) {
+        PUBLIC.with(|slot| slot.replace(self.0.take()));
+    }
+}
+pub(in crate::state) fn public(record: &Value) -> bool {
+    active()
+        && PUBLIC.with(|slot| {
+            slot.borrow().as_ref().is_some_and(|(name, run)| {
+                name == string(record, "name") && run == string(record, "run_id")
+            })
+        })
 }
 pub(in crate::state) struct Scope(Option<Budget>);
 impl Scope {
@@ -21,7 +50,7 @@ impl Scope {
             budget.replace(Some(Budget {
                 until,
                 bytes: 16 << 20,
-                entries: 256,
+                entries: ENTRY_LIMIT,
                 failed: false,
             }))
         }))
@@ -233,6 +262,25 @@ mod tests {
             "scope leaked to the ordinary canonical path"
         );
     }
+    #[test]
+    fn public_display_context_is_row_local_and_never_native_admission() {
+        let row = json!({"name":"claude/example/public","run_id":"run","agent":"claude","phase":"working"});
+        let scope = Scope::enter(Instant::now() + std::time::Duration::from_secs(1));
+        assert!(!public(&row));
+        {
+            let _public = Public::enter(&row);
+            assert!(public(&row));
+            assert!(!public(
+                &json!({"name":"claude/example/public","run_id":"another"})
+            ));
+            // An accidental direct native-card request refuses the entire body;
+            // it cannot reach identity/channel/admission with a compact record.
+            assert!(crate::state::claude_approval::current(&row).is_none());
+            assert!(scope.verify().is_err());
+        }
+        assert!(!public(&row));
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_canonical_overlay_never_waits_for_a_fifo() {

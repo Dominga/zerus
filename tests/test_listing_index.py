@@ -123,6 +123,7 @@ class ListingIndex(unittest.TestCase):
         self.assertFalse(differences,f'public rows differ: {differences}')
 
     def test_large_default_off_preflight_precedes_recovery_body_reads(self):
+        directory=self.state/'listing-metadata';directory.mkdir(exist_ok=True);(directory/'disabled').write_text('1\n');(directory/'disabled').chmod(0o600)
         for n in range(300):self.saved(n)
         folder=self.state/'renames';folder.mkdir()
         source=folder/'pending.json';source.write_text('{"version":999}')
@@ -131,6 +132,76 @@ class ListingIndex(unittest.TestCase):
         self.assertEqual(result.stdout,'')
         self.assertIn('bounded default-off inventory',result.stderr)
         self.assertEqual(source.read_text(),'{"version":999}')
+
+    def test_full_private_file_ceiling_is_256_and_explicit_pages_stay_at_16(self):
+        for n in range(256):
+            record,path=self.saved(n);record['pausing']={};path.write_text(json.dumps(record))
+        self.ready();body=self.complete()
+        self.assertEqual(len(body['sessions']),256)
+        result=self.call('ls','--json','--local','--no-archives','--paged','--page-size','17')
+        self.assertNotEqual(result.returncode,0);self.assertEqual(result.stdout,'')
+        self.assertIn('file limit',result.stderr)
+        record,path=self.saved(256);record['pausing']={};path.write_text(json.dumps(record))
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            result=self.call('ls','--json','--local','--no-archives')
+            if 'file limit' in result.stderr:break
+            self.assertEqual(result.stdout,'');time.sleep(.05)
+        self.assertNotEqual(result.returncode,0);self.assertEqual(result.stdout,'')
+        self.assertIn('file limit',result.stderr)
+
+    def test_complete_current_v3_cache_upgrades_through_the_real_worker_without_source_writes(self):
+        import sqlite3
+        sources=[self.saved(n) for n in range(300)]
+        self.ready();self.hgs_disabled=self.call('listing-index','disable','--json')
+        self.assertEqual(self.hgs_disabled.returncode,0,self.hgs_disabled.stderr)
+        directory=self.state/'listing-metadata'
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            try:
+                with (directory/'worker.lock').open('rb') as probe:fcntl.flock(probe,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                break
+            except BlockingIOError:time.sleep(.02)
+        else:self.fail('private old-format fixture worker did not stop')
+        before={str(path):path.read_bytes() for _,path in sources}
+        # Faithful v3 PROJECTION fixture, not corruption or a production writer.
+        # No canonical file/native stamp changes. v3 did not have live_public.
+        with sqlite3.connect(directory/'index.sqlite3') as db:
+            for table in ['sources','snapshots']:
+                for key,encoded in db.execute(f'SELECT source,seed FROM {table}').fetchall():
+                    value=json.loads(encoded);value['version']=3;value['record']['_listing'].pop('live_public',None)
+                    value['digest']=hashlib.sha256(json.dumps(value['record'],ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                    db.execute(f'UPDATE {table} SET seed=? WHERE source=?',(json.dumps(value,separators=(',',':')),key))
+            self.assertEqual(db.execute('SELECT ready FROM meta').fetchone()[0],1)
+        with (directory/'writer.lock').open('rb') as gate:
+            fcntl.flock(gate,fcntl.LOCK_EX)
+            enabled=self.call('listing-index','enable','--json');self.assertEqual(enabled.returncode,0,enabled.stderr)
+            result=self.call('ls','--json','--local','--no-archives')
+            self.assertNotEqual(result.returncode,0);self.assertEqual(result.stdout,'')
+            self.assertIn('Display seed identity changed',result.stderr)
+        body=self.complete();self.assertEqual(len(body['sessions']),300)
+        with sqlite3.connect(directory/'index.sqlite3') as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM sources WHERE json_extract(seed,'$.version')!=4").fetchone()[0],0)
+            generation=db.execute('SELECT generation FROM meta').fetchone()[0]
+            self.assertEqual(db.execute("SELECT count(*) FROM snapshots WHERE generation=? AND json_extract(seed,'$.version')!=4",(generation,)).fetchone()[0],0)
+        self.assertEqual({str(path):path.read_bytes() for _,path in sources},before)
+        print(json.dumps(dict(control='complete-current-v3-runtime-upgrade',sessions=300,generation=generation,canonical_unchanged=True)),flush=True)
+
+    def test_explicit_disable_before_first_listing_persists_on_qualified_linux(self):
+        self.saved(1)
+        self.assertFalse((self.state/'listing-metadata').exists())
+        result=self.call('listing-index','disable','--json');self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue((self.state/'listing-metadata/disabled').is_file(),'explicit disable was forgotten before automatic bootstrap')
+        body=self.complete();self.assertEqual(len(body['sessions']),1)
+        self.assertFalse((self.state/'listing-metadata/index.sqlite3').exists())
+        self.assertFalse(json.loads(self.call('listing-index','status','--json').stdout)['enabled'])
+
+    def test_qualified_linux_ordinary_listing_bootstraps_without_a_switch(self):
+        expected={self.saved(n)[0]['name'] for n in range(300)}
+        body=self.complete()
+        self.assertEqual({row['name'] for row in body['sessions']},expected)
+        status=json.loads(self.call('listing-index','status','--json').stdout)
+        self.assertTrue(status['enabled']);self.assertEqual(status['state'],'ready')
 
     def test_unavailable_native_and_terminal_rows_match_the_canonical_projection(self):
         self.saved(1)
@@ -300,18 +371,20 @@ class ListingIndex(unittest.TestCase):
         finally:server.shutdown();server.server_close();thread.join(timeout=2)
 
     def test_small_default_off_listing_keeps_full_public_rows_without_an_index(self):
+        directory=self.state/'listing-metadata';directory.mkdir(exist_ok=True);(directory/'disabled').write_text('1\n');(directory/'disabled').chmod(0o600)
         self.saved(1);self.saved(2);expected=self.canonical()
         self.assert_rows(expected,self.complete()['sessions'])
-        self.assertFalse((self.state/'listing-metadata').exists())
+        self.assertFalse((self.state/'listing-metadata/index.sqlite3').exists())
 
     def test_default_off_large_inventory_refuses_before_full_record_loading(self):
+        directory=self.state/'listing-metadata';directory.mkdir(exist_ok=True);(directory/'disabled').write_text('1\n');(directory/'disabled').chmod(0o600)
         for n in range(300):
             self.saved(n)
         reply=self.call('ls','--json','--local','--no-archives')
         self.assertNotEqual(reply.returncode,0,'large default-off ls silently loaded the whole inventory')
         self.assertEqual(reply.stdout,'','a refused complete listing leaked a partial body')
         self.assertIn('listing',reply.stderr.lower())
-        self.assertFalse((self.state/'listing-metadata').exists(),'default-off created an index')
+        self.assertFalse((self.state/'listing-metadata/index.sqlite3').exists(),'disabled listing created an index')
 
     def test_enabled_corrupt_index_never_falls_back_to_whole_records(self):
         record,path=self.saved(1)
@@ -328,6 +401,7 @@ class ListingIndex(unittest.TestCase):
         self.assertEqual(path.read_bytes(),original)
 
     def test_byte_preflight_and_late_response_limits_never_publish_partial_json(self):
+        directory=self.state/'listing-metadata';directory.mkdir(exist_ok=True);(directory/'disabled').write_text('1\n');(directory/'disabled').chmod(0o600)
         for n in range(2):
             record,path=self.saved(n);record['private_blob']='x'*(9<<20);path.write_text(json.dumps(record))
         reply=self.call('ls','--json','--local','--no-archives')
@@ -483,6 +557,35 @@ class LiveListingIndex(test_pause.Harness):
         super().tearDown()
 
     def assert_rows(self,expected,actual):ListingIndex.assert_rows(self,expected,actual)
+
+    def measured_full(self):
+        import threading
+        command=[str(HGS),'ls','--json','--local','--no-archives']
+        process=subprocess.Popen(command,env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        directory=os.open(f'/proc/{process.pid}',os.O_RDONLY|os.O_DIRECTORY)
+        done=threading.Event();measure=dict(peak_fds=0,peak_rss_kib=0,read_chars=0,read_bytes=0)
+        def sample():
+            while not done.is_set():
+                try:
+                    descriptor=os.open('fd',os.O_RDONLY|os.O_DIRECTORY,dir_fd=directory)
+                    try:measure['peak_fds']=max(measure['peak_fds'],len(os.listdir(descriptor)))
+                    finally:os.close(descriptor)
+                    for filename in ['status','io']:
+                        with os.fdopen(os.open(filename,os.O_RDONLY,dir_fd=directory)) as stream:text=stream.read()
+                        for line in text.splitlines():
+                            if line.startswith('VmRSS:'):measure['peak_rss_kib']=max(measure['peak_rss_kib'],int(line.split()[1]))
+                            if line.startswith('rchar:'):measure['read_chars']=max(measure['read_chars'],int(line.split()[1]))
+                            if line.startswith('read_bytes:'):measure['read_bytes']=max(measure['read_bytes'],int(line.split()[1]))
+                except (FileNotFoundError,ProcessLookupError,PermissionError):pass
+                done.wait(.002)
+        thread=threading.Thread(target=sample);thread.start()
+        try:
+            stdout,stderr=process.communicate(timeout=12)
+        except subprocess.TimeoutExpired:
+            process.kill();process.communicate();raise
+        finally:done.set();thread.join(2);os.close(directory)
+        self.assertLessEqual(measure['peak_fds'],64,'listing retained unbounded canonical descriptors')
+        return subprocess.CompletedProcess(command,process.returncode,stdout,stderr),measure
 
     def projected(self):
         return self.ready_rows()
@@ -648,7 +751,7 @@ class LiveListingIndex(test_pause.Harness):
             self.assertEqual(result.stdout,'');time.sleep(.05)
         self.assertNotEqual(result.returncode,0)
         self.assertEqual(result.stdout,'')
-        self.assertIn('Selected listing overlays exceeded their bound',result.stderr)
+        self.assertIn('Selected listing overlays exceeded their file limit',result.stderr)
         for name in owners:os.kill(self.binding(name)['pid'],0)
 
     def test_slow_provider_and_deferred_live_owner_keep_both_memberships(self):
@@ -683,6 +786,152 @@ class LiveListingIndex(test_pause.Harness):
         finally:
             stop.set();thread.join(timeout=2);server.close()
             for client in clients:client.join(timeout=2)
+
+    def test_idle_claude_native_limit_panel_keeps_the_canonical_full_row(self):
+        frame=(Path(__file__).parent/'fixtures/claude-usage-limit.txt').read_text()
+        source=self.bin/'claude';script=source.read_text()
+        source.write_text(script.replace('\nfor line in sys.stdin:',f'\nimport tty\ntty.setraw(sys.stdin.fileno())\nprint({chr(27)+"[?2004h"+frame.replace(chr(10),chr(13)+chr(10))!r},flush=True)\nfor line in sys.stdin:',1))
+        name=self.start('claude','idle-native-limit')
+        self.send_event(name,'Stop',last_assistant_message='Private fixture reply')
+        record=self.binding(name)
+        self.assertEqual(record['phase'],'idle')
+        self.hgs('listing-index','enable','--json')
+        rows=self.ready_rows()
+        oracle=subprocess.run([str(HGS),'__state','merge'],input=json.dumps(dict(host='test',sessions=rows)),env=self.env,capture_output=True,text=True,timeout=12)
+        self.assertEqual(oracle.returncode,0,oracle.stderr)
+        expected=json.loads(oracle.stdout)['sessions']
+        native=next(row for row in expected if row['name']==name)
+        self.assertEqual(native['activity'],'busy')
+        detail=json.loads(self.hgs('inspect',name,'--skip-processes'))
+        self.assertTrue(any(q.get('source')=='claude_usage_limit' for q in detail['pending_questions']))
+        self.assert_rows(expected,rows)
+        self.assertEqual(self.binding(name),record,'public observation changed canonical record')
+
+    def test_full_mobile_mixed_private_inventory_keeps_exact_canonical_detail(self):
+        import threading
+        frame='› \n\n  gpt-6 high · /srv/example\n'
+        source=self.bin/'codex';script=source.read_text()
+        source.write_text(script.replace('\nfor line in sys.stdin:',f'\nprint({frame!r},flush=True)\nfor line in sys.stdin:',1))
+        owners=[self.start('kimi' if n<13 else ('codex' if n<84 else 'claude'),f'mixed-mobile-{n}') for n in range(94)]
+        for n,name in enumerate(owners):
+            path=self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+            record=json.loads(path.read_text());record['fixture_padding']='x'*(72<<10)
+            phase='tool' if n<13 else 'working' if n<21 else 'idle' if n<75 else 'unknown' if n<85 else 'error' if n<93 else 'compacting'
+            if n<78:record['recovery_user_text']='Private fixture request '+('r'*1570)
+            if n<86:record['prompt']='Private prompt '+('p'*1230)
+            if n<92:record['last_message']='Private response '+('m'*610)
+            record.update(phase=phase,activity='busy' if phase in ['tool','working','compacting'] else 'idle' if phase=='idle' else 'unknown')
+            if phase=='error':record.update(error='Private fixture native error',attention_id=f'error-{n}',attention_started=123)
+            if phase=='unknown':record['expected_id']='unconfirmed-native'
+            if n in [20,93]:record['subagents']={'child':dict(state='working',name='Private worker')}
+            path.write_text(json.dumps(record))
+        self.hgs('listing-index','enable','--json')
+        self.wait(lambda:json.loads(self.hgs('listing-index','status','--json'))['state']=='ready')
+        errors=[];stop=threading.Event();started=threading.Event();writes=[]
+        def writer():
+            try:
+                for n in range(4):
+                    if stop.is_set():break
+                    self.send_event(owners[13],'UserPromptSubmit',prompt=f'Private mixed writer {n}')
+                    writes.append(n);started.set()
+                    if stop.wait(1.5):break
+            except Exception as error:errors.append(repr(error));started.set()
+        thread=threading.Thread(target=writer);thread.start();self.assertTrue(started.wait(8))
+        attempts=[]
+        try:
+            deadline=time.monotonic()+12
+            while time.monotonic()<deadline:
+                began=time.monotonic()
+                result,resources=self.measured_full()
+                attempts.append(dict(resources=resources,code=result.returncode,seconds=time.monotonic()-began,bytes=len(result.stdout.encode()),error=result.stderr.strip(),writer_alive=thread.is_alive()))
+                if result.returncode==0 or 'overlays exceeded their' in result.stderr:break
+                self.assertEqual(result.stdout,'');time.sleep(.05)
+        finally:stop.set();thread.join(10)
+        print(json.dumps(dict(control='root-mix94',writes=writes,attempts=attempts)),flush=True)
+        self.assertFalse(errors,errors);self.assertFalse(thread.is_alive());self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(attempts[-1]['writer_alive'])
+        body=json.loads(result.stdout);rows=body['sessions']
+        self.assertEqual(len(rows),len(owners));self.assertEqual({row['name'] for row in rows},set(owners))
+        before={name:self.binding(name) for name in owners}
+        for row in rows:
+            for key in ['session_id','run_id','conversation_id']:self.assertEqual(row[key],before[row['name']][key])
+            self.assertNotIn('listing_details',row,'withdrawn inert representation escaped')
+        oracle=subprocess.run([str(HGS),'__state','merge'],input=json.dumps(body),env=self.env,capture_output=True,text=True,timeout=12)
+        self.assertEqual(oracle.returncode,0,oracle.stderr)
+        self.assert_rows(json.loads(oracle.stdout)['sessions'],rows)
+        self.assertEqual({name:self.binding(name) for name in owners},before,'listing changed canonical records')
+        target=owners[-1];detail=json.loads(self.hgs('inspect',target,'--skip-processes'))
+        for key in ['name','run_id','conversation_id']:self.assertEqual(detail[key],before[target][key])
+        capture=os.environ.get('ZERUS_LISTING_MIXED_CAPTURE')
+        if capture:Path(capture).write_text(result.stdout)
+
+    def test_full_mobile_snapshot_supports_live_inventory_without_whole_record_overlays(self):
+        import threading
+        count=int(os.environ.get('ZERUS_LISTING_LIVE_COUNT','20'))
+        # Recorded ordinary Claude frame, emitted by our genuine fixture process.
+        idle=os.environ.get('ZERUS_LISTING_IDLE')=='1'
+        frame=(Path(__file__).parent/'fixtures'/('claude-approval-denied.txt' if idle else 'claude-approval-running.txt')).read_text()
+        if idle:
+            # The recorded idle pane is120 columns; emit its complete rules
+            # at this private80-column terminal width, never a wrapped panel.
+            frame='\n'.join('─'*40 if line and set(line)=={'─'} else line.lstrip() if line.strip().startswith('● high') else line for line in frame.splitlines())+'\n'
+        source=self.bin/'claude';script=source.read_text()
+        self.assertIn('\nfor line in sys.stdin:',script)
+        source.write_text(script.replace('\nfor line in sys.stdin:',f'\nprint({frame!r},flush=True)\nfor line in sys.stdin:',1))
+        owners=[self.start('claude',f'full-mobile-{n}') for n in range(count)]
+        for name in owners:
+            self.send_event(name,'UserPromptSubmit',prompt='Private live working fixture')
+            self.send_event(name,'PreToolUse',tool_name='Bash',tool_use_id='private-working',tool_input={'command':'printf example'})
+            if idle:self.send_event(name,'Stop',last_assistant_message='Private idle reply')
+        state=self.root/'state'
+        for name in owners:
+            path=state/(hashlib.sha256(name.encode()).hexdigest()+'.json')
+            value=json.loads(path.read_text());value['fixture_padding']='x'*int(os.environ.get('ZERUS_LISTING_PADDING_BYTES',str(256<<10)))
+            path.write_text(json.dumps(value))
+        self.hgs('listing-index','enable','--json')
+        self.wait(lambda:json.loads(self.hgs('listing-index','status','--json'))['state']=='ready')
+        errors=[];stop=threading.Event();started=threading.Event();writes=[]
+        def writer():
+            try:
+                for n in range(4):
+                    if stop.is_set():break
+                    self.send_event(owners[0],'UserPromptSubmit',prompt=f'Private bounded writer {n}')
+                    writes.append(n);started.set()
+                    if stop.wait(1.5):break
+            except Exception as error:errors.append(repr(error));started.set()
+        thread=threading.Thread(target=writer);thread.start();self.assertTrue(started.wait(8))
+        attempts=[];result=None
+        try:
+            deadline=time.monotonic()+12
+            while time.monotonic()<deadline:
+                began=time.monotonic()
+                result,resources=self.measured_full()
+                attempts.append(dict(resources=resources,code=result.returncode,seconds=time.monotonic()-began,stdout_bytes=len(result.stdout.encode()),error=result.stderr.strip(),writer_alive=thread.is_alive()))
+                if result.returncode==0:break
+                self.assertEqual(result.stdout,'')
+                if 'overlays exceeded their' in result.stderr:break
+                time.sleep(.05)
+        finally:
+            stop.set();thread.join(10)
+        print(json.dumps(dict(control='full-mobile-live-writer',owners=count,record_bytes=sum(p.stat().st_size for p in state.glob('*.json') if len(p.stem)==64),writes=writes,attempts=attempts)),flush=True)
+        self.assertFalse(errors,errors);self.assertFalse(thread.is_alive())
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue(attempts[-1]['writer_alive'],'no supported full cut while the bounded writer was resident')
+        body=json.loads(result.stdout);rows=body['sessions']
+        self.assertEqual({row['name'] for row in rows},set(owners));self.assertEqual(len(rows),count)
+        for row in rows:
+            record=self.binding(row['name'])
+            for key in ('session_id','run_id','conversation_id'):
+                self.assertEqual(row[key],record[key],(row['name'],key))
+            self.assertTrue(row['tracked']);self.assertTrue(row['terminal_supported'])
+        before={name:self.binding(name) for name in owners}
+        oracle=subprocess.run([str(HGS),'__state','merge'],input=json.dumps(body),env=self.env,capture_output=True,text=True,timeout=12)
+        self.assertEqual(oracle.returncode,0,oracle.stderr)
+        self.assert_rows(json.loads(oracle.stdout)['sessions'],rows)
+        self.assertEqual({name:self.binding(name) for name in owners},before,'display projection rewrote canonical bindings')
+        # The encrypted native connector fixture consumes this exact CLI body.
+        capture=os.environ.get('ZERUS_LISTING_CAPTURE')
+        if capture:Path(capture).write_text(result.stdout)
 
     def test_live_terminal_id_rename_reply_and_attention_keep_all_public_fields(self):
         name=self.start('claude','listing')

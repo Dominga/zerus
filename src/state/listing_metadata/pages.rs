@@ -103,6 +103,15 @@ impl Store {
 /// recovery or canonical effect method.
 pub(super) struct Reader(Store, std::cell::Cell<usize>);
 impl Reader {
+    pub fn verify_source(&self, source: &str, stamp: &str) -> anyhow::Result<()> {
+        let key = Key(source.into());
+        key.validate()?;
+        anyhow::ensure!(
+            stamp.len() <= 1024 && self.0.source_stamp(&key)?.as_deref() == Some(stamp),
+            "Public listing source changed before publication"
+        );
+        Ok(())
+    }
     pub fn open(root: &Path) -> anyhow::Result<Self> {
         Ok(Self(Store::read(root)?, std::cell::Cell::new(BYTES)))
     }

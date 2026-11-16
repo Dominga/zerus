@@ -34,7 +34,6 @@ mod messages;
 mod history;
 mod index;
 mod teams;
-pub(crate) mod native_team;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod person;
 mod team_deliver;
@@ -47,6 +46,8 @@ pub(crate) use team_deliver::{blocked_handout, waiting_handout, Blocked, RealHan
 pub(crate) use team_deliver::FIXTURE_NATIVE_INPUT;
 #[cfg(all(test, unix))]
 pub(crate) use team_deliver::fixture_delivery;
+
+pub(crate) mod native_team;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.

@@ -53,7 +53,9 @@ pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
         return refusal(crate::desktop::teams::person_actions::required());
     }
     let caller = crate::teams::caller::caller(config);
-    let mutation = words.first().is_some_and(|word| commands::variant(word).is_some());
+    let mutation = words
+        .first()
+        .is_some_and(|word| commands::variant(word).is_some());
     if mutation && matches!(caller, actor::Caller::Person) {
         return refusal(crate::desktop::teams::person_actions::required());
     }

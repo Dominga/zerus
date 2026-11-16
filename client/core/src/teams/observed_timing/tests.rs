@@ -453,3 +453,29 @@ fn published_phase_source_reaches_actual_pane_and_batch_without_membership_backf
         );
     }
 }
+#[test]
+fn a_recovered_queue_read_cannot_resurrect_pre_failure_observation_coverage() {
+    let (mut model, now) = ready();
+    model
+        .follow_observed(TEAM, 0, Some(1), DEFAULT_WINDOW_MS, true, None, now)
+        .unwrap();
+    let observed = model.next(now).unwrap();
+    model.apply(&observed, checked(&observed, fixture()), now);
+    let queue = TeamRead::Queue {
+        team: TEAM.into(),
+        after: None,
+    };
+    // A synthetic transport error, after the product-written page reached Core.
+    model.apply(
+        &queue,
+        Err(TeamError::Failed {
+            message: "selected read failed".into(),
+        }),
+        now,
+    );
+    assert_absent(model.apply(
+        &queue,
+        checked(&queue, fixture()["context"]["queue"].clone()),
+        now,
+    ));
+}

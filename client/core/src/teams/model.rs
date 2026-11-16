@@ -757,6 +757,7 @@ impl TeamsModel {
                 }
             }
         }
+        let failed = reply.is_err();
         let update = match reply {
             Ok(_) => match self.team_view() {
                 Some(view) => TeamsUpdate::Team(Arc::new(view)),
@@ -765,12 +766,10 @@ impl TeamsModel {
             Err(error) => failure(error),
         };
         self.send(team_key("team", team), update, out);
-        if matches!(read, TeamRead::Status { .. }) {
-            if matches!(out.last(), Some((_, TeamsUpdate::Failed { .. }))) {
-                self.retire_observed_state(now);
-            } else {
-                out.extend(self.check_observed_scope(now));
-            }
+        if failed {
+            self.retire_observed_state(now);
+        } else if matches!(read, TeamRead::Status { .. }) {
+            out.extend(self.check_observed_scope(now));
         }
     }
 }

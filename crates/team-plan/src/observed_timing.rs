@@ -8,6 +8,7 @@ pub const MAX_FACTS: usize = 200;
 pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
 pub const MAX_FACT_BYTES: usize = 8192;
 pub const MAX_CURSOR_BYTES: usize = 8192;
+pub const MAX_UNIT_KEY_BYTES: usize = 2048;
 pub const DEFAULT_WINDOW_MS: u64 = 86_400_000;
 pub const MAX_WINDOW_MS: u64 = 31 * DEFAULT_WINDOW_MS;
 pub const WATERMARK_MS: i64 = 60_000;
@@ -76,7 +77,8 @@ pub struct ObservedUnitKey {
 pub struct HistoricalSnapshot {
     pub title: String,
     pub role: Option<String>,
-    /// The configured model observed at reservation, not native telemetry.
+    /// Configured metadata at a verified task-document observation, never native telemetry.
+    /// TeamJournal snapshots leave this unknown; they cannot relabel an old event.
     pub configured_model: Option<String>,
     pub native_model: Option<String>,
 }
@@ -154,6 +156,7 @@ pub struct TimingFact {
     pub schema: u32,
     /// Append-only ledger ordinal, distinct from the source event sequence.
     pub seq: u64,
+    pub unit: u64,
     pub key: ObservedUnitKey,
     pub snapshot: HistoricalSnapshot,
     pub source: SourcePosition,
@@ -207,11 +210,19 @@ impl Default for Capabilities {
     }
 }
 
+/// Stable reference to one full immutable unit key, never merely a node ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObservedUnitRef {
+    pub id: u64,
+    pub key: ObservedUnitKey,
+}
+
 /// A finite ledger cohort, not whole-phase live membership or completeness.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ObservedCohort {
-    pub nodes: Vec<u32>,
+    pub units: Vec<ObservedUnitRef>,
     pub more: bool,
 }
 

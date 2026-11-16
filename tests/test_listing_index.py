@@ -196,6 +196,37 @@ class ListingIndex(unittest.TestCase):
         self.assertFalse((self.state/'listing-metadata/index.sqlite3').exists())
         self.assertFalse(json.loads(self.call('listing-index','status','--json').stdout)['enabled'])
 
+    def test_resident_worker_keeps_large_incremental_seed_copy_bounded_and_live(self):
+        sources=[]
+        for n in range(213):
+            record,path=self.saved(n)
+            record['recovery_user_text']='r'*(8<<10)
+            path.write_text(json.dumps(record));sources.append((record,path))
+        self.ready()
+        previous=json.loads(self.call('listing-index','status','--json').stdout)['generation']
+        states=[]
+        for round in range(3):
+            record,path=sources[round*91]
+            record['last_event_at']=123+round
+            staged=path.with_suffix('.fixture-staged')
+            staged.write_text(json.dumps(record));staged.replace(path)
+            # Observe only: status cannot silently replace a worker that died
+            # while cloning an older/uninstrumented atomic writer's new object.
+            deadline=time.monotonic()+8
+            while time.monotonic()<deadline:
+                status=json.loads(self.call('listing-index','status','--json').stdout)
+                states.append({key:status.get(key) for key in ['state','generation','reason']})
+                if status.get('state')=='ready' and status.get('generation',0)>previous:break
+                time.sleep(.02)
+            else:self.fail(f'resident incremental worker failed to restore readiness: {states[-3:]}')
+            self.assertGreater(status['generation'],previous)
+            previous=status['generation']
+        expected={str(path):path.read_bytes() for _,path in sources}
+        body=self.complete()
+        self.assertEqual({row['name'] for row in body['sessions']},{record['name'] for record,_ in sources})
+        self.assertEqual({str(path):path.read_bytes() for _,path in sources},expected,'repair changed canonical bytes')
+        print(json.dumps(dict(control='resident-incremental-large-seeds',sessions=213,rounds=3,current=status['generation'],observations=len(states))),flush=True)
+
     def test_qualified_linux_ordinary_listing_bootstraps_without_a_switch(self):
         expected={self.saved(n)[0]['name'] for n in range(300)}
         body=self.complete()

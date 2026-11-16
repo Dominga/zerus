@@ -631,6 +631,13 @@ impl Background {
                                     && stamp.len() <= 1024,
                                 "Invalid display snapshot clone"
                             );
+                            // The clone may span several queries in this one
+                            // step. Exhaustion retains this exact phase/cursor;
+                            // it never means the base snapshot ended.
+                            if seed.len() > (512 << 10) - stats.seed_bytes {
+                                save(&store, &s)?;
+                                return Ok(stats);
+                            }
                             if bytes + source.len() + seed.len() + stamp.len() > 512 << 10 {
                                 break;
                             }

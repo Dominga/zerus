@@ -3574,6 +3574,7 @@
   "Target": "Назначение",
   "Targeted stop is unavailable for this recorded command. Select its running process in Live shells / processes, or a supported native job.": "Целенаправленный останов недоступен для этой записанной команды. Выберите запущенный процесс в разделе «Терминалы и процессы» или поддерживаемое собственное задание.",
   "Task": "Задача",
+  "Task #%1": "Задача №%1",
   "Task #%1 in another phase": "Задача №%1 в другой фазе",
   "Task #%1 is held": "Задача #%1 удержана",
   "Task #%1 is not available in this phase": "Задача №%1 недоступна в этой фазе",

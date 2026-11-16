@@ -1659,6 +1659,7 @@
   "Swap…": "Заменить…",
   "Synthetic data from the replay fixture; no hgs is running": "Синтетические данные из демо-записи; hgs не запущен",
   "System: Arch-based Linux": "Система: Linux на базе Arch",
+  "Task #%1": "Задача №%1",
   "Task #%1 in another phase": "Задача №%1 в другой фазе",
   "Task #%1 is held": "Задача #%1 удержана",
   "Task #%1 is not available in this phase": "Задача №%1 недоступна в этой фазе",

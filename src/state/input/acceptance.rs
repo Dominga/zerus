@@ -18,6 +18,7 @@ const ROWS: usize = 16_384;
 
 struct Source {
     rows: Vec<Value>,
+    header: Option<Value>,
     path: PathBuf,
     held: fs::File,
     stamp: (u64, u64, u64, std::time::SystemTime),
@@ -57,6 +58,7 @@ fn source(path: &Path, conversation: Option<&str>) -> Option<Source> {
     };
     let mut file = open()?;
     let before = stamp(&file)?;
+    let mut native_header = None;
     if let Some(id) = conversation {
         let mut header = Vec::new();
         (&mut file).take(HEADER).read_to_end(&mut header).ok()?;
@@ -65,6 +67,7 @@ fn source(path: &Path, conversation: Option<&str>) -> Option<Source> {
         if row["type"] != "session_meta" || row["payload"]["id"] != id {
             return None;
         }
+        native_header = Some(row);
     }
     let start = before.2.saturating_sub(BYTES);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -78,7 +81,15 @@ fn source(path: &Path, conversation: Option<&str>) -> Option<Source> {
         if start > 0 && index == 0 {
             continue;
         }
-        if !line.ends_with(b"\n") || line.len() > 1024 * 1024 || rows.len() == ROWS {
+        // Codex tool-result rows can exceed 1MiB. They still share the SAME
+        // 16MiB aggregate tail and row count; parse them rather than treating
+        // unrelated tool output as lost exact-user evidence. Kimi is unchanged.
+        let row_bytes = if conversation.is_some() {
+            BYTES as usize
+        } else {
+            1 << 20
+        };
+        if !line.ends_with(b"\n") || line.len() > row_bytes || rows.len() == ROWS {
             return None;
         }
         let row: Value = serde_json::from_slice(line).ok()?;
@@ -89,6 +100,7 @@ fn source(path: &Path, conversation: Option<&str>) -> Option<Source> {
     }
     Some(Source {
         rows,
+        header: native_header,
         path: path.into(),
         held: file,
         stamp: before,
@@ -230,7 +242,7 @@ fn consumed(
     None
 }
 
-fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
+fn stored_receipt(record: &Value) -> Option<Value> {
     let id = string(record, "input_pending_request");
     if !zerus_client_core::input_acknowledgment::canonical(id) {
         return None;
@@ -245,12 +257,6 @@ fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
     if receipt["request_id"] != id
         || receipt["name"] != record["name"]
         || receipt["run_id"] != record["run_id"]
-        || (receipt["conversation_id"] != record["conversation_id"]
-            && !(codex_tasks::recovered_pending(record)
-                && receipt["conversation_id"] == record["codex_binding_recovery"]["from"])
-            && !(bootstrap
-                && receipt["first_message"] == true
-                && receipt["conversation_id"].as_str() == Some("")))
         || receipt["submitted_at"] != record["input_pending_at"]
         || !(receipt["transport"] == "terminal"
             || (record["agent"] == "codex"
@@ -282,12 +288,31 @@ fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
     Some(receipt)
 }
 
+fn bound_receipt(record: &Value, bootstrap: bool) -> Option<Value> {
+    let receipt = stored_receipt(record)?;
+    (receipt["conversation_id"] == record["conversation_id"]
+        || (receipt["transport"] == "terminal"
+            && codex_tasks::recovered_pending(record)
+            && receipt["conversation_id"] == record["codex_binding_recovery"]["from"])
+        || (bootstrap
+            && receipt["first_message"] == true
+            && receipt["conversation_id"].as_str() == Some("")))
+    .then_some(receipt)
+}
+
 fn pending_receipt(record: &Value) -> Option<Value> {
     bound_receipt(record, false)
 }
 
 fn receipt(record: &Value) -> Option<Value> {
-    let receipt = pending_receipt(record)?;
+    // A historical Codex context is only a candidate here. It must pass the
+    // original-main/closed-child proof below, in the SAME held native source
+    // that proves its exact input. No general caller accepts this mismatch.
+    let receipt = if record["agent"] == "codex" {
+        stored_receipt(record)?
+    } else {
+        pending_receipt(record)?
+    };
     (matches!(receipt["status"].as_str(), Some("submitted" | "uncertain"))
         && receipt["attachments"].as_array().is_some_and(Vec::is_empty))
     .then_some(receipt)
@@ -306,7 +331,13 @@ pub(in crate::state) fn allows_pending(record: &Value) -> bool {
 /// A delayed old callback is not evidence for a newer pending request. Once an
 /// unknown input exists, only an unambiguous complete prompt can open its gate.
 pub(in crate::state) fn allows_hook(record: &Value, event: &Value) -> bool {
-    if codex_tasks::recovered_pending(record) && input_unconfirmed(record) {
+    if input_unconfirmed(record)
+        && (codex_tasks::recovered_pending(record)
+            || (record["agent"] == "codex"
+                && stored_receipt(record).is_some_and(|receipt| {
+                    receipt["conversation_id"] != record["conversation_id"]
+                })))
+    {
         return false;
     }
     if !matches!(
@@ -379,6 +410,13 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let Some(receipt) = receipt(record) else {
         return Ok(());
     };
+    // A terminal receipt could name the old mistaken binding while input
+    // reached the original TUI. A native queue UUID instead names its actual
+    // recipient; neither a binding repair nor parent text can rehome it.
+    if receipt["conversation_id"] != record["conversation_id"] && receipt["transport"] != "terminal"
+    {
+        return Ok(());
+    }
     if uncertainty::load(record).blocks(string(&receipt, "submitted_text")) {
         return Ok(());
     }
@@ -401,6 +439,23 @@ pub(in crate::state) fn reconcile_locked(record: &mut Value) -> Result<()> {
     let Some(source) = source else {
         return Ok(());
     };
+    if agent == "codex"
+        && receipt["conversation_id"] != record["conversation_id"]
+        && !(codex_tasks::recovered_pending(record)
+            && receipt["conversation_id"] == record["codex_binding_recovery"]["from"])
+        && !source.header.as_ref().is_some_and(|header| {
+            codex_tasks::original_main_receipt(
+                record,
+                &source.path,
+                &source.held,
+                header,
+                &source.rows,
+                string(&receipt, "conversation_id"),
+            )
+        })
+    {
+        return Ok(());
+    }
     let Some((at, native_id)) = consumed(
         &source.rows,
         agent,

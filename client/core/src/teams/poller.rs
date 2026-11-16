@@ -126,6 +126,31 @@ impl TeamsPoller {
         Some(epoch)
     }
 
+    /// Selects one lazy observation page on the existing worker.
+    pub fn observed(
+        &self,
+        team: &str,
+        phase: u32,
+        node: Option<u32>,
+        window: u64,
+        enabled: bool,
+        expected: Option<u64>,
+    ) -> Option<u64> {
+        let mut state = self.shared.lock();
+        let (epoch, updates) = state.model.follow_observed(
+            team,
+            phase,
+            node,
+            window,
+            enabled,
+            expected,
+            Instant::now(),
+        )?;
+        state.outbox.extend(updates);
+        drop(state);
+        self.shared.wake.notify_all();
+        Some(epoch)
+    }
     /// Reads every followed view again now (after an action).
     pub fn refresh(&self) {
         self.shared.lock().model.refresh(Instant::now());
@@ -142,7 +167,13 @@ impl TeamsPoller {
     /// the shown one. False when the key is not followed or the cursor is not
     /// a page token.
     pub fn page(&self, key: &str, cursor: Option<&str>) -> bool {
-        let asked = self.shared.lock().model.page(key, cursor);
+        let mut state = self.shared.lock();
+        let asked = state.model.page(key, cursor);
+        if asked && key.starts_with("observed:") {
+            let updates = state.model.observed_update();
+            state.outbox.extend(updates);
+        }
+        drop(state);
         if asked {
             self.shared.wake.notify_all();
         }
@@ -158,7 +189,11 @@ impl TeamsPoller {
     /// The Team tab was hidden (`true`) or shown again. A hidden tab reads
     /// nothing; shown again, every followed view is read at once.
     pub fn hidden(&self, hidden: bool) {
-        self.shared.lock().model.set_hidden(hidden, Instant::now());
+        let mut state = self.shared.lock();
+        state.model.set_hidden(hidden, Instant::now());
+        let updates = state.model.observed_hidden();
+        state.outbox.extend(updates);
+        drop(state);
         self.shared.wake.notify_all();
     }
 }

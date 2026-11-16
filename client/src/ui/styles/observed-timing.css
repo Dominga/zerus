@@ -1,0 +1,5 @@
+.observed-timing { display: grid; gap: 8px; margin-block: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.observed-timing > nav, .observed-timing > footer { display: flex; flex-wrap: wrap; gap: 8px; }
+.observed-timing > ol, .observed-timing > ul { display: grid; gap: 8px; margin: 0; padding-inline-start: 20px; }
+.observed-timing li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; }
+.observed-timing time { font-variant-numeric: tabular-nums; }

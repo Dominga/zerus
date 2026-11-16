@@ -118,9 +118,31 @@ impl Runtime {
                     complete = false;
                     continue;
                 }
-                match ports.observe(store, &task) {
-                    Ok(()) => self.recovered(store, team, &key, now)?,
+                let hint = self.hints.get(&team.project);
+                let generation = hint
+                    .filter(|h| !h.generation.is_empty())
+                    .map(|h| h.generation.clone());
+                let offset = generation.as_ref().and_then(|_| hint.map(|h| h.offset));
+                match ports.observe_timing(store, &task, &self.epoch, generation, offset) {
+                    Ok(read) => {
+                        if let Some(read) = read {
+                            if let Err(error) = self.timing_read(store, &read, ports.clock_ms(now))
+                            {
+                                // Optional recording has a distinct retained lane. It
+                                // cannot abort the canonical observe/delivery pass.
+                                eprintln!("Teams observed timing unavailable: {}", error.code);
+                            }
+                        }
+                        self.recovered(store, team, &key, now)?;
+                    }
                     Err(e) => {
+                        if ports.timing_supported() {
+                            if let Err(error) =
+                                self.timing_gap(store, team, n.id, &task, ports.clock_ms(now))
+                            {
+                                eprintln!("Teams observed timing unavailable: {}", error.code);
+                            }
+                        }
                         complete = false;
                         self.failure(store, team, &key, "", &e, now)?;
                     }

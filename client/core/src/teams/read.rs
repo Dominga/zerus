@@ -28,6 +28,13 @@ const MESSAGE_CHARS: usize = 2000;
 /// One read of the team store.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TeamRead {
+    Observed {
+        team: String,
+        phase: u32,
+        node: Option<u32>,
+        window_ms: u64,
+        after: Option<String>,
+    },
     Phases {
         team: String,
         after: Option<String>,
@@ -67,6 +74,7 @@ impl TeamRead {
             Self::Waiting { .. } => "waiting",
             Self::Phases { .. } => "phases",
             Self::Draft { .. } => "phase",
+            Self::Observed { .. } => "observed",
         }
     }
 
@@ -76,7 +84,8 @@ impl TeamRead {
             Self::Status { team }
             | Self::Queue { team, .. }
             | Self::Phases { team, .. }
-            | Self::Draft { team, .. } => Some(team),
+            | Self::Draft { team, .. }
+            | Self::Observed { team, .. } => Some(team),
             Self::List { .. } | Self::Waiting { .. } => None,
         }
     }
@@ -87,7 +96,8 @@ impl TeamRead {
             Self::List { after }
             | Self::Waiting { after }
             | Self::Queue { after, .. }
-            | Self::Phases { after, .. } => after.as_deref(),
+            | Self::Phases { after, .. }
+            | Self::Observed { after, .. } => after.as_deref(),
             Self::Status { .. } | Self::Draft { .. } => None,
         }
     }
@@ -97,6 +107,39 @@ impl TeamRead {
     pub fn args(&self) -> Result<Vec<String>, TeamError> {
         let mut args = vec!["team".to_owned(), self.op().to_owned()];
         match self {
+            Self::Observed {
+                team,
+                phase,
+                node,
+                window_ms,
+                after,
+            } => {
+                if !valid_team(team)
+                    || !(1..=super::observed_timing::MAX_WINDOW_MS).contains(window_ms)
+                {
+                    return Err(TeamError::Failed {
+                        message: "Not an observation scope.".into(),
+                    });
+                }
+                args.extend([
+                    "--team".into(),
+                    team.clone(),
+                    "--phase".into(),
+                    phase.to_string(),
+                    "--window-ms".into(),
+                    window_ms.to_string(),
+                    "--limit".into(),
+                    PAGE.to_string(),
+                ]);
+                if let Some(node) = node {
+                    args.extend(["--node".into(), node.to_string()]);
+                }
+                push_after_bounded(
+                    &mut args,
+                    after.as_deref(),
+                    super::observed_timing::MAX_CURSOR_BYTES,
+                )?;
+            }
             Self::List { after } => {
                 args.extend(["--limit".to_owned(), PAGE.to_string()]);
                 push_after(&mut args, after.as_deref())?;
@@ -133,11 +176,18 @@ impl TeamRead {
 }
 
 fn push_after(args: &mut Vec<String>, after: Option<&str>) -> Result<(), TeamError> {
+    push_after_bounded(args, after, CURSOR_BYTES)
+}
+fn push_after_bounded(
+    args: &mut Vec<String>,
+    after: Option<&str>,
+    bound: usize,
+) -> Result<(), TeamError> {
     let Some(after) = after else {
         return Ok(());
     };
     if after.is_empty()
-        || after.len() > CURSOR_BYTES
+        || after.len() > bound
         || after.starts_with('-')
         || after.chars().any(|c| c.is_control() || c.is_whitespace())
     {
@@ -294,6 +344,11 @@ fn rows<'a>(value: &'a Value, read: &TeamRead) -> Result<&'a [Value], TeamError>
 /// Checks a reply: its exit, then the shape the read relies on.
 pub fn decode(read: &TeamRead, exit: Exit) -> Result<Value, TeamError> {
     let stdout = output(exit)?;
+    if matches!(read, TeamRead::Observed { .. })
+        && stdout.len() > super::observed_timing::MAX_PAGE_BYTES
+    {
+        return Err(invalid("The observation reply exceeds its bound."));
+    }
     let value: Value =
         serde_json::from_slice(&stdout).map_err(|error| invalid(error.to_string()))?;
     if !value.is_object() {
@@ -317,6 +372,16 @@ pub fn decode(read: &TeamRead, exit: Exit) -> Result<Value, TeamError> {
         return Err(invalid("team reply gives no actor"));
     }
     match read {
+        TeamRead::Observed {
+            team,
+            phase,
+            node,
+            window_ms,
+            ..
+        } => {
+            super::observed_timing::decode(&value, team, *phase, *node, *window_ms)
+                .map_err(invalid)?;
+        }
         TeamRead::Phases { team, .. } => {
             if value.get("team").and_then(Value::as_str) != Some(team) {
                 return Err(invalid("phase list gives another team"));

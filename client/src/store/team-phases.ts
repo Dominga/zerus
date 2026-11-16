@@ -60,6 +60,7 @@ export function takePhaseFocus(team: string): number | null {
 }
 
 export interface PhasePane {
+  observed?: import("./observed-timing").ObservedPane | null;
   epoch: number; list: PhaseList | null; draft: PhaseDraft | null; selected: number | null;
   list_failure: { code: string; message: string } | null;
   draft_failure: { code: string; message: string } | null;

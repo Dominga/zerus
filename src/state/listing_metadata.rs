@@ -1,5 +1,5 @@
 //! Advisory card inputs, never action, process or absence authority.
-//! Explicit opt-in accelerates ordinary Linux ls; watch and authority stay canonical.
+//! An internal cache accelerates qualified Linux ls; watch and authority stay canonical.
 use super::*;
 use repositories::directory::Directory;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};

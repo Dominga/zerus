@@ -4,7 +4,7 @@ use std::path::Component;
 pub(super) const SEED_BYTES: usize = 256 << 10;
 // V1 could pair a writer's projection with a different writer's file stamp.
 // Never reuse those rows: bounded repair must observe the canonical bytes.
-const SEED_VERSION: u64 = 3;
+const SEED_VERSION: u64 = 4;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Key(pub String);
 impl Key {
@@ -116,6 +116,10 @@ impl Seed {
             "model",
             "effort",
             "last_event_at",
+            "recovery_user_at",
+            "recovery_success_at",
+            "recovery_cancel_at",
+            "keep_warm_prompt_at",
             "turn_started",
             "last_main_progress_at",
             "compaction_started",
@@ -181,6 +185,20 @@ impl Seed {
         if record["base"].is_array() {
             out.insert("base".into(), json!([]));
         }
+        // This legacy public field is complete, never clipped into a different
+        // request. Large values require the original bounded canonical overlay.
+        let recovery_needs_canonical = if let Some(value) = record.get("recovery_user_text") {
+            let fits = match value.as_str() {
+                Some(text) => text.len() <= SEED_BYTES / 2,
+                None => bounded(value).is_ok(),
+            };
+            if fits {
+                out.insert("recovery_user_text".into(), value.clone());
+            }
+            !fits
+        } else {
+            false
+        };
         let private_transition = [
             "pausing",
             "terminating",
@@ -193,7 +211,23 @@ impl Seed {
         .iter()
         .any(|key| record.get(*key).is_some());
         out.insert("_listing".into(),json!({
-            "requires_canonical":private_transition || resume_input::pending(record) || resume_input::fork_pending(record)
+            // This is a public display classification, not native/action proof.
+            // Unknown and private shapes retain the original canonical path.
+            "live_public":matches!(string(record,"agent"),"claude"|"codex")
+                && matches!(string(record,"phase"),"idle"|"working"|"tool")
+                && matches!(string(record,"activity"),"idle"|"busy")
+                && !string(record,"conversation_id").is_empty()
+                && string(record,"expected_id").is_empty()
+                && string(record,"error").is_empty()
+                && ["expected_id","error"].iter().all(|key|record[*key].is_null()||record[*key].is_string())
+                && ["paused","starting","clearing","resuming"].iter()
+                    .all(|key|record[*key].is_null() || record[*key]==false)
+                && !recovery_needs_canonical && !private_transition && !resume_input::pending(record) && !resume_input::fork_pending(record)
+                && !["pending_approval","pending_approval_at","pending_child_approvals","child_approval_overflow","exited_at","session_end","permissions_pending","startup_choice"]
+                    .iter().any(|key|record.get(*key).is_some())
+                && (record["pending_questions"].is_null() || record["pending_questions"].as_object().is_some_and(|questions|questions.is_empty()))
+                && (record["subagents"].is_null() || record["subagents"].as_object().is_some_and(|children|children.is_empty())),
+            "requires_canonical":recovery_needs_canonical || private_transition || resume_input::pending(record) || resume_input::fork_pending(record)
                 || record["agent"]=="kimi" || record["subagents"].as_object().is_some_and(|children|children.values().any(|child| ["working","finished"].contains(&string(child,"state")))),
             "system_prompt":journal::system_prompt(string(record,"prompt")).is_some(),
         }));

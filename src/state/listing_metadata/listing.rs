@@ -6,6 +6,25 @@ const COMPAT_BYTES: u64 = 16 << 20;
 const BODY_BYTES: usize = 64 << 20;
 const PAGE_BYTES: usize = 512 << 10;
 
+fn public_observation(record: &Value) -> bool {
+    if record["agent"] == "claude" {
+        return !claude_approval::listing_needs_record(record);
+    }
+    if record["agent"] != "codex" {
+        return false;
+    }
+    let Ok(screen) = kimi_tui_choice::capture(record) else {
+        return false;
+    };
+    if screen
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r'))
+    {
+        return false;
+    }
+    input::composer::codex_public_frame(record, &screen)
+}
+
 #[derive(Default)]
 pub(crate) struct Query {
     pub paged: bool,
@@ -145,8 +164,12 @@ pub(super) fn selected_record(
     until: Instant,
 ) -> anyhow::Result<Value> {
     anyhow::ensure!(
-        *files < max_files && Instant::now() < until,
-        "Selected listing overlays exceeded their bound"
+        *files < max_files,
+        "Selected listing overlays exceeded their file limit"
+    );
+    anyhow::ensure!(
+        Instant::now() < until,
+        "Selected listing overlay deadline exceeded"
     );
     let key = Key(source.into());
     key.validate()?;
@@ -283,6 +306,7 @@ pub(in crate::state) fn merge(
         let root = root();
         let until = Instant::now() + Duration::from_secs(10);
         let observation = storage::listing_scope::Scope::enter(until);
+        control::automatic(&root);
         let indexed = changes::qualified() && enabled(&root);
         anyhow::ensure!(
             indexed || !query.paged,
@@ -377,6 +401,15 @@ pub(in crate::state) fn merge(
         let mut total_bytes = 0;
         let mut canonical_bytes = 0;
         let mut canonical_files = 0;
+        // Full/mobile snapshots retain original canonical semantics for the
+        // bounded live inventory. Explicit page/deferred proof stays at 16.
+        let overlay_files = if query.paged {
+            16
+        } else {
+            storage::listing_scope::ENTRY_LIMIT
+        };
+        let mut public_witnesses = Vec::new();
+        let mut witness_bytes = 0usize;
         let native_until = until.min(Instant::now() + Duration::from_secs(1));
         loop {
             anyhow::ensure!(
@@ -417,30 +450,60 @@ pub(in crate::state) fn merge(
                     .position(|row| string(row, "name") == terminal_name(&record))
                 {
                     if matches(&record, panes_of(&snapshot, &record)) {
-                        if indexed {
-                            record = selected_record(
-                                &root,
-                                &source,
-                                &seed,
-                                &mut canonical_bytes,
-                                &mut canonical_files,
-                                16,
-                                until,
-                            )?;
-                        }
-                        let _route = storage::listing_scope::Route::verified(
-                            root.join(&source),
-                            string(&record, "name"),
-                        );
-                        let mut row = live.remove(index);
-                        label_row(&mut row, &record);
-                        workspace::relabel(
-                            &mut names,
-                            terminal_name(&record),
-                            string(&record, "name"),
-                        );
-                        checked(live_row(&mut row, record, &shared, &mut process_work))?;
-                        rows.push(row);
+                        // One bounded screen observation covers the negative
+                        // display precheck and the public row. A positive panel
+                        // still takes the original full canonical/identity path.
+                        kimi_tui_choice::observing(|| -> anyhow::Result<()> {
+                            let public = indexed
+                                && record["_listing"]["live_public"] == true
+                                && public_observation(&record);
+                            if indexed && !public {
+                                record = selected_record(
+                                    &root,
+                                    &source,
+                                    &seed,
+                                    &mut canonical_bytes,
+                                    &mut canonical_files,
+                                    overlay_files,
+                                    until,
+                                )?;
+                            }
+                            let _route = storage::listing_scope::Route::verified(
+                                root.join(&source),
+                                string(&record, "name"),
+                            );
+                            let mut row = live.remove(index);
+                            label_row(&mut row, &record);
+                            workspace::relabel(
+                                &mut names,
+                                terminal_name(&record),
+                                string(&record, "name"),
+                            );
+                            if public {
+                                let stamp = seed["native_stamp"].as_str().ok_or_else(|| {
+                                    anyhow::anyhow!("Missing public native version")
+                                })?;
+                                reader.as_ref().unwrap().verify_source(&source, stamp)?;
+                                witness_bytes += source.len() + stamp.len();
+                                anyhow::ensure!(
+                                    witness_bytes
+                                        <= if query.paged { PAGE_BYTES } else { BODY_BYTES },
+                                    "Public listing witnesses exceeded their bound"
+                                );
+                                public_witnesses.push((source.clone(), stamp.to_owned()));
+                                let _public = storage::listing_scope::Public::enter(&record);
+                                checked(live_display_row(
+                                    &mut row,
+                                    record,
+                                    &shared,
+                                    &mut process_work,
+                                ))?;
+                            } else {
+                                checked(live_row(&mut row, record, &shared, &mut process_work))?;
+                            }
+                            rows.push(row);
+                            Ok(())
+                        })?;
                         continue;
                     }
                 }
@@ -456,7 +519,7 @@ pub(in crate::state) fn merge(
                         &seed,
                         &mut canonical_bytes,
                         &mut canonical_files,
-                        16,
+                        overlay_files,
                         until,
                     )?;
                 }
@@ -648,6 +711,13 @@ pub(in crate::state) fn merge(
         );
         observation.verify().map_err(anyhow::Error::msg)?;
         if let Some(reader) = &reader {
+            for (source, stamp) in public_witnesses {
+                anyhow::ensure!(
+                    Instant::now() < until,
+                    "Public listing verification deadline exceeded"
+                );
+                reader.verify_source(&source, &stamp)?;
+            }
             anyhow::ensure!(
                 reader.page_limit(cursor.as_ref(), 1)?.fresh,
                 "Session listing changed before publication; no complete body returned"

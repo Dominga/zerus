@@ -4,6 +4,32 @@ use std::io::Read;
 
 pub(crate) const MARKER: &str = "session-listing-metadata-v1";
 
+/// Ordinary supported Linux use initializes its internal cache. Existing
+/// policy, including malformed or unreadable policy, is never overwritten.
+pub(super) fn automatic(root: &Path) {
+    if !changes::qualified() || enabled(root) {
+        return;
+    }
+    let initialize = || -> anyhow::Result<()> {
+        let parent = checked(Directory::open(&crate::platform::canonical(root)?))?;
+        let path = parent.path.join("listing-metadata");
+        for marker in ["enabled", "disabled"] {
+            match std::fs::symlink_metadata(path.join(marker)) {
+                Ok(_) => return Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let dir = checked(parent.ensure_child("listing-metadata"))?;
+        // Atomic no-replace publication through the pinned private directory.
+        // A concurrent disable still wins in enabled(), including malformed ones.
+        checked(dir.write_new("enabled", b"1\n"))?;
+        checked(dir.verify())?;
+        checked(parent.verify())
+    };
+    let _ = initialize(); // Advisory failure never changes canonical state.
+}
+
 fn directory(root: &Path) -> anyhow::Result<Directory> {
     let root = checked(Directory::open(&crate::platform::canonical(root)?))?;
     let dir = checked(root.child("listing-metadata"))?;
@@ -112,7 +138,9 @@ pub(in crate::state) fn dispatch(args: &[String]) -> Result<Value> {
         );
     }
     let run = || -> anyhow::Result<()> {
-        if action == "enable" {
+        // Qualified Linux initializes lazily: an explicit early disable must
+        // remain durable even before the first cache exists.
+        if action == "enable" || changes::qualified() {
             checked(private_dir(&root))?;
             let root = checked(Directory::open(&crate::platform::canonical(&root)?))?;
             checked(root.ensure_child("listing-metadata"))?;

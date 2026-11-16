@@ -360,34 +360,58 @@ fn collect(
             None => return Ok(None),
         },
     }
-    // Only a listing may fit a clipped approval into its unviewed pane.
-    let approval=if listing {claude_approval::listed(record)} else {claude_approval::current(record)};
-    if let Some(approval)=approval{cards.push(approval);}
-    if let Some(mode) = claude_permission::current(record) {
-        cards.push(mode);
-    }
-    if let Some(resume) = claude_resume::current(record) { cards.push(resume); }
-    if let Some(limit) = claude_usage_limit::current(record) { cards.push(limit); }
-    if let Some(trust) = claude_trust::current(record) {
-        cards.push(trust);
-    }
-    if let Some(trust) = codex_trust::current(record) {cards.push(trust);}
-    if let Some(setup) = codex_sandbox::current(record) {cards.push(setup);}
-    if let Some(trust) = codex_hooks_trust::current(record) {cards.push(trust);}
-    if let Some(update) = codex_update::current(record) {cards.push(update);}
-    if let Some(goal) = codex_goal_resume::current(record) {cards.push(goal);}
-    if let Some(limit) = codex_rate_limit::current(record) {cards.push(limit);}
-    if let Some(trust) = kimi_trust::current(record) {
-        cards.push(trust);
-    }
-    if let Some(hint) = kimi_cache_hint::current(record) {
-        cards.push(hint);
-    }
-    if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
-        cards.push(terminal);
-    }
-    if cards.is_empty() && complete {
-        cards.extend(startup_choice::current(record));
+    if !storage::listing_scope::public(record) {
+        // Only a listing may fit a clipped approval into its unviewed pane.
+        let approval = if listing {
+            claude_approval::listed(record)
+        } else {
+            claude_approval::current(record)
+        };
+        if let Some(approval) = approval {
+            cards.push(approval);
+        }
+        if let Some(mode) = claude_permission::current(record) {
+            cards.push(mode);
+        }
+        if let Some(resume) = claude_resume::current(record) {
+            cards.push(resume);
+        }
+        if let Some(limit) = claude_usage_limit::current(record) {
+            cards.push(limit);
+        }
+        if let Some(trust) = claude_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(trust) = codex_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(setup) = codex_sandbox::current(record) {
+            cards.push(setup);
+        }
+        if let Some(trust) = codex_hooks_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(update) = codex_update::current(record) {
+            cards.push(update);
+        }
+        if let Some(goal) = codex_goal_resume::current(record) {
+            cards.push(goal);
+        }
+        if let Some(limit) = codex_rate_limit::current(record) {
+            cards.push(limit);
+        }
+        if let Some(trust) = kimi_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(hint) = kimi_cache_hint::current(record) {
+            cards.push(hint);
+        }
+        if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
+            cards.push(terminal);
+        }
+        if cards.is_empty() && complete {
+            cards.extend(startup_choice::current(record));
+        }
     }
     cards.sort_by(|a, b| {
         a["created_at"]

@@ -144,8 +144,9 @@ exactly what the dialog showed you:
   **Check** asks again with the same request, so it can never create a second
   team.
 
-`hgs team create` at a terminal may leave out the digest and the permissions;
-the team then takes the template as the catalog holds it at that moment.
+Create team requires native confirmation in the Zerus window. A Person call
+to `hgs team create`, including through `@host`, returns
+`person_gesture_required` before creating anything.
 
 Team and template names may use ordinary Unicode letters. Creating a team,
 saving a catalog or importing a template refuses control characters, line
@@ -309,8 +310,8 @@ invented outcome.
 In **New team**, choose **Plan a goal first**, enter a goal and review the
 template and permissions. **Start planning** starts only the lead, in its own
 worktree. Other members and the integration branch wait for your approval of
-the initial plan. The CLI equivalent is `hgs team start-planning --template ID`
-with the usual creation request on stdin and a nonblank goal.
+the initial plan. A Person call to `hgs team start-planning` is refused with
+`person_gesture_required`; start planning in the window.
 
 The lead receives a durable inbox notice and can read the original goal with
 `hgs team current`. It submits drafts that you can inspect in **Layers**.
@@ -382,9 +383,12 @@ later slices.
   queue"), with the same running/paused choices. Stopped, archived, finished
   and not-yet-running teams are not offered. Identically named live teams
   include an identifying suffix in both menus.
-- From a terminal: `hgs task add --project PROJECT --team TEAM < prompt.txt`
-  for a new task, `hgs task target REF team TEAM` for an existing one.
-  `--role` and `--pipeline` route the task as you send it.
+- An independently proved agent may use
+  `hgs task add --project PROJECT --team TEAM < prompt.txt`.
+  `--role` and `--pipeline` retain their existing routing checks. A Person
+  creates or sends a task through the window; Person intake from the CLI
+  requires a native gesture. Ordinary commands on an existing team-owned
+  task remain an interim path for S2b, as listed below.
 
 The task stays an ordinary task with a `team` key that names its team and
 home computer. A task you send, or the lead sends, is admitted at once. A task

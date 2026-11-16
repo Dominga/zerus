@@ -1,5 +1,5 @@
-//! Rework keeps every publication and original task request. Only SendBack
-//! activates this layout, atomically with its first held acceptance episode.
+//! Rework keeps every publication and original task request. SendBack raises
+//! floor six with its fact; cumulative seven installs the same prerequisites.
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +50,16 @@ pub(super) fn validate(db: &Connection) -> Result<()> {
 }
 
 pub(crate) fn activate(db: &Connection) -> Result<()> {
+    install(db, versions::CORE_REWORK)
+}
+
+/// Cumulative native migration installs the same prerequisite without an
+/// invented SendBack episode or an intermediate committed floor six.
+pub(super) fn native_floor(db: &Connection) -> Result<()> {
+    install(db, versions::CORE_NATIVE_FLOOR)
+}
+
+fn install(db: &Connection, floor: u32) -> Result<()> {
     if db.is_autocommit() {
         return Err(storage(
             "Rework activation requires the operation's writer transaction.",
@@ -57,7 +67,8 @@ pub(crate) fn activate(db: &Connection) -> Result<()> {
     }
     execution_fence(db)?;
     if installed(db)? {
-        return validate(db);
+        validate(db)?;
+        return raise_execution_floor(db, floor);
     }
     // Bound this one-time native table rewrite before changing the floor.
     // The SQL reads only blob lengths, never all publication bodies in RAM.
@@ -74,7 +85,7 @@ pub(crate) fn activate(db: &Connection) -> Result<()> {
         }
     }
     drop(query);
-    raise_execution_floor(db, versions::CORE_REWORK)?;
+    raise_execution_floor(db, floor)?;
     // Rebuild only this bounded publication parent. Deferred FK checks retain
     // the original child rows while the same IDs are inserted into its new
     // shape; no request JSON is decoded/re-encoded and no child is deleted.

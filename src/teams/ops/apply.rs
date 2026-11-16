@@ -462,6 +462,7 @@ pub(crate) fn observe_native_intake(
         actor: &actor,
         team: &team,
         op: &request.operation,
+        request_id: &request.request_id,
         now,
         reply: Reply {
             ok: true,

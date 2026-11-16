@@ -52,8 +52,7 @@ fn header(h: &Harness) -> Header {
 }
 fn migrate_fixture(h: &Harness) {
     let db = h.store.db.as_ref().unwrap();
-    // This leaf is not activated by the current core-4 opener. Final schema
-    // integration follows publication/rework and the reserved core-7 floor.
+    // Explicitly exercise the migration's idempotence on current storage.
     let tx = db.unchecked_transaction().unwrap();
     migrate(&tx).unwrap();
     tx.commit().unwrap();
@@ -198,10 +197,16 @@ fn native_intake_foreign_evidence_and_partial_schema_are_never_repaired() {
         )
         .unwrap();
     assert_eq!(count, 0);
-    assert_eq!(
-        h.store.team(TEAM).unwrap().unwrap().revision,
-        header.request.expected_revision
+    assert!(
+        h.store.team(TEAM).is_err(),
+        "damaged current evidence is unavailable"
     );
+    let revision: u64 = db
+        .query_row("SELECT revision FROM teams WHERE id=?1", [TEAM], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(revision, header.request.expected_revision);
 }
 
 #[test]

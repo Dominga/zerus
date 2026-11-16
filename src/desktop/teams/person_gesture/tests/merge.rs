@@ -3,6 +3,7 @@
 use super::*;
 
 fn rewind_without_native_leaf(h: &Harness, version: u32) {
+    crate::teams::store::person_actions::migration_tests::native_four(h);
     let db = h.store.db.as_ref().unwrap();
     let count: u32 = db
         .query_row("SELECT count(*) FROM person_gestures", [], |r| r.get(0))
@@ -51,6 +52,8 @@ fn native_layout_three_keeps_its_nonce_and_original_receipt() {
     let result = apply(&mut h, &request, admission).unwrap();
     let before = identity(h.store.db.as_ref().unwrap(), h.store.state()).unwrap();
     // The original S1 candidate's exact format: complete native proof at 3.
+    // Reduce only empty post-S1 metadata; keep the real original receipt.
+    crate::teams::store::person_actions::migration_tests::native_four(&h);
     h.store
         .db
         .as_ref()

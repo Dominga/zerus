@@ -64,7 +64,7 @@ pub(crate) fn reserved(db: &Connection, id: &str) -> Result<bool> {
         let version: u32 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(storage)?;
-        return if version < 7 {
+        return if version < versions::CORE_NATIVE_FLOOR {
             Ok(false)
         } else {
             Err(unavailable())
@@ -221,5 +221,7 @@ pub(crate) fn settle(
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) mod migration_tests;
 #[cfg(all(test, unix))]
 mod tests;

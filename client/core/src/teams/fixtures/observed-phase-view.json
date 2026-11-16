@@ -273,6 +273,7 @@
       },
       "rejection": null,
       "revision": 12,
+      "rework_available": true,
       "unknown_fields": false
     },
     "draft_failure": null,

@@ -479,3 +479,93 @@ fn a_recovered_queue_read_cannot_resurrect_pre_failure_observation_coverage() {
         now,
     ));
 }
+
+#[test]
+fn admitted_rework_pages_use_the_same_base_and_switch_scope_without_relabelling_facts() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../crates/team-plan/fixtures/cli-observed-rework.json");
+    let sources: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let now = Instant::now();
+    let mut model = TeamsModel::default();
+    model.follow(
+        TeamsFollow {
+            team: Some(TEAM.into()),
+            ..Default::default()
+        },
+        now,
+    );
+    for key in ["status", "queue"] {
+        let read = model.next(now).unwrap();
+        model.apply(
+            &read,
+            checked(&read, sources["reserved"]["context"][key].clone()),
+            now,
+        );
+    }
+    let mut views = serde_json::Map::new();
+    let mut retired = None;
+    for name in ["reserved", "published"] {
+        let source = &sources[name];
+        let (_, closed) = model.follow_phases(TEAM, Some(1), true, now).unwrap();
+        if name == "published" {
+            assert_absent(closed);
+            let read = retired.take().unwrap();
+            assert!(
+                model
+                    .apply(&read, checked(&read, sources["reserved"].clone()), now)
+                    .is_empty(),
+                "a pre-switch observed response cannot revive the retained BASE"
+            );
+        }
+        for key in ["phases", "draft"] {
+            let read = model.next(now).unwrap();
+            model.apply(&read, checked(&read, source["context"][key].clone()), now);
+        }
+        model
+            .follow_observed(TEAM, 1, None, DEFAULT_WINDOW_MS, true, None, now)
+            .unwrap();
+        let read = model.next(now).unwrap();
+        let updates = model.apply(&read, checked(&read, source.clone()), now);
+        let mut coalescer = Coalescer::new();
+        for (key, update) in updates {
+            coalescer.push(Change::teams(ComputerId::local(), key, update));
+        }
+        let frame = serde_json::to_value(coalescer.take()).unwrap();
+        let view = &frame["teams"][0]["payload"];
+        let pane = &view["plan"]["observed"];
+        assert_eq!(
+            pane["page"]["scope"]["publication"]["id"],
+            source["context"]["draft"]["draft"]["publication"]["id"]
+        );
+        assert!(pane["page"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(
+                |f| f["key"]["publication"].is_null() && f["implementation_observed_ms"].is_null()
+            ));
+        views.insert(name.into(), view.clone());
+        if name == "reserved" {
+            assert!(model.page(&format!("observed:{TEAM}"), None));
+            retired = model.next(now);
+        }
+    }
+    let output = Value::Object(views);
+    assert_ne!(
+        output["reserved"]["plan"]["observed"]["page"]["scope"]["publication"],
+        output["published"]["plan"]["observed"]["page"]["scope"]["publication"]
+    );
+    assert!(model.page(&format!("observed:{TEAM}"), None));
+    let fresh = model.next(now).unwrap();
+    assert_absent(model.apply(&fresh, checked(&fresh, sources["reserved"].clone()), now));
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/teams/fixtures/observed-rework-views.json");
+    if std::env::var_os("ZERUS_UPDATE_OBSERVED_REWORK_CORE_FIXTURE").is_some() {
+        std::fs::write(path, serde_json::to_string_pretty(&output).unwrap() + "\n").unwrap();
+    } else {
+        assert_eq!(
+            output,
+            serde_json::from_str::<Value>(&std::fs::read_to_string(path).unwrap()).unwrap()
+        );
+    }
+}

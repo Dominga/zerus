@@ -613,3 +613,6 @@ fn current_writer_reopens_after_older_canonical_write_without_changing_companion
 
 #[cfg(unix)]
 mod published;
+
+#[cfg(unix)]
+mod rework;

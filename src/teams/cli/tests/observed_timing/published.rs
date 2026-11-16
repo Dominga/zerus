@@ -3,7 +3,7 @@ use super::*;
 use crate::teams::ops::Operation;
 use serde_json::{json, Value};
 
-fn produced() -> Value {
+fn recorded() -> Harness {
     let _stream = crate::teams::store::observed_timing::fixture_stream();
     let h = Harness::new();
     crate::swarm::fixture_project(&h.config, MACHINE, "example-project");
@@ -91,6 +91,16 @@ fn produced() -> Value {
     for _ in 0..2 {
         h.apply(&service(), timing(&h, 1));
     }
+    h
+}
+pub(super) fn context(h: &Harness) -> Value {
+    let publication = h
+        .store()
+        .phase_draft(TEAM, 1)
+        .unwrap()
+        .publication
+        .unwrap()
+        .id;
     let (mut page, exit) = h.cli(
         &Caller::Person,
         &format!("observed --team {TEAM} --phase 1"),
@@ -120,8 +130,14 @@ fn produced() -> Value {
         .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(core, 5);
+    assert!(matches!(core, 5 | 6));
     page
+}
+pub(super) fn fixture_source() -> Harness {
+    recorded()
+}
+fn produced() -> Value {
+    context(&recorded())
 }
 #[test]
 fn published_phase_observations_are_product_written_and_never_backfill_original_membership() {

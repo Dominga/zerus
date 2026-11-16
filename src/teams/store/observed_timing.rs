@@ -416,11 +416,11 @@ impl Store {
                     }
                 }
             }
-            let publication =
-                super::publication::publication(db, team, phase)?.map(|p| PublicationKey {
-                    id: p.id,
-                    draft_generation: p.generation,
-                });
+            let selected = super::phase_read::source(db, team, phase)?;
+            let publication = selected.publication.map(|p| PublicationKey {
+                id: p.id,
+                draft_generation: p.generation,
+            });
             let mut reasons = vec![Reason::NativeUnsupported];
             if ceiling == 0 {
                 reasons.push(Reason::NoObservations)

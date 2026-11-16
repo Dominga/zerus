@@ -4,7 +4,7 @@ use std::path::Component;
 pub(super) const SEED_BYTES: usize = 256 << 10;
 // V1 could pair a writer's projection with a different writer's file stamp.
 // Never reuse those rows: bounded repair must observe the canonical bytes.
-const SEED_VERSION: u64 = 2;
+const SEED_VERSION: u64 = 3;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Key(pub String);
 impl Key {
@@ -44,7 +44,27 @@ impl Key {
     pub fn matches(&self, record: &Value) -> bool {
         let path = Path::new(&self.0);
         let id = path.file_stem().and_then(|v| v.to_str()).unwrap_or("");
-        record["version"] == 1
+        let native = if self.0.starts_with("dsh/") {
+            Some("dsh")
+        } else if self.0.starts_with("opencode/") {
+            Some("opencode")
+        } else {
+            None
+        };
+        let schema = match native {
+            Some(agent) => {
+                record["backend"] == agent
+                    && string(record, "name").starts_with(&format!("{agent}/"))
+                    && if agent == "dsh" {
+                        string(record, "conversation_id").starts_with("session-")
+                            && string(record, "conversation_id").len() <= 2048
+                    } else {
+                        opencode::native_id(string(record, "conversation_id"), "ses_")
+                    }
+            }
+            None => record["version"] == 1 && AGENTS.contains(&string(record, "agent")),
+        };
+        schema
             && !string(record, "name").is_empty()
             && if self.0.contains("sessions/") {
                 storage::is_id_layout_record(record, id)
@@ -78,6 +98,7 @@ impl Seed {
             "launch_id",
             "launch_label",
             "terminal_name",
+            "pane",
             "agent",
             "backend",
             "activity",
@@ -125,10 +146,66 @@ impl Seed {
             "account_id",
             "agent_home",
             "supervisor",
+            "hgs",
+            "expected_id",
+            "requested_id",
+            "run_identity_version",
+            "error",
+            "error_kind",
+            "provider_error",
+            "transcript",
+            "model_source_path",
+            "model_source_offset",
+            "effort_source_path",
+            "effort_source_offset",
+            "fork_parent_id",
+            "fork_source_name",
+            "completion_source",
+            "completion_reason",
+            "exit_code",
+            "termination_signal",
+            "resume_pending",
+            "cleared_conversations",
+            "service",
+            "instance_id",
+            "permissions_pending",
+            "permission_mode",
         ] {
             if let Some(value) = record.get(key) {
                 bounded(value)?;
                 out.insert(key.into(), value.clone());
+            }
+        }
+        // Public availability depends on the presence of launch arguments,
+        // never on a cached recipe granting authority. Do not retain argv.
+        if record["base"].is_array() {
+            out.insert("base".into(), json!([]));
+        }
+        let private_transition = [
+            "pausing",
+            "terminating",
+            "original_owner",
+            "clear_context_request",
+            "restore_archive_cleanup",
+            "restore_archive_clear_source",
+            "restore_archive_id",
+        ]
+        .iter()
+        .any(|key| record.get(*key).is_some());
+        out.insert("_listing".into(),json!({
+            "requires_canonical":private_transition || resume_input::pending(record) || resume_input::fork_pending(record)
+                || record["agent"]=="kimi" || record["subagents"].as_object().is_some_and(|children|children.values().any(|child| ["working","finished"].contains(&string(child,"state")))),
+            "system_prompt":journal::system_prompt(string(record,"prompt")).is_some(),
+        }));
+        for (key, fields) in [
+            ("pending_settings", &["request_id", "model", "effort"][..]),
+            (
+                "session_end",
+                &["at", "run_id", "conversation_id", "reason"][..],
+            ),
+        ] {
+            if record.get(key).is_some() {
+                out.insert(key.into(), selected(&record[key], fields)?);
             }
         }
         for key in ["prompt", "last_message"] {
@@ -177,6 +254,7 @@ impl Seed {
                     "display_state",
                     "provider",
                     "external",
+                    "announced",
                     "model",
                     "reply_id",
                     "native_roster",
@@ -225,9 +303,16 @@ impl Seed {
                 out.insert(key.into(), Value::Object(result));
             }
         }
-        let digest = storage::label_key(&serde_json::to_string(&out)?);
-        let encoded =
-            serde_json::to_string(&json!({"version":SEED_VERSION,"record":out,"digest":digest}))?;
+        let mut public = Value::Object(out);
+        // These two legacy repairs are pure and bounded by the compact roster.
+        // Native child/process reconciliation requires the selected canonical
+        // overlay; it is never performed by a publisher or from cached pins.
+        journal::repair_kimi_main(&mut public);
+        journal::repair_claude_internal(&mut public);
+        let digest = storage::label_key(&serde_json::to_string(&public)?);
+        let encoded = serde_json::to_string(
+            &json!({"version":SEED_VERSION,"record":public,"digest":digest}),
+        )?;
         anyhow::ensure!(
             encoded.len() <= SEED_BYTES,
             "Display seed exceeds its bound"

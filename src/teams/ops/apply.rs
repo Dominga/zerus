@@ -185,6 +185,7 @@ fn apply_inputs(
         },
         event: None,
         superseded: None,
+        timing: None,
     };
     // Only a sealed live intake can have applied its continuing cancellation
     // observation. Advance by that exact own write, never by the live team's
@@ -303,6 +304,15 @@ fn run(
     } else {
         dispatch(ctx, config)?;
     }
+    // Only an admitted internal Service timing operation can prove this
+    // no-op. Every ordinary operation keeps its canonical revision/journal.
+    if matches!(ctx.op, Operation::RecordTimingFact { .. })
+        && matches!(ctx.actor, Actor::Service { .. })
+        && matches!(ctx.timing, Some(observed_timing::Decision::Unchanged))
+    {
+        ctx.reply.revision = ctx.team.revision;
+        return Ok(ctx.reply.clone());
+    }
     ctx.reply.revision = ctx
         .team
         .revision
@@ -315,7 +325,10 @@ fn run(
             params![ctx.team.id, ctx.reply.revision],
         )
         .map_err(storage)?;
-    journal::append(ctx, request)?;
+    let source_seq = journal::append(ctx, request)?;
+    if let Some(observed_timing::Decision::Append(fact)) = ctx.timing.take() {
+        observed_timing::persist(ctx, source_seq, *fact)?;
+    }
     rows::archive_decided(ctx.db, &ctx.team.id, &encode(ctx.actor)?)?;
     Ok(ctx.reply.clone())
 }
@@ -390,6 +403,7 @@ fn dispatch(ctx: &mut Context<'_>, config: Option<&crate::config::Config>) -> Re
         Operation::Hold { .. } => queue::hold(ctx),
         Operation::Release { .. } => queue::release(ctx),
         Operation::ObserveTask { .. } => queue::observe(ctx),
+        Operation::RecordTimingFact { .. } => observed_timing::prepare(ctx),
         Operation::HandoutIntent { .. } => handout::intent(ctx),
         Operation::HandoutOutcome { .. } => handout::outcome(ctx),
         Operation::ReopenIntent { .. } => handout::reopen_intent(ctx),
@@ -473,6 +487,7 @@ pub(crate) fn observe_native_intake(
         },
         event: None,
         superseded: None,
+        timing: None,
     };
     let result = run(&mut ctx, &request, true, None, &|_| {
         Err(invalid("No repository read in task observation."))

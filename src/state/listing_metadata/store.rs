@@ -1,15 +1,35 @@
 use super::*;
 use fs2::FileExt;
+const WAL_LIMIT: u64 = 64 << 20;
+const WAL_QUOTA: &str = "Display WAL quota reached; background checkpoint required";
+fn wal_budget(dir: &Directory) -> anyhow::Result<()> {
+    if let Some(file) = checked(dir.read_private_optional("index.sqlite3-wal"))? {
+        anyhow::ensure!(file.metadata()?.len() <= WAL_LIMIT, WAL_QUOTA);
+    }
+    Ok(())
+}
 pub(super) struct Store {
     pub db: Connection,
     pub root: Directory,
     selected: PathBuf,
     dir: Directory,
     file: File,
-    _gate: File,
+    _gate: Option<File>,
 }
+/// Only this exact failure precedes every native-feed read in a repair step.
+#[derive(Debug)]
+pub(super) struct PublisherBusy;
+impl std::fmt::Display for PublisherBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Display publisher is busy; retain the background census")
+    }
+}
+impl std::error::Error for PublisherBusy {}
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_for(path, false)
+    }
+    fn open_for(path: &Path, checkpoint: bool) -> anyhow::Result<Self> {
         let root = checked(Directory::open(&crate::platform::canonical(path)?))?;
         let dir = checked(root.ensure_child("listing-metadata"))?;
         anyhow::ensure!(
@@ -17,7 +37,16 @@ impl Store {
             "Display index is disabled"
         );
         let gate = checked(dir.open_private_lock("writer.lock"))?;
-        gate.try_lock_exclusive()?;
+        match gate.try_lock_exclusive() {
+            Ok(()) => (),
+            Err(error) if crate::platform::lock_contended(&error) => {
+                return Err(PublisherBusy.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if !checkpoint {
+            wal_budget(&dir)?;
+        }
         let (file, new) = match checked(dir.read_private_optional("index.sqlite3"))? {
             Some(f) => (f, false),
             None => {
@@ -38,18 +67,21 @@ impl Store {
         db.busy_timeout(Duration::ZERO)?;
         if new {
             db.execute_batch("PRAGMA synchronous=FULL; PRAGMA max_page_count=131072;")?;
-            db.execute_batch("PRAGMA user_version=1; PRAGMA journal_mode=WAL;
+            db.execute_batch("PRAGMA user_version=3; PRAGMA journal_mode=WAL;
               CREATE TABLE meta(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL,root TEXT NOT NULL,epoch TEXT NOT NULL,writes INTEGER NOT NULL DEFAULT 0,revision INTEGER NOT NULL DEFAULT 0,generation INTEGER NOT NULL DEFAULT 0,serial INTEGER NOT NULL DEFAULT 0,ready INTEGER NOT NULL DEFAULT 0);
               CREATE TABLE sources(source TEXT PRIMARY KEY,seed TEXT,stamp TEXT,revision INTEGER NOT NULL,tombstone INTEGER NOT NULL CHECK(tombstone IN(0,1)),issue TEXT);
               CREATE TABLE intents(id TEXT PRIMARY KEY,source TEXT NOT NULL,seed TEXT,created REAL NOT NULL);
               CREATE INDEX intents_source ON intents(source);
               CREATE INDEX sources_tombstone ON sources(tombstone,source);
               CREATE INDEX sources_name ON sources(json_extract(seed,'$.record.name')) WHERE tombstone=0;
-              CREATE TABLE scan(id INTEGER PRIMARY KEY CHECK(id=1),generation INTEGER NOT NULL,phase INTEGER NOT NULL,folder INTEGER NOT NULL,after_key TEXT NOT NULL,dirs TEXT NOT NULL,writes INTEGER NOT NULL,gap TEXT NOT NULL,problems INTEGER NOT NULL);
+              CREATE TABLE scan(id INTEGER PRIMARY KEY CHECK(id=1),generation INTEGER NOT NULL,phase INTEGER NOT NULL,folder INTEGER NOT NULL,after_key TEXT NOT NULL,dirs TEXT NOT NULL,writes INTEGER NOT NULL,gap TEXT NOT NULL,problems INTEGER NOT NULL,base INTEGER NOT NULL DEFAULT 0);
               CREATE TABLE queue(generation INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(generation,source));
-              CREATE TABLE snapshots(generation INTEGER NOT NULL,source TEXT NOT NULL,seed TEXT NOT NULL,PRIMARY KEY(generation,source));
+              CREATE TABLE dirty(generation INTEGER NOT NULL,source TEXT NOT NULL,PRIMARY KEY(generation,source));
+              CREATE TABLE snapshots(generation INTEGER NOT NULL,source TEXT NOT NULL,seed TEXT NOT NULL,stamp TEXT,PRIMARY KEY(generation,source));
+              CREATE INDEX snapshots_session ON snapshots(generation,json_extract(seed,'$.record.session_id'));
+              CREATE INDEX snapshots_conversation ON snapshots(generation,json_extract(seed,'$.record.conversation_id'));
               CREATE INDEX snapshots_journal ON snapshots(generation,coalesce(json_extract(seed,'$.record.journal_name'),json_extract(seed,'$.record.name')));
-              CREATE TABLE generations(generation INTEGER PRIMARY KEY,complete INTEGER NOT NULL,dirs TEXT NOT NULL,gap TEXT NOT NULL);
+              CREATE TABLE generations(generation INTEGER PRIMARY KEY,complete INTEGER NOT NULL,dirs TEXT NOT NULL,gap TEXT NOT NULL,high_water INTEGER NOT NULL DEFAULT 0);
               CREATE INDEX generations_complete ON generations(complete,generation);")?;
             db.execute(
                 "INSERT INTO meta(id,version,root,epoch) VALUES(1,1,?1,?2)",
@@ -59,6 +91,13 @@ impl Store {
                 ],
             )?;
         }
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        anyhow::ensure!(version != 0, "Incomplete display cache schema");
+        anyhow::ensure!(
+            !matches!(version, 1 | 2),
+            "Display reader schema requires background rebuild"
+        );
+        anyhow::ensure!(version == 3, "Unknown display cache version");
         let identity: String =
             db.query_row("SELECT root FROM meta WHERE id=1 AND version=1", [], |r| {
                 r.get(0)
@@ -67,8 +106,6 @@ impl Store {
             identity == serde_json::to_string(&checked(root.object())?)?,
             "Display root/store identity changed"
         );
-        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        anyhow::ensure!(version == 1, "Unknown display cache version");
         if !new {
             db.execute_batch("PRAGMA synchronous=FULL; PRAGMA max_page_count=131072;")?;
         }
@@ -78,7 +115,45 @@ impl Store {
             selected: path.to_path_buf(),
             dir,
             file,
-            _gate: gate,
+            _gate: Some(gate),
+        };
+        store.verify()?;
+        Ok(store)
+    }
+
+    /// A pinned reader never takes the advisory writer gate or initializes
+    /// schema. WAL readers cannot force ordinary publishers to lose coverage.
+    pub(super) fn read(path: &Path) -> anyhow::Result<Self> {
+        anyhow::ensure!(enabled(path), "Display index is disabled");
+        let root = checked(Directory::open(&crate::platform::canonical(path)?))?;
+        let dir = checked(root.child("listing-metadata"))?;
+        wal_budget(&dir)?;
+        let file = checked(dir.read_private("index.sqlite3"))?;
+        let db = Connection::open_with_flags(
+            dir.path.join("index.sqlite3"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::ZERO)?;
+        db.execute_batch("BEGIN DEFERRED")?;
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        anyhow::ensure!(version == 3, "Display snapshot requires metadata repair");
+        let identity: String =
+            db.query_row("SELECT root FROM meta WHERE id=1 AND version=1", [], |r| {
+                r.get(0)
+            })?;
+        anyhow::ensure!(
+            identity == serde_json::to_string(&checked(root.object())?)?,
+            "Display root/store identity changed"
+        );
+        let store = Self {
+            db,
+            root,
+            selected: path.to_path_buf(),
+            dir,
+            file,
+            _gate: None,
         };
         store.verify()?;
         Ok(store)
@@ -152,8 +227,13 @@ impl Store {
     }
     pub fn source_stamp(&self, key: &Key) -> anyhow::Result<Option<String>> {
         let (parent, name) = self.source_parent(key)?;
-        let file = checked(parent.read_private_optional(&name))?;
-        let stamp = file.as_ref().map(version).transpose()?;
+        let stamp = match crate::platform::no_follow(std::fs::OpenOptions::new().read(true))
+            .open(parent.path.join(name))
+        {
+            Ok(file) => Some(version(&file)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
         checked(parent.verify())?;
         Ok(stamp)
     }
@@ -195,6 +275,27 @@ impl Store {
     /// Recover only this component's disposable cache, never canonical files.
     /// One retained cache set bounds quarantine storage across repeated faults.
     pub fn recover(path: &Path, error: &anyhow::Error) -> anyhow::Result<bool> {
+        if error.to_string() == WAL_QUOTA {
+            // Only the background owner may checkpoint. A pinned reader makes
+            // this nonblocking attempt report busy; canonical writers do not wait.
+            let store = match Self::open_for(path, true) {
+                Ok(store) => store,
+                Err(error)
+                    if error.to_string() == "Display reader schema requires background rebuild" =>
+                {
+                    return Self::recover(path, &error);
+                }
+                Err(error) => return Err(error),
+            };
+            let (busy, _, _): (i64, i64, i64) =
+                store
+                    .db
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                    })?;
+            store.verify()?;
+            return Ok(busy == 0);
+        }
         let eligible = match error.downcast_ref::<rusqlite::Error>() {
             Some(rusqlite::Error::SqliteFailure(code, message)) => {
                 let code = code.extended_code & 0xff;
@@ -208,7 +309,10 @@ impl Store {
             Some(rusqlite::Error::QueryReturnedNoRows) => true,
             _ => matches!(
                 error.to_string().as_str(),
-                "Display root/store identity changed" | "Orphaned display journal files"
+                "Display root/store identity changed"
+                    | "Orphaned display journal files"
+                    | "Incomplete display cache schema"
+                    | "Display reader schema requires background rebuild"
             ),
         };
         if !eligible {
@@ -230,7 +334,7 @@ impl Store {
                 if let Ok(version) = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 {
                     anyhow::ensure!(
-                        matches!(version, 0 | 1),
+                        matches!(version, 0..=3),
                         "Unknown display cache version; rebuild refused"
                     );
                 }

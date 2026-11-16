@@ -17,6 +17,7 @@ pub mod draft;
 pub mod graph;
 pub mod member;
 pub mod model;
+pub mod observed_timing;
 pub mod overlap;
 pub mod pipeline;
 pub mod problem;

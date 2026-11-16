@@ -372,6 +372,22 @@ fn intent_value(value: Value) -> Option<Intent> {
 /// Called right after the writer lock is taken: puts back every lock a
 /// release took and did not finish, after a crash included (L2). It never
 /// fails the caller. An intent it cannot settle stays for the next holder.
+/// A bounded display observation cannot admit unknown checkout-lock recovery.
+/// Normal canonical callers retain the original recovery protocol unchanged.
+pub(super) fn listing_ready() -> Result<()> {
+    match fs::read_dir(intents()) {
+        Ok(mut entries) => {
+            if entries.next().is_some() {
+                Err(storage::listing_scope::refuse())
+            } else {
+                Ok(())
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub(super) fn recover_locked() {
     let Ok(entries) = fs::read_dir(intents()) else {
         return;

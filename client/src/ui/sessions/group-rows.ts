@@ -77,7 +77,7 @@ export interface ListInput {
   parentKey?: (s: Session) => string | undefined;
   /** A parent whose child sessions are collapsed. */
   teamCollapsed?: (key: string) => boolean;
-  /** Favorites bypass collapse only, after every ordinary filter. */
+  /** Favorites bypass ancestor collapse, then use their own child toggle, after every ordinary filter. */
   favorite?: (s: Session) => boolean;
   /**
    * Keep an ended parent as a container of its listed children (zerus-sa9qn.17):
@@ -222,7 +222,7 @@ export function groupRows(input: ListInput): Row[] {
       for (const s of list) {
         if (favoritesOnly && !input.favorite?.(s)) continue;
         const from = s.parent && parentKey ? parentKey(s) : undefined;
-        card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {}, !favoritesOnly);
+        card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {});
       }
       return;
     }
@@ -305,9 +305,12 @@ export function groupRows(input: ListInput): Row[] {
       lastShown.set(parent, row);
     };
     for (const { s, depth, parent, last } of nodes) {
-      const onlyFavorites = favoritesOnly || !!parent && hidden.has(parent);
+      const onlyFavorites = parent ? hidden.has(parent) : favoritesOnly;
+      const isFavorite = !!input.favorite?.(s);
       if (onlyFavorites) {
-        hidden.add(s.key);
+        // A favorite's own children follow its saved toggle, even when an
+        // ancestor or project is collapsed. Other retained ancestors stay shut.
+        if (!isFavorite) hidden.add(s.key);
         if (!retained.has(s.key)) continue;
       }
       const counts = teams.get(s.key);
@@ -321,7 +324,7 @@ export function groupRows(input: ListInput): Row[] {
         out.push(row); connect(row, parent);
         continue;
       }
-      connect(card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites), parent);
+      connect(card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites || isFavorite), parent);
     }
   };
   const cards = (listed: readonly Session[], project = "", all: readonly Session[] = listed, favoritesOnly = false) =>

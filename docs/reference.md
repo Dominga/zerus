@@ -992,7 +992,9 @@ the catalog lock, and a launch without a readable identity records no parent.
 The live session context menu offers **Add to favorites** and **Remove from
 favorites**, including independent child sessions. A small star marks a favorite.
 Favorites stay in their existing project and parent hierarchy through collapsed
-groups, retaining only necessary ancestor context; siblings stay collapsed. They
+groups, retaining only necessary ancestor context; unrelated siblings stay
+collapsed. A favorite's own child toggle independently shows or hides its native
+subagents and child sessions, even below a collapsed ancestor or project. Favorites
 never override state, search, machine, project, account or folder filters or
 change status and filter counts. The local `sessions/favorites` preference uses
 canonical machine UUID plus durable session ID, surviving rename and restart

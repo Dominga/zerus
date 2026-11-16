@@ -54,6 +54,20 @@ fn person_pause_is_owned_and_exact_replay_after_resume_does_not_pause_again() {
     let pause = current_pause(&h);
     assert_eq!(pause.id, req.request_id);
     assert!(matches!(pause.owner, PauseOwner::Person { .. }));
+    for id in [None, Some(uuid::Uuid::new_v4().to_string())] {
+        let current = scope(&h, 1);
+        refused(
+            h.run(
+                &person(),
+                Operation::ResumePhase {
+                    scope: current,
+                    pause: id,
+                },
+            ),
+            code::STALE_REVISION,
+        );
+        assert_eq!(current_pause(&h), pause);
+    }
     for who in [&lead, &member, &service(), &other()] {
         let s = scope(&h, 1);
         refused(

@@ -97,6 +97,17 @@ pub(crate) fn nodes(db: &Connection, team: &str, phase: u32) -> Result<Vec<Draft
 impl Store {
     /// A bounded complete draft, from one snapshot; the queue has no draft.
     pub fn phase_draft(&self, team: &str, phase: u32) -> Result<PhaseDraft> {
+        self.read_phase_draft(team, phase, true)
+    }
+
+    /// Auto approval needs the same guarded metadata, not a neighboring
+    /// task-store lease. Its unused prestart facts stay unavailable. This
+    /// internal read is not a second window route or operation authority.
+    pub(crate) fn phase_draft_for_auto(&self, team: &str, phase: u32) -> Result<PhaseDraft> {
+        self.read_phase_draft(team, phase, false)
+    }
+
+    fn read_phase_draft(&self, team: &str, phase: u32, task_facts: bool) -> Result<PhaseDraft> {
         self.active()?;
         let db = self
             .db
@@ -104,7 +115,7 @@ impl Store {
             .ok_or_else(|| Problem::new(code::NOT_FOUND, "Team does not exist."))?;
         // Release the preparation snapshot before taking project custody;
         // the final snapshot below rechecks its revision and exact members.
-        let custody = (phase != 0).then(|| {
+        let custody = (task_facts && phase != 0).then(|| {
             phase_controls::task_custody::TaskCustody::acquire(
                 db,
                 self.state(),

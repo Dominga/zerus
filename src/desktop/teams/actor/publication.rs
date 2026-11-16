@@ -108,7 +108,7 @@ impl Runtime {
                     self.recovered(store, &fresh, &key, now)?;
                     continue;
                 }
-                let draft = store.phase_draft(&team.id, phase.n)?;
+                let draft = store.phase_draft_for_auto(&team.id, phase.n)?;
                 if draft.publication.is_some() {
                     self.recovered(store, &fresh, &key, now)?;
                     continue;

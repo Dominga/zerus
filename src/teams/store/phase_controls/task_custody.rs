@@ -46,6 +46,8 @@ impl TaskCustody {
         team: &str,
         selection: Selection,
     ) -> Result<Self> {
+        #[cfg(test)]
+        fixture::note_read();
         let tx = db.unchecked_transaction().map_err(storage)?;
         let header = rows::team(&tx, team)?
             .ok_or_else(|| storage("The phase task custody team is missing."))?;
@@ -260,6 +262,13 @@ pub(crate) fn availability(
 pub(crate) mod fixture {
     thread_local! {
         static ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
+        static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+    pub(crate) fn reads() -> usize {
+        READS.with(|reads| reads.get())
+    }
+    pub(super) fn note_read() {
+        READS.with(|reads| reads.set(reads.get() + 1));
     }
     pub(crate) fn once(hook: impl FnOnce() + 'static) {
         ACQUIRED.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));

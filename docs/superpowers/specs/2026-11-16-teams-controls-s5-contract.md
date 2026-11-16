@@ -173,6 +173,13 @@ Move/acceptance change; a winning retained project lease excludes reservations
 until the phase-control commit or rollback. Current documents supplement,
 rather than erase, all earlier indexed attempts/effects/decisions.
 
+The service's Auto-approval loop uses an internal projection of this same
+phase reader for generation/publication metadata. It does not acquire the
+neighboring task documents needed only by window Move/acceptance affordances;
+those unused prestart facts remain unavailable. The public selected-phase
+read and every Move/acceptance writer still acquire the exact fresh resources.
+This internal projection adds no route, poller or operation authority.
+
 ## Storage, legacy custody and native compatibility
 
 The no-new-floor design remains **unproved** during source preparation. A real

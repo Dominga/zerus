@@ -511,3 +511,30 @@ fn optional_control_proof_refuses_oversized_files_and_never_creates_a_missing_re
             .allowed
     );
 }
+
+#[test]
+fn auto_approval_metadata_never_acquires_neighbor_task_custody_or_invents_free_facts() {
+    let (mut f, _, requests) = published();
+    for r in &requests {
+        crate::teams::tasks::observe(&f.config.state, &r.task).unwrap();
+    }
+    let next = f.h.store.next_draft_node(TEAM).unwrap();
+    f.h.run(
+        &person(),
+        Operation::SubmitDraftPhase {
+            phase: 2,
+            draft: ops::publication::tests::input(&[next]),
+        },
+    )
+    .unwrap();
+    let before = facts::task_custody::fixture::reads();
+    let metadata = f.h.store.phase_draft_for_auto(TEAM, 2).unwrap();
+    assert_eq!(facts::task_custody::fixture::reads(), before);
+    assert_eq!(metadata.generation, Some(1));
+    assert!(metadata.publication.is_none() && metadata.editable);
+    let controls = metadata.controls.unwrap();
+    assert!(!controls.unstarted.allowed && !controls.acceptance.allowed);
+    let public = f.h.store.phase_draft(TEAM, 2).unwrap();
+    assert_eq!(facts::task_custody::fixture::reads(), before + 1);
+    assert!(public.controls.unwrap().unstarted.allowed);
+}

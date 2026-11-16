@@ -31,7 +31,9 @@ fn command(h: &Harness, name: &str, fields: Value) {
     fields.insert("team".into(), TEAM.into());
     fields.insert("request_id".into(), uid(20000 + h.revision() as u32).into());
     fields.insert("expected_revision".into(), h.revision().into());
-    let (v, exit) = h.cli(&Caller::Person, name, &Value::Object(fields).to_string());
+    // Explicit test-only native admission uses the production parser/writer.
+    // Bare Person CLI calls remain refused; this does not attest a GUI gesture.
+    let (v, exit) = h.native_command(name, &Value::Object(fields).to_string());
     assert_eq!(exit, 0, "{v}");
 }
 
@@ -239,13 +241,19 @@ fn pause_cli_uses_the_actual_writer_clock_and_request_identity() {
             draft: crate::teams::ops::publication::tests::input(&[1]),
         },
     );
+    h.bind("lead", LEAD_SESSION);
     let id = uid(20000 + h.revision() as u32);
     let before = super::super::input::now_ms();
-    command(
-        &h,
+    // The independently bound lead keeps its real CLI clock path. Person
+    // actions use native originals and cannot be admitted by this CLI route.
+    let (value, exit) = h.cli(
+        &Caller::Session(key(LEAD_SESSION)),
         "pause-phase",
-        json!({"scope":scope(&h),"pause":null,"reason":"An actual CLI clock control."}),
+        &json!({"team":TEAM,"request_id":id,"expected_revision":h.revision(),
+            "scope":scope(&h),"pause":null,"reason":"An actual CLI clock control."})
+        .to_string(),
     );
+    assert_eq!(exit, 0, "{value}");
     let after = super::super::input::now_ms();
     let PhasePause::Paused { episode: Some(e) } = h
         .store()
@@ -257,6 +265,7 @@ fn pause_cli_uses_the_actual_writer_clock_and_request_identity() {
     else {
         panic!("CLI pause has no owner")
     };
+    assert!(matches!(e.owner, PauseOwner::Lead { ref member, .. } if member=="lead"));
     assert_eq!(e.id, id);
     assert!((before..=after).contains(&e.created_ms));
 }
@@ -270,4 +279,82 @@ fn regenerate_phase_controls_fixture() {
         serde_json::to_string_pretty(&produced()).unwrap() + "\n",
     )
     .unwrap();
+}
+
+#[test]
+fn bare_person_phase_controls_have_no_cli_or_payload_authority() {
+    let h = Harness::new();
+    h.create();
+    for n in 1..=2 {
+        h.apply(
+            &person(),
+            Operation::SubmitDraftPhase {
+                phase: n,
+                draft: crate::teams::ops::publication::tests::input(&[n]),
+            },
+        );
+    }
+    h.apply(
+        &person(),
+        Operation::PausePhase {
+            scope: scope(&h),
+            pause: None,
+            reason: "Retain the person pause.".into(),
+        },
+    );
+    let current = scope(&h);
+    let relative = h
+        .store()
+        .phase_draft(TEAM, 2)
+        .unwrap()
+        .controls
+        .unwrap()
+        .scope;
+    let episode = pause_id(&h);
+    let revision = h.revision();
+    for (index, (name, fields)) in [
+        ("set-phase-barrier", json!({"scope":current,"barrier":true})),
+        (
+            "pause-phase",
+            json!({"scope":current,"pause":episode,"reason":"Explicit replacement."}),
+        ),
+        ("resume-phase", json!({"scope":current,"pause":episode})),
+        (
+            "move-phase",
+            json!({"scope":current,"relative_to":relative,"placement":"before"}),
+        ),
+        (
+            "set-phase-acceptance",
+            json!({"scope":current,"acceptance":"lead"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = uid(30000 + index as u32);
+        let mut fields = fields.as_object().unwrap().clone();
+        fields.insert("team".into(), TEAM.into());
+        fields.insert("request_id".into(), id.clone().into());
+        fields.insert("expected_revision".into(), revision.into());
+        let (reply, exit) = h.cli(&Caller::Person, name, &Value::Object(fields).to_string());
+        assert_ne!(exit, 0, "{name}: {reply}");
+        assert_eq!(
+            reply["error"]["code"], "person_gesture_required",
+            "{name}: {reply}"
+        );
+        assert_eq!(h.revision(), revision);
+        let saved: bool = h
+            .store()
+            .db
+            .as_ref()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM requests WHERE id=?1)",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!saved, "a bare Person CLI must reserve no original: {name}");
+        assert_eq!(pause_id(&h), episode);
+    }
 }

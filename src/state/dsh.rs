@@ -1076,50 +1076,100 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
 }
 
 /// Compact caller-supplied rows, one host reply per bounded page. Never inventory bindings.
-pub(in crate::state) fn listing_records(records: &[Value], deadline: Instant) -> Result<Vec<Value>> {
-    if records.is_empty() {return Ok(Vec::new());}
-    let preferences=notifications::load();let mut hosts=BTreeMap::new();let mut rows=Vec::new();
+pub(in crate::state) fn listing_records(
+    records: &[Value],
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let preferences = notifications::load();
+    let mut hosts = BTreeMap::new();
+    let mut rows = Vec::new();
+    let mut bytes = 0;
     for record in records {
-        let key=string(record,"agent_home").to_owned();
+        let key = string(record, "agent_home").to_owned();
         if !hosts.contains_key(&key) {
-            if hosts.len()>=32 {return Err("Native listing host budget exceeded".into());}
-            hosts.insert(key.clone(),listing_rpc(record,"list",json!({}),deadline).unwrap_or(Value::Null));
+            if hosts.len() >= 32 {
+                return Err("Native listing host budget exceeded".into());
+            }
+            hosts.insert(
+                key.clone(),
+                listing_rpc(record, "list", json!({}), deadline).unwrap_or(Value::Null),
+            );
         }
-        let list=&hosts[&key];
-        let mut row=snapshot_with(record,list,&mut |method,params|listing_rpc(record,method,params,deadline));
-        notifications::enrich(&mut row,preferences.as_ref(),journal::journal_name(record));rows.push(row);
+        let list = &hosts[&key];
+        let mut row = snapshot_with(record, list, &mut |method, params| {
+            listing_rpc(record, method, params, deadline)
+        });
+        notifications::enrich(
+            &mut row,
+            preferences.as_ref(),
+            journal::journal_name(record),
+        );
+        bytes += serde_json::to_vec(&row)
+            .map_err(|error| error.to_string())?
+            .len();
+        if bytes > 512 << 10 {
+            return Err("Native listing response budget exceeded; use a smaller page".into());
+        }
+        rows.push(row);
     }
     Ok(rows)
 }
 #[cfg(unix)]
 fn listing_rpc(record: &Value, method: &str, params: Value, deadline: Instant) -> Result<Value> {
-    use std::io::{Read,Write};
-    let remaining=||deadline.checked_duration_since(Instant::now()).filter(|left|!left.is_zero()).ok_or("Native listing deadline exceeded");
-    let mut socket=crate::platform::connect_unix(&host_dir(record).join("host.sock"),remaining()?).map_err(|_|HOST_UNAVAILABLE)?;
-    let request=format!("{}\n",json!({"method":method,"params":params}));
-    let mut rest=request.as_bytes();
+    use std::io::{Read, Write};
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or("Native listing deadline exceeded")
+    };
+    let mut socket =
+        crate::platform::connect_unix(&host_dir(record).join("host.sock"), remaining()?)
+            .map_err(|_| HOST_UNAVAILABLE)?;
+    let request = format!("{}\n", json!({"method":method,"params":params}));
+    let mut rest = request.as_bytes();
     while !rest.is_empty() {
-        socket.set_write_timeout(Some(remaining()?)).map_err(|error|error.to_string())?;
-        let n=socket.write(rest).map_err(|error|error.to_string())?;
-        if n==0 {return Err("Native listing request ended".into());} rest=&rest[n..];
+        socket
+            .set_write_timeout(Some(remaining()?))
+            .map_err(|error| error.to_string())?;
+        let n = socket.write(rest).map_err(|error| error.to_string())?;
+        if n == 0 {
+            return Err("Native listing request ended".into());
+        }
+        rest = &rest[n..];
     }
-    let mut response=Vec::new();let mut chunk=[0;4096];
+    let mut response = Vec::new();
+    let mut chunk = [0; 4096];
     loop {
-        socket.set_read_timeout(Some(remaining()?)).map_err(|error|error.to_string())?;
-        let count=socket.read(&mut chunk).map_err(|error|error.to_string())?;
-        if count==0 {return Err("Native listing response ended".into());}
+        socket
+            .set_read_timeout(Some(remaining()?))
+            .map_err(|error| error.to_string())?;
+        let count = socket.read(&mut chunk).map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Err("Native listing response ended".into());
+        }
         response.extend_from_slice(&chunk[..count]);
-        if response.len()>2<<20 {return Err("Native listing response exceeds its bound".into());}
-        if let Some(end)=response.iter().position(|byte|*byte==b'\n') {
+        if response.len() > 2 << 20 {
+            return Err("Native listing response exceeds its bound".into());
+        }
+        if let Some(end) = response.iter().position(|byte| *byte == b'\n') {
             remaining()?;
-            let reply:Value=serde_json::from_slice(&response[..end]).map_err(|error|error.to_string())?;
-            if reply["ok"]!=true {return Err("Native listing unavailable".into());}
+            let reply: Value =
+                serde_json::from_slice(&response[..end]).map_err(|error| error.to_string())?;
+            if reply["ok"] != true {
+                return Err("Native listing unavailable".into());
+            }
             return Ok(reply["value"].clone());
         }
     }
 }
 #[cfg(not(unix))]
-fn listing_rpc(_: &Value, _: &str, _: Value, _: Instant) -> Result<Value> {Err(UNSUPPORTED.into())}
+fn listing_rpc(_: &Value, _: &str, _: Value, _: Instant) -> Result<Value> {
+    Err(UNSUPPORTED.into())
+}
 
 /// The same listing projection, without opening every saved DeepSeek binding.
 /// The host's existing list RPC and its generation semantics are unchanged.

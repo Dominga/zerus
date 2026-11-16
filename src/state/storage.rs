@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+pub(super) mod listing_scope;
+
 // Read-only selected-slot source fences for saved Resume, Start fresh and terminal Fork.
 pub(super) mod selected_source;
 #[cfg(test)]
@@ -133,10 +135,18 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     let path = path.unwrap_or(&default);
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
-    let guard = Guard::exclusive(file).map_err(|e| e.to_string())?;
+    let guard = if let Some(deadline) = listing_scope::deadline() {
+        lock_open_until(file, deadline)?.ok_or_else(listing_scope::refuse)?
+    } else {
+        Guard::exclusive(file).map_err(|error| error.to_string())?
+    };
     if path == default {
+        if listing_scope::active() {
+            worktree_lock::listing_ready()?;
+        }
         rename::recover_locked()?;
         rename::sync_legacy_locked()?;
+        listing_scope::check()?;
         worktree_lock::recover_locked();
     }
     Ok(guard)
@@ -174,9 +184,15 @@ fn lock_open_until(file: fs::File, deadline: std::time::Instant) -> Result<Optio
 /// lifecycle cleanup. Never turn a busy writer into an unbounded archive exit.
 pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(&root())?;
-    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else { return Ok(None); };
+    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else {
+        return Ok(None);
+    };
+    if listing_scope::active() {
+        worktree_lock::listing_ready()?;
+    }
     rename::recover_locked()?;
     rename::sync_legacy_locked()?;
+    listing_scope::check()?;
     worktree_lock::recover_locked();
     Ok(Some(guard))
 }
@@ -270,6 +286,9 @@ pub(crate) fn is_id_layout_record(record: &Value, id: &str) -> bool {
 ///   reach a session whose label has no first holder.
 pub(super) fn record_path(name: &str) -> PathBuf {
     if let Some(path) = selected_id_path(name) {
+        return path;
+    }
+    if let Some(path) = listing_scope::route(name) {
         return path;
     }
     let label = label_record_path(name);
@@ -421,6 +440,9 @@ fn in_sessions(path: &Path) -> bool {
 /// regular file and stops at its bound (#1437 review): a lock-free scan must
 /// not hang on what it finds there.
 fn record_bytes(path: &Path, limit: Option<u64>) -> io::Result<Vec<u8>> {
+    if let Some(result) = listing_scope::read(path) {
+        return result;
+    }
     let retiring = limit.is_some();
     let Some(limit) = limit.or(in_sessions(path).then_some(ID_RECORD_BYTES)) else {
         return fs::read(path);
@@ -498,7 +520,7 @@ fn read_at(path: &Path, name: &str, limit: Option<u64>) -> Result<Value> {
 }
 
 /// The record in `bytes`, read from `path` as `name`, verified.
-fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
+pub(super) fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
     let mut record: Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("{name}: invalid saved binding: {e}"))?;
     if !record.is_object()
@@ -818,6 +840,9 @@ fn is_record_path(path: &Path) -> bool {
 }
 
 pub(super) fn records() -> Result<Vec<Value>> {
+    if listing_scope::active() {
+        return Err(listing_scope::refuse());
+    }
     if !root().exists() {
         return Ok(Vec::new());
     }

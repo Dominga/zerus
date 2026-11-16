@@ -31,3 +31,23 @@ Raw shell output, tool arguments, transcripts, permission/confirmation tokens an
 original custody are never copied into the display seed. A private transition
 that cannot be represented by public predicates needs a fresh, bounded selected
 canonical read; it cannot be reconstructed from display evidence.
+
+Controls now compare complete public rows against the canonical builder, not
+only summary fragments. `tests/test_listing_index.py` covers the terminal saved
+matrix (including pending settings, quiet/system prompts, account/fork/errors,
+private transition, Unknown, Kimi legacy-main/native-roster and Claude internal
+children), live ID/rename/reply/attention rows, genuine private Background and
+unknown-birth process trees, cross-page parents, a resident DeepSeek host and
+current/legacy/unavailable OpenCode services. The twelve-case Rust summary
+matrix additionally checks the bounded native model-history source. Observation
+clock *presence and numeric type* are compared, while their values
+(`goal_observed_at`, `process_work.sampled_at`) are allowed to advance, as in the
+existing watch coalescer. All other public fields are compared unchanged.
+
+Native child/process reconciliation uses a fresh selected canonical record.
+Kimi records and unresolved working/finished child rosters share the existing
+16-file/16-MiB selected-overlay limit with live/private transitions. A larger
+request must use smaller pages or receives a truthful refusal; cached native
+PID pins, launch recipes, confirmation tokens or removal outcomes never become
+authority. Pure legacy Kimi-main/Claude-internal repairs can run on the bounded
+public projection. Publishers still perform no native or journal I/O.

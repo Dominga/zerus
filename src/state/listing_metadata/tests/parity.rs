@@ -89,7 +89,10 @@ fn isolated_parity() {
         "system-prompt" => {
             value["agent"] = json!("claude");
             value["name"] = json!("claude/example/one");
-            value["prompt"]=json!(format!("<task-notification><task-id>fixture</task-id><summary>Finished</summary><result>{}</result></task-notification>","x".repeat(512)));
+            value["prompt"] = json!(format!(
+                "<task-notification><task-id>fixture</task-id><summary>Finished</summary><result>{}</result></task-notification>",
+                "x".repeat(512)
+            ));
         }
         "id" => {
             value["layout"] = json!("id");

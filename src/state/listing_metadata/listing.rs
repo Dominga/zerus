@@ -36,8 +36,10 @@ impl Canonical {
             };
             for entry in paths {
                 entries += 1;
-                anyhow::ensure!(entries<=COMPAT_ENTRIES && Instant::now()<until,
-                    "Session listing exceeds the bounded default-off inventory; enable listing-index on this computer");
+                anyhow::ensure!(
+                    entries <= COMPAT_ENTRIES && Instant::now() < until,
+                    "Session listing exceeds the bounded default-off inventory; enable listing-index on this computer"
+                );
                 let path = entry?.path();
                 let Some(key) = Key::at(&root.path, &path) else {
                     continue;
@@ -48,7 +50,10 @@ impl Canonical {
                     "Session listing source is unavailable"
                 );
                 bytes = bytes.saturating_add(metadata.len());
-                anyhow::ensure!(bytes<=COMPAT_BYTES,"Session listing exceeds the bounded default-off byte budget; enable listing-index on this computer");
+                anyhow::ensure!(
+                    bytes <= COMPAT_BYTES,
+                    "Session listing exceeds the bounded default-off byte budget; enable listing-index on this computer"
+                );
                 let file = crate::platform::no_follow(std::fs::OpenOptions::new().read(true))
                     .open(&path)?;
                 witnesses.push((key, store::version(&file)?));
@@ -58,6 +63,14 @@ impl Canonical {
             repair::directories_at(&root)? == dirs,
             "Session listing inventory changed during preflight"
         );
+        match std::fs::read_dir(root.path.join("renames")) {
+            Ok(mut entries) => anyhow::ensure!(
+                entries.next().transpose()?.is_none(),
+                "Session listing is waiting for canonical rename recovery"
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
         let mut rows = Vec::new();
         let mut read = 0;
         let mut files = 0;
@@ -73,6 +86,20 @@ impl Canonical {
             )?;
             // Unsupported private/public shapes refuse before native overlays.
             let _projection = Seed::encode(key, &record)?;
+            if !key.0.contains('/') || key.0.starts_with("bindings/") {
+                anyhow::ensure!(
+                    record["rename_shadow"] == true
+                        || !root
+                            .path
+                            .join("name_routes")
+                            .join(format!(
+                                "{}.json",
+                                storage::label_key(string(&record, "name"))
+                            ))
+                            .try_exists()?,
+                    "Legacy alias needs canonical reconciliation before listing"
+                );
+            }
             if record["rename_shadow"] != true {
                 rows.push((key.0.clone(), json!({"record":record,"native_stamp":stamp})));
             }
@@ -108,7 +135,7 @@ impl Canonical {
     }
 }
 
-fn selected_record(
+pub(super) fn selected_record(
     root: &Path,
     source: &str,
     seed: &Value,
@@ -177,6 +204,21 @@ fn selected_record(
     );
     let record: Value = serde_json::from_slice(&raw)?;
     anyhow::ensure!(key.matches(&record), "Selected listing identity changed");
+    let record = if source.starts_with("dsh/") || source.starts_with("opencode/") {
+        record
+    } else {
+        let _route =
+            storage::listing_scope::Route::verified(root.join(source), string(&record, "name"));
+        checked(storage::verify_at(
+            &root.join(source),
+            string(&record, "name"),
+            &raw,
+        ))?
+    };
+    anyhow::ensure!(
+        Instant::now() < until,
+        "Selected native listing observation exceeded its deadline"
+    );
     Ok(record)
 }
 
@@ -186,14 +228,17 @@ pub(in crate::state) fn merge(
     archives: bool,
     query: &Query,
 ) -> Result<Value> {
-    let mut run = || -> anyhow::Result<Value> {
+    let run = || -> anyhow::Result<Value> {
         let root = root();
+        let until = Instant::now() + Duration::from_secs(10);
+        let observation = storage::listing_scope::Scope::enter(until);
         let indexed = changes::qualified() && enabled(&root);
         anyhow::ensure!(
             indexed || !query.paged,
             "Paged session listing needs an enabled qualified index on this computer"
         );
-        let _capture = checked(storage::writer_until(
+        let _capture = checked(storage::lock_until(
+            &root.join(".lock"),
             Instant::now() + Duration::from_millis(250),
         ))?
         .ok_or_else(|| anyhow::anyhow!("Session listing is waiting for the canonical writer"))?;
@@ -216,9 +261,9 @@ pub(in crate::state) fn merge(
             .as_deref()
             .map(pages::Cursor::decode)
             .transpose()?;
-        let until = Instant::now() + Duration::from_secs(10);
         let ((snapshot, mut names), mut live) = {
-            let _guard = checked(storage::writer_until(
+            let _guard = checked(storage::lock_until(
+                &root.join(".lock"),
                 Instant::now() + Duration::from_millis(250),
             ))?
             .ok_or_else(|| {
@@ -281,6 +326,7 @@ pub(in crate::state) fn merge(
         let mut total_bytes = 0;
         let mut canonical_bytes = 0;
         let mut canonical_files = 0;
+        let native_until = until.min(Instant::now() + Duration::from_secs(1));
         loop {
             anyhow::ensure!(
                 Instant::now() < until,
@@ -331,6 +377,10 @@ pub(in crate::state) fn merge(
                                 until,
                             )?;
                         }
+                        let _route = storage::listing_scope::Route::verified(
+                            root.join(&source),
+                            string(&record, "name"),
+                        );
                         let mut row = live.remove(index);
                         label_row(&mut row, &record);
                         workspace::relabel(
@@ -359,6 +409,15 @@ pub(in crate::state) fn merge(
                         until,
                     )?;
                 }
+                let _route = if indexed && seed["record"]["_listing"]["requires_canonical"] == true
+                {
+                    Some(storage::listing_scope::Route::verified(
+                        root.join(&source),
+                        string(&record, "name"),
+                    ))
+                } else {
+                    None
+                };
                 let name = string(&record, "name");
                 let parts: Vec<_> = name.splitn(3, '/').collect();
                 let mut row = json!({"name":name,"cmd":record["agent"],"project":parts.get(1),"tag":parts.get(2),"attached":0,"clients":[],"created":record["created"],"state":if record["paused"]==true {"paused"}else{"stopped"},"resumable":true});
@@ -383,7 +442,6 @@ pub(in crate::state) fn merge(
                 question_routing::enrich(&mut row, routing.as_ref());
                 rows.push(row);
             }
-            let native_until = until.min(Instant::now() + Duration::from_secs(1));
             rows.extend(checked(dsh::listing_records(&deepseek, native_until))?);
             rows.extend(checked(opencode::listing_records(&opencode, native_until))?);
             for row in &rows[start_count..] {
@@ -399,14 +457,6 @@ pub(in crate::state) fn merge(
             }
         }
         // A late publisher/gap must invalidate the retained transaction's body.
-        if let Some(reader) = &reader {
-            anyhow::ensure!(
-                reader.page_limit(cursor.as_ref(), 1)?.fresh,
-                "Session listing changed before publication; no complete body returned"
-            );
-        } else {
-            canonical.as_ref().unwrap().verify()?;
-        }
 
         if !query.paged || query.cursor.is_none() {
             rows.extend(live);
@@ -431,8 +481,20 @@ pub(in crate::state) fn merge(
                 };
                 let parent = reader.as_ref().unwrap().parent(&link)?;
                 let mut pair = Vec::new();
-                if let Some(parent) = parent {
-                    let native_until = until.min(Instant::now() + Duration::from_secs(1));
+                if let Some((source, seed)) = parent {
+                    let parent = if seed["record"]["_listing"]["requires_canonical"] == true {
+                        selected_record(
+                            &root,
+                            &source,
+                            &seed,
+                            &mut canonical_bytes,
+                            &mut canonical_files,
+                            16,
+                            until,
+                        )?
+                    } else {
+                        seed["record"].clone()
+                    };
                     let observed = match string(&parent, "backend") {
                         "dsh" => checked(dsh::listing_records(&[parent], native_until))?.remove(0),
                         "opencode" => {
@@ -462,7 +524,7 @@ pub(in crate::state) fn merge(
                 row["parent"] = pair.pop().unwrap()["parent"].clone();
             }
         }
-        value["sessions"] = json!(rows);
+        value["sessions"] = Value::Array(rows);
         if let Some(page) = archive_page {
             value["archive_page"] = page;
         }
@@ -473,7 +535,16 @@ pub(in crate::state) fn merge(
             serde_json::to_vec(&value)?.len() <= if query.paged { PAGE_BYTES } else { BODY_BYTES },
             "Complete session listing exceeds its response bound"
         );
-        Ok(value.clone())
+        observation.verify().map_err(anyhow::Error::msg)?;
+        if let Some(reader) = &reader {
+            anyhow::ensure!(
+                reader.page_limit(cursor.as_ref(), 1)?.fresh,
+                "Session listing changed before publication; no complete body returned"
+            );
+        } else {
+            canonical.as_ref().unwrap().verify()?;
+        }
+        Ok(value)
     };
     run().map_err(|error| error.to_string())
 }

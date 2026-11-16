@@ -218,7 +218,13 @@ pub(super) fn user_prompt(record: &Value) -> &Value {
     if record["keep_warm_quiet"].is_object() {
         return &record["keep_warm_quiet"]["prompt"];
     }
-    if record["_listing"]["system_prompt"] == true || system_prompt(string(record, "prompt")).is_some() { &NONE } else { &record["prompt"] }
+    if record["_listing"]["system_prompt"] == true
+        || system_prompt(string(record, "prompt")).is_some()
+    {
+        &NONE
+    } else {
+        &record["prompt"]
+    }
 }
 
 fn detail(event: &Value) -> String {

@@ -98,6 +98,7 @@ impl Seed {
             "launch_id",
             "launch_label",
             "terminal_name",
+            "pane",
             "agent",
             "backend",
             "activity",
@@ -192,7 +193,8 @@ impl Seed {
         .iter()
         .any(|key| record.get(*key).is_some());
         out.insert("_listing".into(),json!({
-            "requires_canonical":private_transition || resume_input::pending(record) || resume_input::fork_pending(record),
+            "requires_canonical":private_transition || resume_input::pending(record) || resume_input::fork_pending(record)
+                || record["agent"]=="kimi" || record["subagents"].as_object().is_some_and(|children|children.values().any(|child| ["working","finished"].contains(&string(child,"state")))),
             "system_prompt":journal::system_prompt(string(record,"prompt")).is_some(),
         }));
         for (key, fields) in [
@@ -252,6 +254,7 @@ impl Seed {
                     "display_state",
                     "provider",
                     "external",
+                    "announced",
                     "model",
                     "reply_id",
                     "native_roster",
@@ -300,9 +303,16 @@ impl Seed {
                 out.insert(key.into(), Value::Object(result));
             }
         }
-        let digest = storage::label_key(&serde_json::to_string(&out)?);
-        let encoded =
-            serde_json::to_string(&json!({"version":SEED_VERSION,"record":out,"digest":digest}))?;
+        let mut public = Value::Object(out);
+        // These two legacy repairs are pure and bounded by the compact roster.
+        // Native child/process reconciliation requires the selected canonical
+        // overlay; it is never performed by a publisher or from cached pins.
+        journal::repair_kimi_main(&mut public);
+        journal::repair_claude_internal(&mut public);
+        let digest = storage::label_key(&serde_json::to_string(&public)?);
+        let encoded = serde_json::to_string(
+            &json!({"version":SEED_VERSION,"record":public,"digest":digest}),
+        )?;
         anyhow::ensure!(
             encoded.len() <= SEED_BYTES,
             "Display seed exceeds its bound"

@@ -33,11 +33,18 @@ fn remove_inner(path: &Path) -> Result<()> {
 }
 
 fn load(path: &Path) -> Result<Value> {
+    if let Some(bytes) = storage::listing_scope::read(path) {
+        return serde_json::from_slice(&bytes.map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string());
+    }
     serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn json_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(paths) = storage::listing_scope::paths(directory) {
+        return paths;
+    }
     if !directory.exists() {
         return Ok(Vec::new());
     }

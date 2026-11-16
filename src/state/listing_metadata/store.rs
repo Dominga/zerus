@@ -16,6 +16,15 @@ pub(super) struct Store {
     file: File,
     _gate: Option<File>,
 }
+/// Only this exact failure precedes every native-feed read in a repair step.
+#[derive(Debug)]
+pub(super) struct PublisherBusy;
+impl std::fmt::Display for PublisherBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Display publisher is busy; retain the background census")
+    }
+}
+impl std::error::Error for PublisherBusy {}
 impl Store {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Self::open_for(path, false)
@@ -28,7 +37,13 @@ impl Store {
             "Display index is disabled"
         );
         let gate = checked(dir.open_private_lock("writer.lock"))?;
-        gate.try_lock_exclusive()?;
+        match gate.try_lock_exclusive() {
+            Ok(()) => (),
+            Err(error) if crate::platform::lock_contended(&error) => {
+                return Err(PublisherBusy.into());
+            }
+            Err(error) => return Err(error.into()),
+        }
         if !checkpoint {
             wal_budget(&dir)?;
         }
@@ -268,7 +283,7 @@ impl Store {
                 Err(error)
                     if error.to_string() == "Display reader schema requires background rebuild" =>
                 {
-                    return Self::recover(path, &error)
+                    return Self::recover(path, &error);
                 }
                 Err(error) => return Err(error),
             };
@@ -319,7 +334,7 @@ impl Store {
                 if let Ok(version) = db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 {
                     anyhow::ensure!(
-                        matches!(version, 0 | 1 | 2 | 3),
+                        matches!(version, 0..=3),
                         "Unknown display cache version; rebuild refused"
                     );
                 }

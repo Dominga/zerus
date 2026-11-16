@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::Context;
 use std::{fs, io::Read};
 
 const STEP_BYTES: usize = 16 << 20;
@@ -17,6 +18,7 @@ pub(in crate::state) struct Stats {
     pub entries: usize,
     pub bytes: usize,
     pub rows: usize,
+    pub seed_bytes: usize,
     pub done: bool,
     pub complete: bool,
 }
@@ -120,6 +122,45 @@ enum Observation {
     },
     Later,
 }
+// A legacy alias needing canonical repair is unsupported display input, not a
+// second current session. This point read is charged to the same raw-I/O budget.
+fn current_route(
+    store: &Store,
+    key: &Key,
+    record: &Value,
+    stats: &mut Stats,
+) -> anyhow::Result<bool> {
+    if key.0.contains("/") && !key.0.starts_with("bindings/") || record["rename_shadow"] == true {
+        return Ok(true);
+    }
+    let path = store.root.path.join("name_routes").join(format!(
+        "{}.json",
+        storage::label_key(string(record, "name"))
+    ));
+    let mut file = match crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    let length = file.metadata()?.len();
+    anyhow::ensure!(
+        file.metadata()?.is_file() && length <= 32 << 10,
+        "Legacy display route is unavailable"
+    );
+    if length as usize > STEP_BYTES - stats.bytes {
+        return Ok(false);
+    }
+    let mut raw = Vec::new();
+    let result = Read::by_ref(&mut file).take(length).read_to_end(&mut raw);
+    stats.bytes += raw.len();
+    result?;
+    let route: Value = serde_json::from_slice(&raw)?;
+    anyhow::ensure!(
+        route["version"] == 1 && route["name"] == record["name"],
+        "Legacy display route identity changed"
+    );
+    anyhow::bail!("Legacy alias requires canonical reconciliation before display");
+}
 fn observe(store: &Store, key: &Key, stats: &mut Stats) -> anyhow::Result<Observation> {
     key.validate()?;
     let mut parent = checked(Directory::open(&store.root.path))?;
@@ -157,6 +198,10 @@ fn observe(store: &Store, key: &Key, stats: &mut Stats) -> anyhow::Result<Observ
     let stamp = store::version(&file)?;
     let cached:Option<String>=store.db.query_row("SELECT CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END FROM sources WHERE source=?1 AND stamp=?2 AND tombstone=0 AND issue IS NULL",params![key.0,stamp],|r|r.get(0)).optional()?.flatten();
     if let Some(seed) = cached.filter(|seed| Seed::decode(key, seed).is_ok()) {
+        let projected = Seed::decode(key, &seed)?;
+        if !current_route(store, key, &projected["record"], stats)? {
+            return Ok(Observation::Later);
+        }
         checked(parent.verify())?;
         let current = crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(&path)?;
         anyhow::ensure!(
@@ -191,6 +236,9 @@ fn observe(store: &Store, key: &Key, stats: &mut Stats) -> anyhow::Result<Observ
         "Display source route changed during bounded read"
     );
     let value: Value = serde_json::from_slice(&bytes)?;
+    if !current_route(store, key, &value, stats)? {
+        return Ok(Observation::Later);
+    }
     let seed = Seed::encode(key, &value)?;
     Ok(Observation::Known {
         seed: Some(seed),
@@ -201,6 +249,11 @@ fn project(store: &Store, s: &mut Scan, key: &Key, stats: &mut Stats) -> anyhow:
     match observe(store, key, stats) {
         Ok(Observation::Later) => return Ok(false),
         Ok(Observation::Known { seed, stamp }) => {
+            let size = seed.as_ref().map_or(0, String::len);
+            if size > (512 << 10) - stats.seed_bytes {
+                return Ok(false);
+            }
+            stats.seed_bytes += size;
             store
                 .db
                 .execute("UPDATE meta SET revision=revision+1 WHERE id=1", [])?;
@@ -217,8 +270,10 @@ fn project(store: &Store, s: &mut Scan, key: &Key, stats: &mut Stats) -> anyhow:
                         params![s.generation, key.0, seed, stamp],
                     )?;
                 } else {
-                    store.db.execute("DELETE FROM snapshots WHERE generation=?1 AND source=?2",
-                        params![s.generation,key.0])?;
+                    store.db.execute(
+                        "DELETE FROM snapshots WHERE generation=?1 AND source=?2",
+                        params![s.generation, key.0],
+                    )?;
                 }
             } else {
                 store.db.execute(
@@ -263,7 +318,12 @@ fn collect(store: &Store, until: Instant) -> anyhow::Result<()> {
             "UPDATE generations SET complete=0 WHERE generation=?1",
             [generation],
         )?;
-        let names=keys(store,"SELECT source FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",generation,"")?;
+        let names = keys(
+            store,
+            "SELECT source FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",
+            generation,
+            "",
+        )?;
         for name in names {
             if Instant::now() >= until {
                 break;
@@ -320,7 +380,13 @@ impl Background {
         Ok((batch.caught_up, false))
     }
     fn step(&mut self) -> anyhow::Result<Stats> {
-        let store = Store::open(&self.root)?;
+        let store = match Store::open(&self.root) {
+            Ok(store) => store,
+            // No event has been consumed. Dropping this stream on ordinary
+            // publisher contention would restart discovery at the prefix.
+            Err(error) if error.is::<store::PublisherBusy>() => return Ok(Stats::default()),
+            Err(error) => return Err(error),
+        };
         store.verify()?;
         let epoch: String = store
             .db
@@ -356,7 +422,8 @@ impl Background {
                     ..Stats::default()
                 });
             }
-            let current:Option<(bool,String,String)>=store.db.query_row("SELECT m.ready,g.dirs,g.gap FROM meta m JOIN generations g ON g.generation=m.generation AND g.complete=1 WHERE m.id=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+            // `complete` is our generation column, never a label manifest.
+            let current:Option<(bool,String,String)>=store.db.query_row("SELECT m.ready,g.dirs,g.gap FROM meta m JOIN generations g ON g.generation=m.generation AND complete=1 WHERE m.id=1",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             if batch.caught_up
                 && batch.keys.is_empty()
                 && current.as_ref().is_some_and(|(ready, dirs, gap)| {
@@ -455,7 +522,12 @@ impl Background {
                         }
                     }
                     1 => {
-                        let names=keys(&store,"SELECT DISTINCT source FROM intents WHERE ?1>=0 AND source>?2 ORDER BY source LIMIT 128",s.generation,&s.after)?;
+                        let names = keys(
+                            &store,
+                            "SELECT DISTINCT source FROM intents WHERE ?1>=0 AND source>?2 ORDER BY source LIMIT 128",
+                            s.generation,
+                            &s.after,
+                        )?;
                         if names.is_empty() {
                             s.phase = 2;
                             s.after.clear();
@@ -510,7 +582,12 @@ impl Background {
                         }
                     }
                     5 => {
-                        let names=keys(&store,"SELECT source FROM dirty WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",s.generation,"")?;
+                        let names = keys(
+                            &store,
+                            "SELECT source FROM dirty WHERE generation=?1 AND source>?2 ORDER BY source LIMIT 128",
+                            s.generation,
+                            "",
+                        )?;
                         if names.is_empty() {
                             s.phase = 4;
                             continue;
@@ -559,6 +636,7 @@ impl Background {
                             }
                             found = true;
                             bytes += source.len() + seed.len() + stamp.len();
+                            stats.seed_bytes += seed.len();
                             Seed::decode(&Key(source.clone()), &seed)?;
                             store.db.execute("INSERT INTO snapshots(generation,source,seed,stamp) VALUES(?1,?2,?3,?4)",params![s.generation,source,seed,stamp])?;
                             s.after = source;
@@ -652,7 +730,10 @@ impl Background {
         })();
         match result {
             Ok(stats) => {
-                store.db.execute_batch("COMMIT")?;
+                store
+                    .db
+                    .execute_batch("COMMIT")
+                    .context("Display repair COMMIT failed")?;
                 Ok(stats)
             }
             Err(error) => {

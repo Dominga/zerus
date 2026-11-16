@@ -1,9 +1,9 @@
 use super::*;
 use std::fs;
 mod bench;
-mod writers;
-mod readers;
 mod parity;
+mod readers;
+mod writers;
 
 fn enable(root: &Path) {
     let root = checked(Directory::open(&crate::platform::canonical(root).unwrap())).unwrap();
@@ -638,9 +638,23 @@ fn every_binding_layout_is_eligible_but_archives_routes_and_wrong_identities_are
     let root = fixture();
     let mut value = record();
     for directory in storage::BINDING_DIRS {
-        let agent=if directory.starts_with("dsh/") {"dsh"} else if directory.starts_with("opencode/") {"opencode"} else {"codex"};
-        value["name"]=json!(format!("{agent}/example/one"));value["agent"]=json!(agent);
-        if agent!="codex" {value["backend"]=json!(agent);value["conversation_id"]=json!(if agent=="dsh" {"session-native"}else{"ses_native"});}
+        let agent = if directory.starts_with("dsh/") {
+            "dsh"
+        } else if directory.starts_with("opencode/") {
+            "opencode"
+        } else {
+            "codex"
+        };
+        value["name"] = json!(format!("{agent}/example/one"));
+        value["agent"] = json!(agent);
+        if agent != "codex" {
+            value["backend"] = json!(agent);
+            value["conversation_id"] = json!(if agent == "dsh" {
+                "session-native"
+            } else {
+                "ses_native"
+            });
+        }
         let id = directory.ends_with("sessions");
         value["layout"] = if id { json!("id") } else { Value::Null };
         let file = if id {

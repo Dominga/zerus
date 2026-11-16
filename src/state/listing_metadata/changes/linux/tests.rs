@@ -101,11 +101,13 @@ fn native_quota_failure_closes_the_partially_installed_feed() {
             Ok(wd)
         }
     });
-    assert!(outcome
-        .err()
-        .unwrap()
-        .to_string()
-        .contains("watch limit is exhausted"));
+    assert!(
+        outcome
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("watch limit is exhausted")
+    );
     assert_eq!(calls, 2);
     assert_eq!(
         unsafe { libc::fcntl(fd, libc::F_GETFD) },

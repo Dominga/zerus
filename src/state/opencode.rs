@@ -1078,11 +1078,24 @@ impl Inspector {
         }
     }
     fn listing(deadline: Instant) -> Self {
-        let mut value=Self::connect_without_io();
-        value.service=service::connect_within(deadline);value.deadline=Some(deadline);value.observe_only=true;value
+        let mut value = Self::connect_without_io();
+        value.service = service::connect_within(deadline);
+        value.deadline = Some(deadline);
+        value.observe_only = true;
+        value
     }
     fn connect_without_io() -> Self {
-        Self {service:Err(service::Unavailable::NotRunning),computer:None,active:None,migration:None,verdicts:None,verdicts_changed:false,cached_options:catalog::stopped_options,deadline:None,observe_only:true}
+        Self {
+            service: Err(service::Unavailable::NotRunning),
+            computer: None,
+            active: None,
+            migration: None,
+            verdicts: None,
+            verdicts_changed: false,
+            cached_options: catalog::stopped_options,
+            deadline: None,
+            observe_only: true,
+        }
     }
     fn row(&mut self, record: &Value, detail: Detail) -> Value {
         let mut row = self.view(record, detail);
@@ -1101,8 +1114,17 @@ impl Inspector {
             }
             Ok(service) => service,
         };
-        let bounded=Bounded {service,deadline:self.deadline.unwrap_or_else(||Instant::now()+Duration::from_secs(10))};
-        let native:&dyn Native=if self.deadline.is_some() {&bounded}else{service};
+        let bounded = Bounded {
+            service,
+            deadline: self
+                .deadline
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(10)),
+        };
+        let native: &dyn Native = if self.deadline.is_some() {
+            &bounded
+        } else {
+            service
+        };
         let key = verdict_key(record, &service.reg);
         let known = record["service"] != "opencode2"
             && self
@@ -1134,7 +1156,9 @@ impl Inspector {
                 return legacy_row(record);
             }
             Ok((Legacy::Adopted, _)) => {
-                if !self.observe_only {adopt_binding(string(record, "name"), string(record, "conversation_id"));}
+                if !self.observe_only {
+                    adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                }
                 modernize(&mut current);
             }
             Ok((Legacy::Current, _)) => {}
@@ -1215,16 +1239,46 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     Ok(rows)
 }
 /// Same row normalizer over bounded caller-supplied metadata, without inventories or adoption effects.
-pub(in crate::state) fn listing_records(records: &[Value], deadline: Instant) -> Result<Vec<Value>> {
-    if records.is_empty() {return Ok(Vec::new());}
-    let mut inspector=Inspector::listing(deadline);let preferences=notifications::load();let mut rows=Vec::new();
+pub(in crate::state) fn listing_records(
+    records: &[Value],
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut inspector = Inspector::listing(deadline);
+    let preferences = notifications::load();
+    let mut rows = Vec::new();
+    let mut bytes = 0;
     for record in records {
-        let mut row=inspector.row(record,Detail::Listing);
-        notifications::enrich(&mut row,preferences.as_ref(),journal::journal_name(record));
-        if let Some(map)=row.as_object_mut() {for key in ["events","voice_messages","attachment_messages","processes","model_options","model_options_truncated"] {map.remove(key);}}
+        let mut row = inspector.row(record, Detail::Listing);
+        notifications::enrich(
+            &mut row,
+            preferences.as_ref(),
+            journal::journal_name(record),
+        );
+        if let Some(map) = row.as_object_mut() {
+            for key in [
+                "events",
+                "voice_messages",
+                "attachment_messages",
+                "processes",
+                "model_options",
+                "model_options_truncated",
+            ] {
+                map.remove(key);
+            }
+        }
+        bytes += serde_json::to_vec(&row)
+            .map_err(|error| error.to_string())?
+            .len();
+        if bytes > 512 << 10 {
+            return Err("Native listing response budget exceeded; use a smaller page".into());
+        }
         rows.push(row);
     }
-    inspector.finish();Ok(rows)
+    inspector.finish();
+    Ok(rows)
 }
 
 fn checked_request(record: &Value) -> Result<Value> {

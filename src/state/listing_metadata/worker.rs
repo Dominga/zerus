@@ -110,6 +110,7 @@ pub(in crate::state) fn entry() -> Result<i32> {
             return Ok(0);
         }
         let mut work = None;
+        let mut reconciliation = reconcile::Reconcile::default();
         let mut last_state = String::new();
         loop {
             checked(root.verify())?;
@@ -125,7 +126,10 @@ pub(in crate::state) fn entry() -> Result<i32> {
             match background_at(&root.path, &mut work) {
                 Ok(stats) => {
                     anyhow::ensure!(
-                        stats.entries <= 256 && stats.rows <= 128 && stats.bytes <= 16 << 20,
+                        stats.entries <= 256
+                            && stats.rows <= 128
+                            && stats.bytes <= 16 << 20
+                            && stats.seed_bytes <= 512 << 10,
                         "Metadata worker step exceeded its bound"
                     );
                     let state = if stats.complete {
@@ -138,6 +142,11 @@ pub(in crate::state) fn entry() -> Result<i32> {
                     if last_state != state {
                         status(&root.path, state, "");
                         last_state = state.into();
+                    }
+                    if stats.complete {
+                        // This optional work owns no display transaction/gate.
+                        // Failure retains the canonical binding for later review.
+                        let _ = reconciliation.step(&root.path);
                     }
                     // A resident stream closes its gap before each new cut.
                     // Idle polling is fixed-size native metadata, never a census.

@@ -1,9 +1,10 @@
-//! Immutable observed generations. No production listing/watch call site yet.
+//! Immutable observed generations with a separate read-only listing view.
 use super::*;
 use serde::{Deserialize, Serialize};
 const ROWS: usize = 128;
 const BYTES: usize = 512 << 10;
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
     epoch: String,
     generation: i64,
@@ -48,7 +49,7 @@ impl Store {
             && repair::directories(self)? == dirs
             && repair::gap_stamp(self)? == gap;
         let after = cursor.map_or("", |c| c.after.as_str());
-        let mut statement=self.db.prepare_cached("SELECT source,CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT ?3")?;
+        let mut statement=self.db.prepare_cached("SELECT substr(source,1,257),CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots WHERE generation=?1 AND source>?2 ORDER BY source LIMIT ?3")?;
         let mut query = statement.query(params![generation, after, limit])?;
         let mut rows = Vec::new();
         let mut bytes = 0;
@@ -99,10 +100,10 @@ impl Store {
 
 /// The public reader surface intentionally exposes no reservation, settlement,
 /// recovery or canonical effect method.
-pub(super) struct Reader(Store);
+pub(super) struct Reader(Store, std::cell::Cell<usize>);
 impl Reader {
     pub fn open(root: &Path) -> anyhow::Result<Self> {
-        Ok(Self(Store::read(root)?))
+        Ok(Self(Store::read(root)?, std::cell::Cell::new(BYTES)))
     }
     pub fn page(&self, cursor: Option<&Cursor>) -> anyhow::Result<Page> {
         self.page_limit(cursor, ROWS)
@@ -132,15 +133,21 @@ impl Reader {
 }
 
 impl Reader {
-    pub fn parent(&self, link: &Value) -> anyhow::Result<Option<Value>> {
+    pub fn parent(&self, link: &Value) -> anyhow::Result<Option<(String, Value)>> {
         let generation: i64 =
             self.0
                 .db
                 .query_row("SELECT generation FROM meta WHERE id=1", [], |r| r.get(0))?;
         let (sql, key) = if !string(link, "session_id").is_empty() {
-            ("SELECT source,seed,stamp FROM snapshots INDEXED BY snapshots_session WHERE generation=?1 AND json_extract(seed,'$.record.session_id')=?2 LIMIT 3",string(link,"session_id"))
+            (
+                "SELECT substr(source,1,257),CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots INDEXED BY snapshots_session WHERE generation=?1 AND json_extract(seed,'$.record.session_id')=?2 LIMIT 3",
+                string(link, "session_id"),
+            )
         } else {
-            ("SELECT source,seed,stamp FROM snapshots INDEXED BY snapshots_conversation WHERE generation=?1 AND json_extract(seed,'$.record.conversation_id')=?2 LIMIT 3",string(link,"conversation_id"))
+            (
+                "SELECT substr(source,1,257),CASE WHEN length(CAST(seed AS BLOB))<=262144 THEN seed ELSE NULL END,substr(stamp,1,1025) FROM snapshots INDEXED BY snapshots_conversation WHERE generation=?1 AND json_extract(seed,'$.record.conversation_id')=?2 LIMIT 3",
+                string(link, "conversation_id"),
+            )
         };
         if key.is_empty() {
             return Ok(None);
@@ -162,13 +169,24 @@ impl Reader {
         let Some((source, seed, stamp)) = found.into_iter().next() else {
             return Ok(None);
         };
+        let bytes = source.len() + seed.len() + stamp.len();
+        anyhow::ensure!(
+            source.len() <= 256 && seed.len() <= model::SEED_BYTES && stamp.len() <= 1024,
+            "Invalid parent display row"
+        );
+        anyhow::ensure!(
+            bytes <= self.1.get(),
+            "Parent display query byte budget exceeded"
+        );
+        self.1.set(self.1.get() - bytes);
         let key = Key(source);
         anyhow::ensure!(
             self.0.source_stamp(&key)?.as_deref() == Some(stamp.as_str()),
             "Parent display source changed"
         );
-        let value = Seed::decode(&key, &seed)?;
-        Ok(Some(value["record"].clone()))
+        let mut value = Seed::decode(&key, &seed)?;
+        value["native_stamp"] = json!(stamp);
+        Ok(Some((key.0, value)))
     }
     pub fn generation(&self) -> anyhow::Result<i64> {
         Ok(self

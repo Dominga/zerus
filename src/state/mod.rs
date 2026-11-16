@@ -85,8 +85,15 @@ mod process_index;
 mod listing_metadata;
 pub(crate) use listing_metadata::control::MARKER as LISTING_METADATA_MARKER;
 pub(crate) use listing_metadata::listing::Query as ListingQuery;
-pub(crate) fn display_name(row: &Value) -> &str { string(row,"name") }
-pub(crate) fn merge_ordinary_listing(value: Value, ids: &BTreeMap<String,String>, archives: bool, query: &ListingQuery) -> Result<Value> {
+pub(crate) fn display_name(row: &Value) -> &str {
+    string(row, "name")
+}
+pub(crate) fn merge_ordinary_listing(
+    value: Value,
+    ids: &BTreeMap<String, String>,
+    archives: bool,
+    query: &ListingQuery,
+) -> Result<Value> {
     listing_metadata::listing::merge(value, ids, archives, query)
 }
 pub(crate) fn listing_index(args: &[String]) -> Result<Value> {
@@ -1542,7 +1549,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         return archive_catalog::worker();
     }
     if args.first().map(String::as_str) == Some("listing-metadata-worker") {
-        if args.len() != 1 { return Err("Unexpected listing metadata worker arguments".into()); }
+        if args.len() != 1 {
+            return Err("Unexpected listing metadata worker arguments".into());
+        }
         return listing_metadata::worker::entry();
     }
     if args.first().map(String::as_str) == Some("task-binding-index-worker") {

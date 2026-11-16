@@ -8613,6 +8613,37 @@ that machine's own listing, so their `host` is the name the machine gives itself
 alias; an unreachable peer's entry names the alias. Key a peer by the alias you
 asked for, as Zerus does; the local entry's `peers` lists those aliases.
 
+<a id="bounded-ordinary-listing"></a>
+
+Ordinary Linux listing has a per-computer display-index opt-in, off by default:
+`hgs listing-index enable --json`, `disable --json`, and `status --json`.
+Enable reports `building`; a coalesced background worker establishes coverage
+independently of automatic recovery policy. Status distinguishes disabled,
+building, ready and unavailable. macOS/Windows activation and desktop watch
+consumption are separate follow-ups; their existing paths remain in use.
+
+Without the opt-in, ordinary Linux `ls` accepts only a completely preflighted
+small inventory: at most 256 directory entries and 16 MiB of canonical record
+bodies, with 250-ms preflight/verification checks. Larger, changing or unsupported
+input refuses with a nonzero exit and no partial JSON. With the opt-in, an
+unready, stale or corrupt index also refuses; it never rescues a request by
+scanning full canonical records. Stable pages use the exact generation's native
+row versions and a separate read-only SQLite transaction. The legacy JSON body
+is complete or refused (64 MiB/10-second cooperative response bound).
+
+`hgs ls --json --local --paged --page-size 64` returns at most 128 rows and a
+512-KiB response; the archive preview and first-page untracked terminals are
+additional observations under that same byte ceiling. `listing_page` contains ABI
+`session-listing-metadata-v1`, `coverage: ready`, `generation`, `complete` and
+`next_cursor`. Continue with the exact opaque `--cursor`; an expired/replaced
+cut requires a fresh first page. Parent point reads share a 512-KiB query budget.
+Live/private/native-child overlays share a 16-file/16-MiB fresh canonical budget;
+use smaller pages when those observations exceed it. Unknown native state
+remains unknown. Display rows, stamps and tombstones grant no caller, lifecycle,
+confirmation, custody or cleanup authority. Automatic archive reconciliation
+uses bounded background candidates and fresh canonical process/run/archive
+checks; uncertain evidence retains the binding. Archive previews remain separate.
+
 A launch with `--launch-id` that no session or record of the snapshot carries, and
 whose session existed before the snapshot was taken, has ended: such launches
 appear newest first, at most 32, in `ended_launches`, as `{launch_id, name, code,

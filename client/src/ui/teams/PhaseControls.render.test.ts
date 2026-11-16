@@ -116,3 +116,29 @@ it("retains exact BASE and NEW identities while only the reserved correction mak
   button(f.node, "[data-phase-resume]").click(); await vi.waitFor(() => expect(f.run).toHaveBeenCalledTimes(1));
   expect(f.run.mock.calls[0][0].action.scope).toEqual(c.scope);
 });
+
+
+it.each(["stale_revision", "uncertain", "throw"])("keeps surrounding controls locked after closing a %s pause form", async (response) => {
+  const f = fixture();
+  if (response === "throw") f.run.mockRejectedValue(new Error("Lost original answer"));
+  else f.run.mockResolvedValue(response === "uncertain"
+    ? { outcome: "uncertain", request_id: "fixture-request", detail: "Lost original answer" }
+    : { outcome: "failed", request_id: "fixture-request", code: "stale_revision", detail: "Read again before a new request." });
+  button(f.node, "[data-phase-pause]").click(); reason(f.node, "Keep this original reason."); button(f.node, "[data-phase-control-submit]").click();
+  await vi.waitFor(() => expect(f.node.textContent).toContain(response === "stale_revision" ? "Read again before a new request." : "use Check"));
+  expect(button(f.node, "[data-phase-control-submit]").disabled).toBe(true);
+  const close = Array.from(f.node.querySelectorAll<HTMLButtonElement>("dialog button")).find((b) => b.textContent === "Close")!;
+  expect(() => close.click()).not.toThrow();
+  await vi.waitFor(() => expect(f.node.querySelector("dialog")).toBeNull());
+  for (const control of f.node.querySelectorAll<HTMLButtonElement>("button")) expect(control.disabled).toBe(true);
+  button(f.node, "[data-phase-barrier]").click(); button(f.node, "[data-phase-pause]").click();
+  expect(f.run).toHaveBeenCalledTimes(1);
+});
+
+it("keeps direct controls locked after a stale original instead of creating another request", async () => {
+  const f = fixture(); f.run.mockResolvedValue({ outcome: "failed", request_id: "fixture-request", code: "stale_revision", detail: "Read again before a new request." });
+  button(f.node, "[data-phase-barrier]").click();
+  await vi.waitFor(() => expect(f.node.textContent).toContain("Read again before a new request."));
+  for (const control of f.node.querySelectorAll<HTMLButtonElement>("button")) expect(control.disabled).toBe(true);
+  button(f.node, "[data-phase-barrier]").click(); expect(f.run).toHaveBeenCalledTimes(1);
+});

@@ -65,9 +65,12 @@ export function PhaseControls(props: { draft: PhaseDraft; view: TeamView; busy: 
   const enabled = (fact?: PhaseAvailability) => !!fact?.allowed && controls()?.version === 1 && !props.busy && !pending() && !locked() && !props.readFailed
     && !props.draft.unknown_fields && props.draft.complete && liveAvailable() && props.view.bar.revision === props.draft.revision && ["planning", "running", "paused"].includes(props.view.bar.status);
   const run = async (call: TeamCall) => {
-    const result = props.run ? await props.run(call) : await teams.run(call, "phase");
-    if (result.outcome === "done") props.onChanged?.();
-    return result;
+    try {
+      const result = props.run ? await props.run(call) : await teams.run(call, "phase");
+      if (result.outcome === "done") props.onChanged?.();
+      else if (result.outcome !== "failed" || result.code === "stale_revision") setLocked(true);
+      return result;
+    } catch (error) { setLocked(true); throw error; }
   };
   const open = (kind: Form["kind"], fact?: PhaseAvailability) => {
     const c = controls(); if (!c || !enabled(fact)) return;
@@ -95,6 +98,6 @@ export function PhaseControls(props: { draft: PhaseDraft; view: TeamView; busy: 
       <Show when={!c().unstarted.allowed}><p class="dim" role="status">{why(c().unstarted)}</p></Show>
     </>}</Show>
     <Show when={message()}><p class="notice danger" role="status">{message()}</p></Show>
-    <Show when={form()}>{(frozen) => <ControlForm form={frozen()} available={enabled(frozen().kind === "pause" ? controls()?.pause_change : controls()?.acceptance) && props.draft.revision === frozen().draft.revision && props.view.bar.id === frozen().team.id && JSON.stringify(controls()?.scope) === JSON.stringify(frozen().controls.scope)} close={() => setForm(null)} run={run} />}</Show>
+    <Show when={form()}>{(value) => { const frozen = value(); return <ControlForm form={frozen} available={enabled(frozen.kind === "pause" ? controls()?.pause_change : controls()?.acceptance) && props.draft.revision === frozen.draft.revision && props.view.bar.id === frozen.team.id && JSON.stringify(controls()?.scope) === JSON.stringify(frozen.controls.scope)} close={() => setForm(null)} run={run} />; }}</Show>
   </details>;
 }

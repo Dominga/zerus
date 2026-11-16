@@ -279,6 +279,12 @@ derives disabled control flags in Core while retaining the shared partial
 Layers display and validated owner/reason. Malformed control fields still
 refuse; no invalid value or historical identity is replaced.
 
+A stale response or an unknown original locks the surrounding controls as well
+as the active form, including after the form is closed. Closing only releases
+the immutable modal snapshot; it cannot create another request or discard the
+original Check route. The form snapshot is captured before reactive teardown,
+so closing it does not read an invalidated conditional accessor.
+
 The unchanged serialized Phase and frozen requests/snapshots remain readable by
 old engines. Real old Core reads of the additive reply must be tested: unknown
 fields may make actions read-only; no discard-and-enable fallback is allowed.

@@ -354,6 +354,13 @@ export function usageChipView(u: Usage, now: number, agent = ""): UsageChipView 
     if (b) return { kind: "balance", windows: [], balance: `${b.balance} ${b.currency}`, label: tr("Balance %1", `${b.balance} ${b.currency}`) };
     return { kind: "balance", windows: [], reason: stateText(u), label: tr("Balance unknown") };
   }
+  // A Qwen subscription reports its plan, never a remaining share: Qwen tells
+  // the credits only once they run out (owner, 2026-11-17).
+  if (provider === "qwen" && u.identity?.plan && !u.windows.length) {
+    const plan = u.identity.plan;
+    return { kind: "balance", windows: [], balance: `Qwen ${plan}`, reason: tr("Qwen reports the subscription's credits only once they run out."),
+      label: tr("Qwen subscription %1", plan) };
+  }
   const windows = windowsAt(u.windows, now).filter(current);
   // The weekly window is the 7-day one; failing that, the longest reported.
   const weekly = windows.find((w) => w.minutes === 10080)

@@ -994,6 +994,41 @@ fn retain_cached_identity(data: &mut Value, cached: &Value, current_signature: &
     }
 }
 
+/// The Qwen subscription's plan as Qwen names it: "lite", "plus" or "pro"
+/// read as "Lite", "Plus" or "Pro".
+fn qwen_plan(info: &Value) -> String {
+    let member = info["member_type"].as_str().unwrap_or_default().trim();
+    let mut chars = member.chars();
+    chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// Qwen's userinfo (`sub`, `name`, `email`, `member_type`) for the access token
+/// in `credentials`, only while it stays valid for another minute.
+fn qwen_user_info(credentials: &Value) -> Option<Value> {
+    use std::io::Read;
+    use ureq::tls::{RootCerts, TlsConfig};
+    let token = credentials["tokens"]["access_token"].as_str().filter(|token| !token.is_empty())?;
+    let expires = credentials["tokens"]["expiresAt"].as_f64()?;
+    if expires / 1000.0 <= now() as f64 + 60.0 {
+        return None;
+    }
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(15)))
+        .tls_config(TlsConfig::builder().root_certs(RootCerts::PlatformVerifier).build())
+        .build()
+        .new_agent();
+    let response = agent
+        .get("https://auth.qwen.ai/api/oauth/userinfo")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {token}"))
+        .call()
+        .ok()?;
+    let mut raw = Vec::new();
+    response.into_body().into_reader().take(64 * 1024).read_to_end(&mut raw).ok()?;
+    let info: Value = serde_json::from_slice(&raw).ok()?;
+    info["member_type"].as_str().is_some().then_some(info)
+}
+
 /// Qwen Code has no quota read: an account is configured when it has Qwen
 /// OAuth credentials or its settings choose a provider; a model server's
 /// account shows the server's speed instead (`gateway`).
@@ -1004,6 +1039,29 @@ fn qwen(home: &Path) -> Value {
     let method = settings["security"]["auth"]["selectedType"].as_str().filter(|kind| !kind.is_empty())
         .map(str::to_owned)
         .or_else(|| home.join("oauth_creds.json").is_file().then(|| "qwen-oauth".to_owned()));
+    // The Qwen subscription (chat.qwen.ai Lite/Plus/Pro): its plan and owner
+    // from Qwen's own userinfo, read with the unexpired access token Qwen Code
+    // keeps. Zerus never refreshes that token itself: a refresh rotates the
+    // grant under Qwen Code's lock, and a second writer signs it out
+    // ("session_changed"). Qwen reports no remaining quota until it runs out.
+    if method.as_deref() == Some("qwen-subscription") {
+        let credentials = read_json(&home.join("subscription_credentials.json"));
+        let mut identity = json!({"auth_method":"Qwen Subscription"});
+        let mut result = json!({"status":"configured","source":"Qwen Code","identity":{},"windows":[],
+            "reason":"Qwen reports the subscription's credits only once they run out"});
+        if let Some(info) = qwen_user_info(&credentials) {
+            for (field, value) in [("plan", qwen_plan(&info)), ("email", info["email"].as_str().unwrap_or_default().to_owned()),
+                ("name", info["name"].as_str().unwrap_or_default().to_owned())] {
+                if !value.is_empty() { identity[field] = json!(value); }
+            }
+            result["auth_status"] = json!("signed_in");
+        } else if credentials["tokens"]["access_token"].as_str().is_none_or(str::is_empty) {
+            return json!({"status":"signed_out","auth_status":"signed_out","source":"Qwen Code","identity":{},"windows":[],
+                "reason":"Sign in to the Qwen subscription in Qwen Code (/auth)"});
+        }
+        result["identity"] = identity;
+        return result;
+    }
     match method {
         Some(method) => json!({"status":"configured","source":"Qwen Code","identity":{"auth_method":method},"windows":[],
             "reason":"Qwen Code reports no quota; an account on a model server shows its speed"}),

@@ -89,6 +89,18 @@ fn readable(path: &Path) -> bool {
     path.is_file() && std::fs::File::open(path).is_ok()
 }
 impl SessionFiles {
+    /// How `computer`'s paths read: this computer's own style, a Windows
+    /// peer's Windows paths (its metrics name the platform), else POSIX.
+    /// WhiteWh fork (owner, 2026-11-17): a Windows peer's pictures were read
+    /// as POSIX paths and every tile said "The file reference is invalid."
+    pub(super) fn path_style(&self, computer: &str) -> Style {
+        if computer.is_empty() {
+            return paths::build();
+        }
+        let pump = self.app.state::<crate::commands::AppState>().pump();
+        let platform = pump.machine(&ComputerId(computer.to_owned())).and_then(|machine| machine.platform);
+        if platform.as_deref() == Some("windows") { Style::Windows } else { Style::Posix }
+    }
     pub fn new(
         app: AppHandle,
         dir: PathBuf,
@@ -206,7 +218,7 @@ impl SessionFiles {
     ) -> Result<SessionFileView, String> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let remote = !computer.is_empty();
-        let style = if remote { Style::Posix } else { paths::build() };
+        let style = self.path_style(&computer);
         let target = session_file_reference::parse(&href, style);
         let home = self.app.path().home_dir().ok();
         let mut resolved = session_file_reference::resolve(

@@ -113,7 +113,7 @@ impl SessionFiles {
         open: bool,
     ) -> MediaAnswer {
         let remote = !computer.is_empty();
-        let style = if remote { Style::Posix } else { paths::build() };
+        let style = self.path_style(&computer);
         let target = session_file_reference::parse(&href, style);
         let shown = kind(&target.path);
         let name = download_cache::filename(&target.path);

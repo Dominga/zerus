@@ -15,6 +15,12 @@ function usage(provider: string, windows: ProjectedWindow[], extra: Partial<Usag
 }
 
 describe("the composer's usage chip (task #351)", () => {
+  it("names a Qwen subscription's plan, which reports no remaining share", () => {
+    const qwen = usage("qwen", [], { status: "configured", identity: { ...emptyUsage("qwen").identity, plan: "Plus", auth_method: "Qwen Subscription" } });
+    expect(usageChipView(qwen, NOW, "qwen")).toMatchObject({ kind: "balance", balance: "Qwen Plus", label: "Qwen subscription Plus" });
+    expect(usageChipView(usage("qwen", []), NOW, "qwen").kind).toBe("windows");
+  });
+
   it("draws Claude's two bars, its weekly percent and the days to the weekly reset", () => {
     const claude = usage("claude", [window("five_hour", 300, 34, 120), window("seven_day", 10080, 73, 3 * 1440 + 4 * 60)]);
     const view = usageChipView(claude, NOW, "claude");

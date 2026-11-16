@@ -1172,6 +1172,8 @@
   "Balance too low for API calls": "Баланса не хватает для вызовов API",
   "Balance %1": "Баланс %1",
   "Balance unknown": "Баланс неизвестен",
+  "Qwen subscription %1": "Подписка Qwen %1",
+  "Qwen reports the subscription's credits only once they run out.": "Qwen сообщает о кредитах подписки, только когда они заканчиваются.",
   "Balance: %1 %2": "Баланс: %1 %2",
   "Bare repository": "Репозиторий без рабочей копии",
   "Barrier": "Барьер",

@@ -151,7 +151,7 @@ fn finite_sequence_lookahead_precedes_window_filter_even_for_a_long_unit_stream(
     for n in 0..1200 {
         append(&mut h, &read, 1_700_000_000_000 + n * 60_001);
     }
-    // The indexed 201-row sample uses about 4,400 VM instructions. Keep
+    // The indexed 201-row sample uses about 5,000 VM instructions. Keep
     // substantial fixed-query headroom, but not a full 1,200-row history walk.
     const VM_BUDGET: usize = 8_000;
     let work = Arc::new(AtomicUsize::new(0));
@@ -168,12 +168,10 @@ fn finite_sequence_lookahead_precedes_window_filter_even_for_a_long_unit_stream(
         .as_ref()
         .unwrap()
         .progress_handler(0, None::<fn() -> bool>);
+    let used = work.load(Ordering::Relaxed);
+    eprintln!("finite sequence window read: SQLite instructions approximately {used}");
+    assert!(used <= VM_BUDGET + 100, "bounded indexed lookahead exceeded its VM budget");
     let page = result.unwrap();
-    eprintln!(
-        "finite sequence window read: SQLite instructions approximately {}",
-        work.load(Ordering::Relaxed)
-    );
-    assert!(work.load(Ordering::Relaxed) <= VM_BUDGET + 100);
     assert_eq!(page.rows.len(), 1);
     assert!(page.more && page.truncated);
 }

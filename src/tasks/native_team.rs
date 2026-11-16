@@ -6,15 +6,8 @@ use zerus_team_plan::{problem::code, Problem};
 type NativeResult<T> = std::result::Result<T, Problem>;
 
 pub(crate) fn project_name(config: &Config, id: &str) -> NativeResult<String> {
-    let (canonical, name) =
-        project(config, id).map_err(|error| Problem::new(code::INVALID_STATE, error.message))?;
-    if canonical != id {
-        return Err(Problem::new(
-            code::INVALID_STATE,
-            "Choose the project's exact catalog identity.",
-        ));
-    }
-    Ok(name)
+    crate::swarm::existing_project_name(config, id)
+        .map_err(|error| Problem::new(code::INVALID_STATE, error.to_string()))
 }
 
 /// Called only after the native original has a durable Unknown reservation.

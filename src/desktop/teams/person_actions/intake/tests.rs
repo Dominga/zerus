@@ -490,3 +490,34 @@ fn native_intake_stale_team_records_a_closed_no_task_refusal_without_granting_cu
         Some(result["reply"].clone())
     );
 }
+
+#[test]
+fn native_intake_project_resolution_never_waits_for_the_catalog_writer_or_writes_it() {
+    let (_h, config, _scope) = sample();
+    let catalog = config.dir.join("swarm/catalog.json");
+    let before = std::fs::read(&catalog).unwrap();
+    let held = crate::swarm::lock_catalog_for_tests(&config);
+    let (entered, started) = std::sync::mpsc::channel();
+    let (result, answer) = std::sync::mpsc::channel();
+    let reader = config.clone();
+    let worker = std::thread::spawn(move || {
+        entered.send(()).unwrap();
+        result
+            .send(crate::tasks::native_team::project_name(
+                &reader,
+                "example-project",
+            ))
+            .unwrap();
+    });
+    started.recv().unwrap();
+    // The watchdog releases our own lock even for the blocking mutant. The
+    // assertion is exclusion-independent progress, not elapsed time.
+    let ready = answer.recv_timeout(Duration::from_secs(5));
+    drop(held);
+    worker.join().unwrap();
+    let name = ready
+        .expect("the read must settle while the catalog writer is still held")
+        .unwrap();
+    assert_eq!(name, "example");
+    assert_eq!(std::fs::read(catalog).unwrap(), before);
+}

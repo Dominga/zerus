@@ -68,12 +68,16 @@ import ZerusReplica
     }
     func testForeignContextCannotCreateDraft() async throws {
         try await fixture { replicas, files, context in
-            let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data() }, remove: { _, _ in },
-                                              upload: { _, _ in true }, changed: { _, _ in XCTFail("foreign completion") }, text: { $0 })
-            let proposed = TaskContentDraft.new(ProjectKey(connectionId: "foreign", swarmId: key.swarmId, id: key.id), computer: "computer", machine: "native-machine", stage: .todo, target: .anySession)
-            model.open(context, proposed: proposed)
-            try await wait(model, "foreign draft refused") { !$0.loading && !$0.error.isEmpty }
-            XCTAssertNil(try files.read(proposed.scope, isNew: true))
+            for foreign in [ProjectKey(connectionId: "foreign", swarmId: key.swarmId, id: key.id),
+                            ProjectKey(connectionId: key.connectionId, swarmId: "foreign", id: key.id),
+                            ProjectKey(connectionId: key.connectionId, swarmId: key.swarmId, id: "foreign")] {
+                let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data() }, remove: { _, _ in },
+                                                  upload: { _, _ in true }, changed: { _, _ in XCTFail("foreign completion") }, text: { $0 })
+                let proposed = TaskContentDraft.new(foreign, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession)
+                model.open(context, proposed: proposed)
+                try await wait(model, "foreign draft refused") { !$0.loading && !$0.error.isEmpty }
+                XCTAssertNil(try files.read(proposed.scope, isNew: true))
+            }
         }
     }
 

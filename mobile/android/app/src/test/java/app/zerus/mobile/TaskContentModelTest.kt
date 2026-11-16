@@ -73,12 +73,14 @@ class TaskContentModelTest {
     @Test fun foreignContextCannotCreateOrOverwriteAnOriginalDraft() = runBlocking {
         val owner = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
         val files = TaskContentDraftFiles(folders.newFolder(), { secret })
-        val model = TaskContentModel({ "message:$it" }, owner, TaskReplicas(folders.newFolder()), files,
-            read = { byteArrayOf() }, remove = { _, _ -> }, upload = { _, _ -> true }, changed = { _, _ -> fail("foreign completion") })
         try {
-            val draft = TaskContentDraft.new(key.copy(id = "foreign"), "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession)
-            model.open(context, draft); await(model, "foreign draft refused") { !it.loading && it.error.isNotEmpty() }
-            assertNull(files.read(draft.scope, true))
+            for (foreign in listOf(key.copy(connectionId = "foreign"), key.copy(swarmId = "foreign"), key.copy(id = "foreign"))) {
+                val model = TaskContentModel({ "message:$it" }, owner, TaskReplicas(folders.newFolder()), files,
+                    read = { byteArrayOf() }, remove = { _, _ -> }, upload = { _, _ -> true }, changed = { _, _ -> fail("foreign completion") })
+                val draft = TaskContentDraft.new(foreign, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession)
+                model.open(context, draft); await(model, "foreign draft refused") { !it.loading && it.error.isNotEmpty() }
+                assertNull(files.read(draft.scope, true))
+            }
         } finally { owner.cancel() }
     }
 

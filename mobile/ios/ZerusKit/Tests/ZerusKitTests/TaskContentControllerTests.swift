@@ -16,7 +16,7 @@ import ZerusReplica
         defer { try? FileManager.default.removeItem(at: root) }
         let replicas = try TaskReplicas(root: root.appendingPathComponent("replicas"))
         let files = TaskContentDraftFiles(directory: root.appendingPathComponent("drafts"), keys: StaticKeyProvider(SymmetricKey(size: .bits256)), syncDirectory: {})
-        let context = TaskContentContext(connection: Connection(id: key.connectionId, label: "Fixture", url: "https://relay.example.test", token: "private"), key: key, projectName: "Fixture", computer: Machine(connectionId: key.connectionId, id: "computer", name: "Fixture", online: true))
+        let context = TaskContentContext(connection: Connection(id: key.connectionId, label: "Fixture", url: "https://relay.example.test", token: "private"), key: key, projectName: "Fixture", computer: Machine(connectionId: key.connectionId, id: "computer", name: "Fixture", online: true, machineId: "native-machine"))
         try await body(replicas, files, context)
     }
     func testProjectSwitchLatePickerAndExactOriginalCompletion() async throws {
@@ -24,7 +24,7 @@ import ZerusReplica
             var completions: [(ProjectKey, String)] = []
             let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data([0, 255]) }, remove: { _, _ in },
                                               upload: { _, _ in true }, changed: { completions.append(($0.key, $1)) }, text: { $0 })
-            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Original project"))
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession, text: "Original project"))
             try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
             var ticket: TaskContentPicker?
             model.preparePicker(model.state!.id) { ticket = $0 }
@@ -35,7 +35,7 @@ import ZerusReplica
             var repeated = 0
             model.picked(ticket!, imports: [{ _ in repeated += 1; return file }]); XCTAssertEqual(repeated, 0)
             let foreign = ProjectKey(connectionId: "foreign", swarmId: "other", id: "other")
-            model.open(context, proposed: TaskContentDraft.new(foreign, computer: "computer", stage: .todo, target: .anySession))
+            model.open(context, proposed: TaskContentDraft.new(foreign, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession))
             XCTAssertEqual(model.state?.draft?.scope.project, key.id)
             model.save(model.state!.id)
             try await wait(model, "original save") { $0.complete }
@@ -51,7 +51,7 @@ import ZerusReplica
             var upload = false, opened = 0, completed = 0
             let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data([1]) }, remove: { _, _ in },
                                               upload: { _, _ in upload }, changed: { _, _ in completed += 1 }, text: { $0 })
-            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Kept"))
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession, text: "Kept"))
             try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
             let id = model.state!.id
             model.preparePicker(id) { _ in opened += 1 }; XCTAssertEqual(opened, 0); XCTAssertEqual(model.state?.busy, false)
@@ -70,7 +70,7 @@ import ZerusReplica
         try await fixture { replicas, files, context in
             let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data() }, remove: { _, _ in },
                                               upload: { _, _ in true }, changed: { _, _ in XCTFail("foreign completion") }, text: { $0 })
-            let proposed = TaskContentDraft.new(ProjectKey(connectionId: "foreign", swarmId: key.swarmId, id: key.id), computer: "computer", stage: .todo, target: .anySession)
+            let proposed = TaskContentDraft.new(ProjectKey(connectionId: "foreign", swarmId: key.swarmId, id: key.id), computer: "computer", machine: "native-machine", stage: .todo, target: .anySession)
             model.open(context, proposed: proposed)
             try await wait(model, "foreign draft refused") { !$0.loading && !$0.error.isEmpty }
             XCTAssertNil(try files.read(proposed.scope, isNew: true))
@@ -82,7 +82,7 @@ import ZerusReplica
             let removed = ContentRemovedFiles()
             let model = TaskContentController(replicas: replicas, files: files, read: { _ in Data([1]) }, remove: { id, _ in await removed.append(id) },
                                               upload: { _, _ in true }, changed: { _, _ in XCTFail("no save requested") }, text: { $0 })
-            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Kept"))
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession, text: "Kept"))
             try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
             let id = model.state!.id; var first: TaskContentPicker?
             model.preparePicker(id) { first = $0 }; try await wait(model, "first picker") { _ in first != nil }
@@ -104,7 +104,7 @@ import ZerusReplica
             let capability = ContentCapabilityGate(); var completed = 0
             let model = TaskContentController(replicas: replicas, files: files, read: { _ in capability.disable(); return Data([1]) }, remove: { _, _ in },
                                               upload: { _, _ in capability.available }, changed: { _, _ in completed += 1 }, text: { $0 })
-            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", stage: .todo, target: .anySession, text: "Kept"))
+            model.open(context, proposed: TaskContentDraft.new(key, computer: "computer", machine: "native-machine", stage: .todo, target: .anySession, text: "Kept"))
             try await wait(model, "draft open") { !$0.loading && $0.draft != nil }
             let id = model.state!.id; var ticket: TaskContentPicker?
             model.preparePicker(id) { ticket = $0 }; try await wait(model, "picker open") { _ in ticket != nil }

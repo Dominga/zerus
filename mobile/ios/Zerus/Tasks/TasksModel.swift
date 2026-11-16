@@ -95,7 +95,7 @@ final class TasksModel {
     func openTaskContent(_ key: ProjectKey, _ task: TaskInfo) {
         guard tasksKey == key, task.writable, task.schema <= 2, [.todo, .backlog].contains(task.stage),
               let context = contentContext(key, task.target) else { return }
-        openContent(context, TaskContentDraft.existing(key, computer: context.computer.id, task: task))
+        openContent(context, TaskContentDraft.existing(key, computer: context.computer.id, machine: context.computer.machineId, task: task))
     }
     func newTaskContent() {
         guard let key = tasksKey, let chosen = tasksChosen else { return }
@@ -104,7 +104,7 @@ final class TasksModel {
         let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId))
         guard let context = contentContext(key, target) else { return }
         guard contentUpload(context, target) else { taskNotice = taskEditText("task_content_upload"); return }
-        openContent(context, TaskContentDraft.new(key, computer: context.computer.id, stage: taskTab == .backlog ? .backlog : .todo, target: target))
+        openContent(context, TaskContentDraft.new(key, computer: context.computer.id, machine: context.computer.machineId, stage: taskTab == .backlog ? .backlog : .todo, target: target))
     }
     func contentTargetLabel(_ state: TaskContentState) -> String {
         guard let form = state.draft?.form, case .session(let session) = form.target ?? form.originalTarget else { return taskEditText("task_edit_any") }

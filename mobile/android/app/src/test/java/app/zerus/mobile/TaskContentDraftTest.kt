@@ -12,7 +12,7 @@ class TaskContentDraftTest {
     private fun store() = TaskStore(folders.newFolder().path, key.id, "Fixture")
     @Test fun staleBodyCannotOverwriteNewContentAndKeepsTheOriginalDraft() = store().use { store ->
         val task = store.add("Original", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End)
-        val draft = TaskContentDraft.existing(key, "computer", task).let { it.copy(form = it.form.copy(text = "Private draft")) }
+        val draft = TaskContentDraft.existing(key, "computer", "native-machine", task).let { it.copy(form = it.form.copy(text = "Private draft")) }
         store.editText(task.uuid, "Concurrent change")
         assertTrue(runCatching { draft.apply(store, emptyList()) }.isFailure)
         assertEquals("Concurrent change", store.get(task.uuid).text)
@@ -21,7 +21,7 @@ class TaskContentDraftTest {
     @Test fun retainedTokensAndNewBytesAreAppliedWithoutLosingConcurrentHistory() = store().use { store ->
         val task = store.addWithMedia("Original", TaskStage.TODO, TaskTarget.AnySession, TaskPosition.End,
             listOf(TaskMediaInput("first.txt", "text/plain", byteArrayOf(1))))
-        val draft = TaskContentDraft.existing(key, "computer", task).let { it.copy(form = it.form.copy(text = "Reviewed", kept = emptyList())) }
+        val draft = TaskContentDraft.existing(key, "computer", "native-machine", task).let { it.copy(form = it.form.copy(text = "Reviewed", kept = emptyList())) }
         store.comment(task.uuid, "Unrelated arrival")
         val bytes = byteArrayOf(0, -1, 13, 10)
         val saved = draft.apply(store, listOf(TaskMediaInput("new.txt", "text/plain", bytes)))
@@ -31,7 +31,7 @@ class TaskContentDraftTest {
     }
 
     @Test fun pickerRequiresWholeOriginalDraftAndFreshToken() {
-        val draft = TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession)
+        val draft = TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession)
         val ticket = TaskContentPicker(draft = draft)
         assertTrue(ticket.matches(draft)); assertNotEquals(ticket.token, TaskContentPicker(draft = draft).token)
         assertFalse(ticket.matches(draft.copy(form = draft.form.copy(sequence = 1))))
@@ -47,7 +47,7 @@ class TaskContentDraftTest {
         TaskContentDraftFiles(root, { secret }, maxEntries = entries, syncDirectory = sync)
     @Test fun applyingSurvivesRestartAndCannotBeRecreatedReleasedOrEdited() {
         val root = folders.newFolder(); val files = drafts(root)
-        val draft = files.create(TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+        val draft = files.create(TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
         val held = files.begin(draft)
         assertEquals(held, drafts(root).read(draft.scope, true))
         assertTrue(runCatching { files.create(draft) }.isFailure)
@@ -59,7 +59,7 @@ class TaskContentDraftTest {
     }
     @Test fun monotonicCheckpointAndQuotaKeepPreviousBytes() {
         val root = folders.newFolder(); val files = drafts(root, entries = 1)
-        val draft = files.create(TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession))
+        val draft = files.create(TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession))
         val next = files.checkpoint(draft, 4, draft.form.copy(text = "Latest").json())
         assertTrue(runCatching { files.checkpoint(draft, 3, draft.form.json()) }.isFailure)
         assertTrue(runCatching { files.checkpoint(draft, 4, draft.form.json()) }.isFailure)
@@ -68,7 +68,7 @@ class TaskContentDraftTest {
     }
     @Test fun failedFsyncIsVisibleAndNeverAuthorizesAnApply() {
         val root = folders.newFolder(); val normal = drafts(root)
-        val draft = normal.create(TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession))
+        val draft = normal.create(TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession))
         assertTrue(runCatching { drafts(root, sync = { error("forced private sync refusal") }).begin(draft) }.isFailure)
         assertEquals(TaskContentDraft.State.Applying, normal.read(draft.scope, true)?.state)
         assertTrue(runCatching { normal.begin(draft) }.isFailure)

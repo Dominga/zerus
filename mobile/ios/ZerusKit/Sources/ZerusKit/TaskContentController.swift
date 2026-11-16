@@ -42,7 +42,7 @@ private struct TaskContentHeld: Error {}
                 try proposed.validate()
                 guard proposed.scope.connectionId == context.key.connectionId, proposed.scope.swarmId == context.key.swarmId,
                       proposed.scope.project == context.key.id, context.connection.id == context.key.connectionId,
-                      context.computer.connectionId == context.key.connectionId, proposed.computer == context.computer.id else { throw ZerusError.invalid(text("task_content_stale")) }
+                      context.computer.connectionId == context.key.connectionId, proposed.computer == context.computer.id, proposed.machine == context.computer.machineId else { throw ZerusError.invalid(text("task_content_stale")) }
                 let files = files
                 let draft = try await replicas.run {
                     let previous = try files.read(proposed.scope, isNew: proposed.isNew)
@@ -50,7 +50,7 @@ private struct TaskContentHeld: Error {}
                     return try previous.flatMap { $0.state == .completed ? nil : $0 } ?? files.create(proposed)
                 }
                 guard state?.id == id else { return }
-                let held = draft.state != .editing || draft.computer != context.computer.id
+                let held = draft.state != .editing || draft.computer != context.computer.id || draft.machine != context.computer.machineId
                 if !held {
                     checkpoints = TaskEditCheckpoints(write: { [replicas] value in
                         _ = try await replicas.run { try files.checkpoint(draft, sequence: value.sequence, changes: value.changes) }

@@ -1006,7 +1006,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     internal fun openTaskContent(key: ProjectKey, task: TaskInfo) {
         if (tasksKey != key || !task.writable || task.schema > 2 || task.stage !in setOf(TaskStage.TODO, TaskStage.BACKLOG)) return
         val context = taskContentContext(key, task.target) ?: run { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }
-        taskContent.open(context, TaskContentDraft.existing(key, context.computer.id, task))
+        taskContent.open(context, TaskContentDraft.existing(key, context.computer.id, context.computer.machineId, task))
     }
     internal fun newTaskContent() {
         val key = tasksKey ?: return
@@ -1015,7 +1015,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
         val context = taskContentContext(key, target) ?: return
         if (!taskContentUpload(context, target)) { taskNotice = getApplication<Application>().getString(R.string.task_content_upload); return }
-        taskContent.open(context, TaskContentDraft.new(key, context.computer.id,
+        taskContent.open(context, TaskContentDraft.new(key, context.computer.id, context.computer.machineId,
             if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO, target))
     }
     internal fun taskContentTargetLabel(state: TaskContentState): String {

@@ -35,14 +35,14 @@ internal class TaskContentModel(private val text: (Int) -> String, private val s
                 proposed.validate()
                 check(proposed.scope.connectionId == context.key.connectionId && proposed.scope.swarmId == context.key.swarmId &&
                     proposed.scope.project == context.key.id && context.connection.id == context.key.connectionId &&
-                    context.computer.connectionId == context.key.connectionId && proposed.computer == context.computer.id) { text(R.string.task_content_stale) }
+                    context.computer.connectionId == context.key.connectionId && proposed.computer == context.computer.id && proposed.machine == context.computer.machineId) { text(R.string.task_content_stale) }
                 val draft = withContext(Dispatchers.IO) {
                     val saved = files.read(proposed.scope, proposed.isNew)
                     if (saved?.state == TaskContentDraft.State.Completed) files.release(saved)
                     saved?.takeUnless { it.state == TaskContentDraft.State.Completed } ?: files.create(proposed)
                 }
                 if (state?.token != token) return@launch
-                val held = draft.state != TaskContentDraft.State.Editing || draft.computer != context.computer.id
+                val held = draft.state != TaskContentDraft.State.Editing || draft.computer != context.computer.id || draft.machine != context.computer.machineId
                 if (!held) checkpoints = TaskEditCheckpoints(scope, write = { value ->
                     withContext(Dispatchers.IO) { files.checkpoint(draft, value.sequence, value.changes) }
                 }, failed = { _, _ -> if (state?.token == token) report(token, text(R.string.task_edit_storage_failed)) })

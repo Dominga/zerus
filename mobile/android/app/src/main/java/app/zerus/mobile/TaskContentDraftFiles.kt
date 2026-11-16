@@ -46,7 +46,7 @@ internal class TaskContentDraftFiles(private val root: File, private val key: ()
         Files.delete(file(value.scope, value.isNew).toPath()); syncDirectory()
     }
     private fun original(value: TaskContentDraft) = checkNotNull(read(value.scope, value.isNew)).also {
-        check(it.id == value.id && it.computer == value.computer && it.revision == value.revision && it.stage == value.stage)
+        check(it.id == value.id && it.computer == value.computer && it.machine == value.machine && it.revision == value.revision && it.stage == value.stage)
     }
     fun read(scope: TaskEditDraftScope, isNew: Boolean): TaskContentDraft? = synchronized(LOCK) {
         scope.validate()

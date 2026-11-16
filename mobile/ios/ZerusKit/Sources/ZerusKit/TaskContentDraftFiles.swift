@@ -55,7 +55,7 @@ public final class TaskContentDraftFiles: @unchecked Sendable {
     } }
     private func original(_ value: TaskContentDraft) throws -> TaskContentDraft {
         guard let previous = try read(value.scope, isNew: value.isNew) else { throw draftError() }
-        try draftRequire(previous.id == value.id && previous.computer == value.computer && previous.revision == value.revision && previous.stage == value.stage)
+        try draftRequire(previous.id == value.id && previous.computer == value.computer && previous.machine == value.machine && previous.revision == value.revision && previous.stage == value.stage)
         return previous
     }
     public func read(_ scope: TaskEditDraftScope, isNew: Bool) throws -> TaskContentDraft? { try locked {

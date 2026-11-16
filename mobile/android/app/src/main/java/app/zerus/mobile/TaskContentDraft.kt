@@ -12,7 +12,7 @@ import org.json.JSONObject
 
 /** Local legacy composition, separate from qualified native edit handles and request journals. */
 internal data class TaskContentDraft(
-    val scope: TaskEditDraftScope, val id: String, val computer: String, val revision: String?,
+    val scope: TaskEditDraftScope, val id: String, val computer: String, val machine: String, val revision: String?,
     val stage: TaskStage, val form: TaskEditForm, val state: State = State.Editing,
 ) {
     enum class State { Editing, Applying, Completed }
@@ -25,7 +25,7 @@ internal data class TaskContentDraft(
     }
     fun validate() {
         scope.validate(); check(UUID.fromString(id).toString() == id)
-        check(computer.isNotEmpty() && computer.toByteArray().size <= 512 && computer.none(Char::isISOControl))
+        check(listOf(computer, machine).all { it.isNotEmpty() && it.toByteArray().size <= 512 && it.none(Char::isISOControl) })
         check(stage in setOf(TaskStage.TODO, TaskStage.BACKLOG) && form.sequence >= 0 && revision != "")
         check(form.title.isEmpty() && form.rank == null && form.comment.isEmpty() && form.commentFiles.isEmpty())
         check(form.kept.size + form.files.size <= 8 && form.kept.map { it.token }.distinct().size == form.kept.size)
@@ -33,27 +33,27 @@ internal data class TaskContentDraft(
         check(form.kept.sumOf { it.size.toLong() } + AttachmentPolicy.selection(form.files) <= AttachmentPolicy.MAX_TOTAL_BYTES)
         check(!isNew || scope.task == NEW_SLOT && form.kept.isEmpty())
     }
-    fun json() = JSONObject().put("version", 1).put("scope", scope.json()).put("id", id).put("computer", computer)
+    fun json() = JSONObject().put("version", 1).put("scope", scope.json()).put("id", id).put("computer", computer).put("machine", machine)
         .put("revision", revision ?: JSONObject.NULL).put("stage", stage.name).put("form", form.json())
         .put("sequence", form.sequence).put("state", state.name)
     companion object {
         const val NEW_SLOT = "00000000-0000-0000-0000-000000000000"
         fun parse(value: JSONObject): TaskContentDraft {
-            WorkspaceProtocol.exactFields(value, setOf("version", "scope", "id", "computer", "revision", "stage", "form", "sequence", "state"))
+            WorkspaceProtocol.exactFields(value, setOf("version", "scope", "id", "computer", "machine", "revision", "stage", "form", "sequence", "state"))
             check(WorkspaceProtocol.number(value, "version") == 1L)
             return TaskContentDraft(TaskEditDraftScope.parse(value.getJSONObject("scope")), WorkspaceProtocol.string(value, "id"),
-                WorkspaceProtocol.string(value, "computer"), if (value.isNull("revision")) null else WorkspaceProtocol.string(value, "revision"),
+                WorkspaceProtocol.string(value, "computer"), WorkspaceProtocol.string(value, "machine"), if (value.isNull("revision")) null else WorkspaceProtocol.string(value, "revision"),
                 TaskStage.valueOf(WorkspaceProtocol.string(value, "stage")), TaskEditForm.read(WorkspaceProtocol.string(value, "form"),
                     WorkspaceProtocol.number(value, "sequence")), State.valueOf(WorkspaceProtocol.string(value, "state"))).also { it.validate() }
         }
 
-        fun existing(key: ProjectKey, computer: String, task: TaskInfo) = TaskContentDraft(
-            TaskEditDraftScope(key.connectionId, key.swarmId, key.id, task.uuid), UUID.randomUUID().toString(), computer,
+        fun existing(key: ProjectKey, computer: String, machine: String, task: TaskInfo) = TaskContentDraft(
+            TaskEditDraftScope(key.connectionId, key.swarmId, key.id, task.uuid), UUID.randomUUID().toString(), computer, machine,
             task.contentRevision, task.stage,
             TaskEditForm.initial(TaskEditView(key.id, task.uuid, "", task.text, task.target, task.rank, task.attachments)))
-        fun new(key: ProjectKey, computer: String, stage: TaskStage, target: TaskTarget, text: String = ""): TaskContentDraft {
+        fun new(key: ProjectKey, computer: String, machine: String, stage: TaskStage, target: TaskTarget, text: String = ""): TaskContentDraft {
             val id = UUID.randomUUID().toString()
-            return TaskContentDraft(TaskEditDraftScope(key.connectionId, key.swarmId, key.id, NEW_SLOT), id, computer, null, stage,
+            return TaskContentDraft(TaskEditDraftScope(key.connectionId, key.swarmId, key.id, NEW_SLOT), id, computer, machine, null, stage,
                 TaskEditForm.initial(TaskEditView(key.id, NEW_SLOT, "", text, target, "", emptyList())))
         }
     }

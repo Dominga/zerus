@@ -13,7 +13,7 @@ class TaskContentModelTest {
     @get:Rule val folders = TemporaryFolder()
     private val key = ProjectKey("connection", "swarm", "project")
     private val connection = Connection("connection", "Fixture", "https://relay.example.test", "private")
-    private val context = TaskEditContext(connection, key, "Fixture", Machine("connection", "computer", "Fixture", true), emptyMap())
+    private val context = TaskEditContext(connection, key, "Fixture", Machine("connection", "computer", "Fixture", true, machineId = "native-machine"), emptyMap())
     private val secret = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
     private suspend fun await(model: TaskContentModel, description: String, predicate: (TaskContentState) -> Boolean) {
         val ended = withTimeoutOrNull(10_000) { while (model.state?.let(predicate) != true) delay(5); true }
@@ -27,7 +27,7 @@ class TaskContentModelTest {
         val model = TaskContentModel({ "message:$it" }, owner, replicas, files, read = { byteArrayOf(0, -1) }, remove = { _, _ -> removed++ },
             upload = { _, _ -> upload }, changed = { original, task -> completions += original.key to task })
         try {
-            val proposed = TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Original project")
+            val proposed = TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession, "Original project")
             model.open(context, proposed); await(model, "draft open") { !it.loading && it.draft != null }
             var ticket: TaskContentPicker? = null
             model.picker(model.state!!.token) { ticket = it }; await(model, "original picker") { ticket != null }
@@ -36,7 +36,7 @@ class TaskContentModelTest {
             var replayImports = 0
             model.picked(ticket!!, listOf({ replayImports++; imported })); assertEquals(0, replayImports)
             val foreign = ProjectKey("other-connection", "other-swarm", "other-project")
-            model.open(context.copy(key = foreign), TaskContentDraft.new(foreign, "computer", TaskStage.TODO, TaskTarget.AnySession))
+            model.open(context.copy(key = foreign), TaskContentDraft.new(foreign, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession))
             // The open editor remains the original even when another project's UI asks to open one.
             assertEquals(key.id, model.state!!.draft!!.scope.project)
             model.save(model.state!!.token); await(model, "original save complete") { it.complete }
@@ -56,7 +56,7 @@ class TaskContentModelTest {
         val model = TaskContentModel({ "message:$it" }, owner, replicas, files, read = { byteArrayOf(1) }, remove = { _, _ -> },
             upload = { _, _ -> upload }, changed = { _, _ -> completed++ })
         try {
-            model.open(context, TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+            model.open(context, TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
             await(model, "draft open") { !it.loading && it.draft != null }
             val token = model.state!!.token
             model.picker(token) { opened++ }; assertEquals(0, opened); assertFalse(model.state!!.busy)
@@ -76,7 +76,7 @@ class TaskContentModelTest {
         val model = TaskContentModel({ "message:$it" }, owner, TaskReplicas(folders.newFolder()), files,
             read = { byteArrayOf() }, remove = { _, _ -> }, upload = { _, _ -> true }, changed = { _, _ -> fail("foreign completion") })
         try {
-            val draft = TaskContentDraft.new(key.copy(id = "foreign"), "computer", TaskStage.TODO, TaskTarget.AnySession)
+            val draft = TaskContentDraft.new(key.copy(id = "foreign"), "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession)
             model.open(context, draft); await(model, "foreign draft refused") { !it.loading && it.error.isNotEmpty() }
             assertNull(files.read(draft.scope, true))
         } finally { owner.cancel() }
@@ -88,7 +88,7 @@ class TaskContentModelTest {
         val model = TaskContentModel({ "message:$it" }, owner, TaskReplicas(folders.newFolder()), TaskContentDraftFiles(folders.newFolder(), { secret }),
             read = { byteArrayOf(1) }, remove = { id, _ -> removed += id }, upload = { _, _ -> true }, changed = { _, _ -> fail("no save requested") })
         try {
-            model.open(context, TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+            model.open(context, TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
             await(model, "draft open") { !it.loading && it.draft != null }
             val token = model.state!!.token; var first: TaskContentPicker? = null
             model.picker(token) { first = it }; await(model, "first picker") { first != null }
@@ -113,7 +113,7 @@ class TaskContentModelTest {
         val model = TaskContentModel({ "message:$it" }, owner, replicas, TaskContentDraftFiles(folders.newFolder(), { secret }),
             read = { upload = false; byteArrayOf(1) }, remove = { _, _ -> }, upload = { _, _ -> upload }, changed = { _, _ -> completed++ })
         try {
-            model.open(context, TaskContentDraft.new(key, "computer", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
+            model.open(context, TaskContentDraft.new(key, "computer", "native-machine", TaskStage.TODO, TaskTarget.AnySession, "Kept"))
             await(model, "draft open") { !it.loading && it.draft != null }
             val token = model.state!!.token; var ticket: TaskContentPicker? = null
             model.picker(token) { ticket = it }; await(model, "picker open") { ticket != null }

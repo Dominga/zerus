@@ -80,8 +80,9 @@ changes or hosted gates.
 
 Task settings open a separate prompt/files form; Send remains a separate task
 card action. The paperclip beside quick text entry opens a new task form with
-files. Each form captures its project/connection, original computer and draft
-nonce. Existing forms also retain the task UUID and content revision. Session
+files. Each form captures its project/connection, original relay computer ID, native machine identity and draft
+nonce. A restored Any-session draft stays held if that relay ID now names a
+different native machine. Existing forms also retain the task UUID and content revision. Session
 labels resolve within that captured scope; renamed labels grant no authority.
 
 Content drafts use a separate encrypted `task-content-drafts-v1` namespace,

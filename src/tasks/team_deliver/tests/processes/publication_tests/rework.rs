@@ -11,10 +11,22 @@ fn waiting(
     String,
     Vec<crate::teams::store::publication::PlannedTaskRequest>,
 ) {
+    waiting_with_approval(policy, zerus_team_plan::Approval::Review)
+}
+
+fn waiting_with_approval(
+    policy: Acceptance,
+    approval: zerus_team_plan::Approval,
+) -> (
+    Fixture,
+    String,
+    Vec<crate::teams::store::publication::PlannedTaskRequest>,
+) {
     let mut f = Fixture::new();
     f.h.settings(|s| {
         s.integration = Integration::None;
         s.phase_acceptance = policy;
+        s.plan_approval = approval;
         s.delegations.accept_results = true;
     });
     let first = f.h.store.next_draft_node(TEAM).unwrap();
@@ -66,6 +78,240 @@ fn waiting(
     )
     .unwrap();
     (f, p, requests)
+}
+
+#[test]
+fn rework_auto_approval_requires_both_retained_and_current_auto_policy_and_running() {
+    use zerus_team_plan::Approval;
+    for captured in [Approval::Review, Approval::Auto] {
+        for current in [Approval::Review, Approval::Auto] {
+            for paused in [false, true] {
+                let (mut f, p, _) = waiting_with_approval(Acceptance::Person, captured);
+                let id = send_back(&mut f, &p);
+                let next = f.h.store.next_draft_node(TEAM).unwrap();
+                f.h.run(
+                    &person(),
+                    Operation::SubmitPhaseCorrections {
+                        phase: 1,
+                        publication: p.clone(),
+                        rework: id.clone(),
+                        draft: ops::publication::tests::input(&[next]),
+                    },
+                )
+                .unwrap();
+                if current != captured {
+                    f.h.settings(|s| s.plan_approval = current);
+                }
+                if paused {
+                    f.h.run(&person(), Operation::Pause).unwrap();
+                }
+                let result = f.h.run(
+                    &ops::tests::service(),
+                    Operation::ApprovePhaseCorrections {
+                        phase: 1,
+                        publication: p,
+                        rework: id,
+                        generation: 2,
+                    },
+                );
+                if captured == Approval::Auto && current == Approval::Auto && !paused {
+                    result.unwrap();
+                    assert_eq!(f.h.store.publication_work(TEAM).unwrap().len(), 1);
+                } else {
+                    ops::tests::refused(result, zerus_team_plan::problem::code::INVALID_STATE);
+                    assert!(f.h.store.publication_work(TEAM).unwrap().is_empty());
+                }
+                let read = f.h.store.phase_draft(TEAM, 1).unwrap();
+                assert_eq!(read.phase.state, PhaseState::AwaitingAcceptance);
+                assert_eq!(read.phase.approval, captured);
+                assert_eq!(read.phase.acceptance, Acceptance::Person);
+            }
+        }
+    }
+}
+
+#[test]
+fn rework_decision_roles_and_rebound_lead_are_checked_before_saved_receipts() {
+    let (mut f, p, _) = waiting(Acceptance::Lead);
+    let who = lead(&f);
+    let home = f.lead.machine.clone();
+    let member_key = f.bind("m2", &home);
+    let member = ops::Actor::Session {
+        person: "local".into(),
+        team: TEAM.into(),
+        member: "m2".into(),
+        session: zerus_team_plan::SessionKey {
+            machine: member_key.machine,
+            session_id: member_key.session_id,
+        },
+    };
+    let id = send_back(&mut f, &p);
+    let next = f.h.store.next_draft_node(TEAM).unwrap();
+    let input = ops::publication::tests::input(&[next]);
+    let submit = Operation::SubmitPhaseCorrections {
+        phase: 1,
+        publication: p.clone(),
+        rework: id.clone(),
+        draft: input.clone(),
+    };
+    for actor in [&member, &ops::tests::service(), &ops::tests::other()] {
+        ops::tests::refused(
+            f.h.run(actor, submit.clone()),
+            zerus_team_plan::problem::code::NOT_ALLOWED,
+        );
+    }
+    let request = ops::tests::request(f.h.store.team(TEAM).unwrap().unwrap().revision, submit);
+    ops::tests::apply_fixture(&mut f.h.store, &who, &request, now()).unwrap();
+    let rejection = uuid::Uuid::new_v4().to_string();
+    for op in [
+        Operation::ApprovePhaseCorrections {
+            phase: 1,
+            publication: p.clone(),
+            rework: id.clone(),
+            generation: 2,
+        },
+        Operation::RejectPhaseCorrections {
+            phase: 1,
+            publication: p.clone(),
+            rework: id.clone(),
+            generation: 2,
+            comment: "Review the corrections.".into(),
+        },
+        Operation::UndoPhaseCorrectionRejection {
+            phase: 1,
+            publication: p.clone(),
+            rework: id.clone(),
+            generation: 2,
+            rejection,
+        },
+        Operation::ReconcileCorrectionReview {
+            phase: 1,
+            publication: p.clone(),
+            rework: id.clone(),
+            generation: 2,
+        },
+    ] {
+        for actor in [&who, &member, &ops::tests::other()] {
+            ops::tests::refused(
+                f.h.run(actor, op.clone()),
+                zerus_team_plan::problem::code::NOT_ALLOWED,
+            );
+        }
+    }
+    for op in [
+        Operation::RejectPhaseCorrections {
+            phase: 1,
+            publication: p.clone(),
+            rework: id.clone(),
+            generation: 2,
+            comment: "Not a service decision.".into(),
+        },
+        Operation::UndoPhaseCorrectionRejection {
+            phase: 1,
+            publication: p,
+            rework: id,
+            generation: 2,
+            rejection: uuid::Uuid::new_v4().to_string(),
+        },
+    ] {
+        ops::tests::refused(
+            f.h.run(&ops::tests::service(), op),
+            zerus_team_plan::problem::code::NOT_ALLOWED,
+        );
+    }
+    f.h.run(
+        &ops::tests::service(),
+        Operation::UnbindMember {
+            member: "lead".into(),
+        },
+    )
+    .unwrap();
+    f.bind("lead", &home);
+    // The successful old receipt grants no permission to a replaced session.
+    ops::tests::refused(
+        ops::tests::apply_fixture(&mut f.h.store, &who, &request, now()),
+        zerus_team_plan::problem::code::NOT_ALLOWED,
+    );
+    assert_eq!(
+        f.h.store.phase_draft(TEAM, 1).unwrap().phase.state,
+        PhaseState::AwaitingAcceptance
+    );
+}
+
+#[test]
+fn rework_correction_recovery_uses_its_original_request_and_never_reinserts_an_unknown() {
+    for label in ["publication_claim", "publication_saved"] {
+        let (mut f, p, _) = waiting(Acceptance::Person);
+        let id = send_back(&mut f, &p);
+        let next = f.h.store.next_draft_node(TEAM).unwrap();
+        f.h.run(
+            &person(),
+            Operation::SubmitPhaseCorrections {
+                phase: 1,
+                publication: p.clone(),
+                rework: id.clone(),
+                draft: ops::publication::tests::input(&[next, next + 1]),
+            },
+        )
+        .unwrap();
+        f.h.run(
+            &person(),
+            Operation::ApprovePhaseCorrections {
+                phase: 1,
+                publication: p.clone(),
+                rework: id,
+                generation: 2,
+            },
+        )
+        .unwrap();
+        let work = f.h.store.publication_work(TEAM).unwrap();
+        let r = &work[0];
+        assert_ne!(r.publication, p);
+        let mut child = paused(&f, r, label);
+        child.child.kill().unwrap();
+        child.child.wait().unwrap();
+        drop(child);
+        if label == "publication_saved" {
+            let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+            let revision = tasks.load(&r.task.uuid).unwrap().revision();
+            drop(tasks);
+            for _ in 0..2 {
+                assert_eq!(write(&f, r).unwrap(), "created");
+            }
+            let tasks = crate::tasks::store(&f.config, &r.task.project).unwrap();
+            assert_eq!(tasks.load(&r.task.uuid).unwrap().revision(), revision);
+        } else {
+            for _ in 0..2 {
+                assert!(write(&f, r)
+                    .unwrap_err()
+                    .message
+                    .contains("will not be recreated"));
+            }
+            assert!(!super::super::super::super::task_present(&f.config, &r.task).unwrap());
+        }
+        assert_eq!(
+            f.h.store
+                .planned_task(TEAM, r.node.id, &r.task.uuid)
+                .unwrap()
+                .as_ref(),
+            Some(r)
+        );
+        assert!(f
+            .h
+            .run(
+                &ops::tests::service(),
+                Operation::ReconcilePublication {
+                    phase: 1,
+                    publication: r.publication.clone(),
+                }
+            )
+            .is_err());
+        let read = f.h.store.phase_draft(TEAM, 1).unwrap();
+        assert_eq!(read.phase.state, PhaseState::AwaitingAcceptance);
+        assert_eq!(read.publication.unwrap().id, p);
+        assert!(f.h.store.node(TEAM, next).unwrap().is_none());
+        assert!(!read.accept_available);
+    }
 }
 
 fn lead(f: &Fixture) -> ops::Actor {

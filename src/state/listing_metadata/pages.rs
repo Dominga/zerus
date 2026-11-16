@@ -1,6 +1,7 @@
 //! Immutable observed generations with a separate read-only listing view.
 use super::*;
 use serde::{Deserialize, Serialize};
+pub(super) const TERMINAL_CANDIDATES: &str = "SELECT substr(s.source,1,257),CASE WHEN length(CAST(s.seed AS BLOB))<=262144 THEN s.seed ELSE NULL END,substr(s.stamp,1,1025) FROM sources AS locator INDEXED BY sources_name CROSS JOIN snapshots AS s WHERE locator.tombstone=0 AND json_extract(locator.seed,'$.record.name')=?1 AND s.generation=?2 AND s.source=locator.source LIMIT 3";
 const ROWS: usize = 128;
 const BYTES: usize = 512 << 10;
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -169,6 +170,40 @@ impl Reader {
         let Some((source, seed, stamp)) = found.into_iter().next() else {
             return Ok(None);
         };
+        self.point_row(source, seed, stamp).map(Some)
+    }
+
+    /// A label is only a bounded locator. Read the candidate from this exact
+    /// immutable generation, never the mutable locator's seed or stamp.
+    pub fn terminal_candidates(&self, name: &str) -> anyhow::Result<Vec<(String, Value)>> {
+        anyhow::ensure!(name.len() <= 2048, "Native display label exceeds its bound");
+        let generation = self.generation()?;
+        let mut query = self.0.db.prepare_cached(TERMINAL_CANDIDATES)?;
+        let found = query
+            .query_map(params![name, generation], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(
+            found.len() < 3,
+            "Native display candidates are ambiguous; use a smaller listing after recovery"
+        );
+        found
+            .into_iter()
+            .map(|(source, seed, stamp)| self.point_row(source, seed, stamp))
+            .collect()
+    }
+
+    fn point_row(
+        &self,
+        source: String,
+        seed: String,
+        stamp: String,
+    ) -> anyhow::Result<(String, Value)> {
         let bytes = source.len() + seed.len() + stamp.len();
         anyhow::ensure!(
             source.len() <= 256 && seed.len() <= model::SEED_BYTES && stamp.len() <= 1024,
@@ -186,7 +221,7 @@ impl Reader {
         );
         let mut value = Seed::decode(&key, &seed)?;
         value["native_stamp"] = json!(stamp);
-        Ok(Some((key.0, value)))
+        Ok((key.0, value))
     }
     pub fn generation(&self) -> anyhow::Result<i64> {
         Ok(self

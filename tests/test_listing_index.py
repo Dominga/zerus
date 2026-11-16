@@ -495,6 +495,195 @@ class LiveListingIndex(test_pause.Harness):
             time.sleep(.05)
         self.fail(result.stderr)
 
+    def test_no_live_identity_is_repeated_between_explicit_pages(self):
+        live=self.start('claude','paged-live')
+        self.send_event(live,'UserPromptSubmit',prompt='Private review fixture')
+        self.send_event(live,'Stop',last_assistant_message='Private review reply')
+        live_key=hashlib.sha256(live.encode()).hexdigest()
+        count=0
+        for n in range(10_000):
+            name=f'codex/example/review-before-{n}'
+            key=hashlib.sha256(name.encode()).hexdigest()
+            if key>=live_key:continue
+            record=dict(version=1,name=name,agent='codex',run_id=f'review-run-{n}',session_id=str(uuid.uuid4()),conversation_id=str(uuid.uuid4()),created=1,updated=1,phase='interrupted',activity='idle',cwd='/srv/example',base=['codex'],prompt='Public fixture')
+            (self.root/'state'/(key+'.json')).write_text(json.dumps(record));count+=1
+            if count==3:break
+        self.assertEqual(count,3)
+        self.hgs('listing-index','enable','--json');expected=self.ready_rows()
+        self.assertEqual(len(expected),4)
+        def page(cursor=None):
+            args=[str(HGS),'ls','--json','--local','--no-archives','--paged','--page-size','1']
+            if cursor:args+=['--cursor',cursor]
+            r=subprocess.run(args,env=self.env,text=True,capture_output=True,timeout=12)
+            self.assertEqual(r.returncode,0,r.stderr);return json.loads(r.stdout)
+        first=page();names=[r['name'] for r in first['sessions']];cursor=first['listing_page']['next_cursor'];counts=[len(names)]
+        for _ in range(8):
+            if not cursor:break
+            body=page(cursor);names.extend(r['name'] for r in body['sessions']);counts.append(len(body['sessions']));cursor=body['listing_page']['next_cursor']
+        self.assertIsNone(cursor)
+        print(json.dumps(dict(live=live,names=names,page_row_counts=counts,expected=[r['name'] for r in expected])),flush=True)
+        self.assertEqual(len(names),len(set(names)),'one live native identity appeared on multiple explicit pages')
+        self.assertEqual(set(names),{r['name'] for r in expected})
+
+    def page_rows(self):
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            rows=[];counts=[];cursor=None;generation=None;retry=False
+            for _ in range(32):
+                args=['ls','--json','--local','--no-archives','--paged','--page-size','1']
+                if cursor:args+=['--cursor',cursor]
+                result=subprocess.run([str(HGS),*args],env=self.env,capture_output=True,text=True,timeout=12)
+                if result.returncode:
+                    self.assertEqual(result.stdout,'')
+                    if any(reason in result.stderr for reason in ['database is locked','building, stale or unavailable','still rebuilding','changed before publication']):
+                        retry=True;break
+                    self.fail(result.stderr)
+                raw=result.stdout;self.assertLessEqual(len(raw.encode()),512<<10)
+                body=json.loads(raw);page=body['listing_page']
+                self.assertEqual(page['coverage'],'ready')
+                if generation is None:generation=page['generation']
+                self.assertEqual(page['generation'],generation)
+                rows.extend(body['sessions']);counts.append(len(body['sessions']))
+                cursor=page['next_cursor']
+                if not cursor:return rows,counts
+            if not retry:self.fail('private page fixture did not finish within32 pages')
+            # Discard provisional rows and cursor together; never mix cuts.
+            time.sleep(.05)
+        self.fail('private listing never admitted a stable paged cut')
+
+    def saved_page_row(self,name,**fields):
+        record=dict(version=1,name=name,agent=name.split('/')[0],run_id=str(uuid.uuid4()),session_id=str(uuid.uuid4()),conversation_id=str(uuid.uuid4()),created=1,updated=1,phase='interrupted',activity='idle',cwd='/srv/example',base=['codex'],prompt='Public fixture')
+        record.update(fields)
+        (self.root/'state').mkdir(exist_ok=True)
+        (self.root/'state'/(hashlib.sha256(name.encode()).hexdigest()+'.json')).write_text(json.dumps(record))
+        return record
+
+    def native_mux(self,*args):
+        result=subprocess.run([str(self.bin/'tmux'),*args],env=self.env,capture_output=True,text=True,timeout=4)
+        self.assertEqual(result.returncode,0,result.stderr)
+        return result.stdout.strip()
+
+    def test_id_layout_owner_and_untracked_terminal_each_appear_once(self):
+        live=self.start('claude','id-page-owner')
+        self.send_event(live,'Stop',last_assistant_message='Private ID reply')
+        sid,read=self.move_to_id_layout(live)
+        # Use the supported ID-twin terminal spelling; the public label remains
+        # distinct, so a display-name-only filter cannot locate this owner.
+        terminal=live+'~'+sid[:8]
+        self.native_mux('rename-session','-t',live,terminal)
+        record=read();record['terminal_name']=terminal
+        (self.root/'state/sessions'/(sid+'.json')).write_text(json.dumps(record))
+        for n in range(3):self.saved_page_row(f'codex/example/id-before-{n}')
+        untracked='codex/example/untracked'
+        self.native_mux('new-session','-d','-s',untracked,'sleep 120')
+        self.hgs('listing-index','enable','--json');expected=self.ready_rows()
+        rows,counts=self.page_rows()
+        self.assertEqual(len(rows),len(expected))
+        self.assert_rows(expected,rows)
+        self.assertEqual(sum(row.get('session_id')==sid for row in rows),1)
+        self.assertEqual(sum(row['name']==untracked for row in rows),1)
+        print(json.dumps(dict(case='id-and-untracked',page_row_counts=counts)),flush=True)
+        renamed='claude/p/id-page-renamed'
+        self.hgs('rename',live,renamed)
+        self.ready_rows();rows,_=self.page_rows()
+        self.assertEqual(sum(row.get('session_id')==sid for row in rows),1)
+        self.assertIn(renamed,[row['name'] for row in rows])
+
+    def test_same_label_different_native_run_or_pane_stays_untracked(self):
+        name='codex/example/native-collision'
+        self.native_mux('new-session','-d','-s',name,'sleep 120')
+        pane=self.native_mux('display-message','-p','-t',name,'#{pane_id}')
+        self.native_mux('set-option','-p','-t',pane,'@hgs_run','native-run')
+        for case,fields in [('run',dict(pane=pane,run_id='saved-run')),('pane',dict(pane='%wrong',run_id='native-run'))]:
+            with self.subTest(case=case):
+                self.hgs('listing-index','disable','--json')
+                record=self.saved_page_row(name,**fields)
+                self.hgs('listing-index','enable','--json');expected=self.ready_rows()
+                self.assertEqual(len(expected),2)
+                rows,_=self.page_rows()
+                self.assert_rows(expected,rows)
+                self.assertEqual(len(rows),2,'a same-label native terminal was hidden')
+                self.assertEqual(sum(row.get('session_id')==record['session_id'] for row in rows),1)
+                self.assertEqual(sum(not row.get('session_id') for row in rows),1)
+
+    def test_native_locator_failure_keeps_the_page_empty_and_agent_alive(self):
+        live=self.start('claude','bounded-page-locator')
+        self.send_event(live,'Stop',last_assistant_message='Private locator reply')
+        live_key=hashlib.sha256(live.encode()).hexdigest()
+        for n in range(10000):
+            name=f'codex/example/probe-before-{n}'
+            if hashlib.sha256(name.encode()).hexdigest()<live_key:
+                self.saved_page_row(name);break
+        else:self.fail('private locator fixture had no earlier metadata row')
+        self.hgs('listing-index','enable','--json');self.ready_rows()
+        original=self.bin/'original-private-tmux';shutil.copy2(self.bin/'tmux',original)
+        self.script('tmux',"#!/usr/bin/env python3\nimport os,sys,time\nif any('HGS_RESUME_SESSION_ID' in word for word in sys.argv):\n if os.environ['ZERUS_TEST_LOCATOR']=='slow':time.sleep(3)\n else:sys.stdout.write('x'*9000)\n sys.exit(0)\nos.execv("+repr(str(original))+",["+repr(str(original))+"]+sys.argv[1:])\n")
+        before=self.binding(live)
+        for mode in ['slow','large']:
+            with self.subTest(mode=mode):
+                env=dict(self.env,ZERUS_TEST_LOCATOR=mode)
+                started=time.monotonic()
+                result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives','--paged','--page-size','1'],env=env,capture_output=True,text=True,timeout=4)
+                self.assertLess(time.monotonic()-started,2.5)
+                self.assertNotEqual(result.returncode,0)
+                self.assertEqual(result.stdout,'')
+                self.assertIn('Native display locator is unavailable',result.stderr)
+                self.assertEqual(self.binding(live),before)
+                os.kill(before['pid'],0)
+
+    def test_seventeen_deferred_live_owners_refuse_the_original_overlay_limit(self):
+        owners=[]
+        for n in range(17):
+            name=self.start('claude',f'deferred-{n}')
+            self.move_to_id_layout(name);owners.append(name)
+        self.saved_page_row('codex/example/first-page')
+        self.hgs('listing-index','enable','--json')
+        # Full listing has the same original selected-overlay cap; readiness is
+        # observed without asking it to project all seventeen owners.
+        self.wait(lambda:json.loads(self.hgs('listing-index','status','--json'))['state']=='ready')
+        deadline=time.monotonic()+8
+        while time.monotonic()<deadline:
+            result=subprocess.run([str(HGS),'ls','--json','--local','--no-archives','--paged','--page-size','1'],env=self.env,capture_output=True,text=True,timeout=12)
+            if not any(reason in result.stderr for reason in ['database is locked','building, stale or unavailable','still rebuilding']):break
+            self.assertEqual(result.stdout,'');time.sleep(.05)
+        self.assertNotEqual(result.returncode,0)
+        self.assertEqual(result.stdout,'')
+        self.assertIn('Selected listing overlays exceeded their bound',result.stderr)
+        for name in owners:os.kill(self.binding(name)['pid'],0)
+
+    def test_slow_provider_and_deferred_live_owner_keep_both_memberships(self):
+        import socket,threading
+        live=self.start('claude','provider-deferred');self.move_to_id_layout(live)
+        state=self.root/'state';home=self.root/'private-dsh-home'
+        name='dsh/example/slow-provider'
+        record=dict(name=name,agent='dsh',backend='dsh',run_id='native-run',session_id=str(uuid.uuid4()),conversation_id='session-native',created=1,cwd='/srv/example',agent_home=str(home))
+        folder=state/'dsh/bindings';folder.mkdir(parents=True)
+        path=folder/(hashlib.sha256(name.encode()).hexdigest()+'.json');path.write_text(json.dumps(record));before=path.read_bytes()
+        host=state/'dsh/hosts'/hashlib.sha256(str(home).encode()).hexdigest()[:16];host.mkdir(parents=True)
+        server=socket.socket(socket.AF_UNIX);server.bind(str(host/'host.sock'));server.listen();server.settimeout(.05)
+        stop=threading.Event();clients=[]
+        def reply(client):
+            with client:
+                client.recv(4096);stop.wait(3)
+                try:client.sendall(b'{"ok":true,"value":{"items":[]}}\n')
+                except BrokenPipeError:pass
+        def serve():
+            while not stop.is_set():
+                try:client,_=server.accept()
+                except socket.timeout:continue
+                thread=threading.Thread(target=reply,args=(client,),daemon=True);clients.append(thread);thread.start()
+        thread=threading.Thread(target=serve,daemon=True);thread.start()
+        try:
+            self.hgs('listing-index','enable','--json');self.ready_rows()
+            rows,_=self.page_rows()
+            self.assertEqual({row['name'] for row in rows},{live,name})
+            self.assertEqual(len(rows),2)
+            self.assertEqual(next(row for row in rows if row['name']==name)['activity'],'unknown')
+            self.assertEqual(path.read_bytes(),before)
+        finally:
+            stop.set();thread.join(timeout=2);server.close()
+            for client in clients:client.join(timeout=2)
+
     def test_live_terminal_id_rename_reply_and_attention_keep_all_public_fields(self):
         name=self.start('claude','listing')
         self.send_event(name,'UserPromptSubmit',prompt='A public request')

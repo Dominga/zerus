@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use store::phase_controls as facts;
 use zerus_team_plan::phase_control::*;
 
-pub(super) fn prepare(
+pub(crate) fn prepare(
     store: &Store,
     request: &Request,
 ) -> Option<Result<facts::task_custody::TaskCustody>> {

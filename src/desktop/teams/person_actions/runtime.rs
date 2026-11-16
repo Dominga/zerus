@@ -225,6 +225,7 @@ impl Drop for Runtime {
 fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value> {
     let prepared = Prepared::resolve(config, plan.clone())?;
     let store = Store::person_evidence(&config.state)?;
+    let phase_resources = ops::prepare_phase_controls(&store, &prepared.request);
     let tx = store
         .db
         .as_ref()
@@ -232,7 +233,7 @@ fn review(config: &Config, scope: &Scope, plan: Arc<wire::Plan>) -> Result<Value
         .transpose()
         .map_err(store::storage)?;
     let (team, facts) = if let Some(tx) = &tx {
-        prepared.bound_facts(tx, Some(config))?
+        prepared.bound_facts_with_phase_resources(tx, Some(config), phase_resources.as_ref())?
     } else {
         (None, prepared.empty_facts()?)
     };

@@ -182,7 +182,15 @@ This internal projection adds no route, poller or operation authority.
 
 ## Storage, legacy custody and native compatibility
 
-The no-new-floor design remains **unproved** during source preparation. A real
+Native S2/core7 is actually admitted as
+`3da22bfefbe82f658801fc6c8b4a59a31b9b077f` (PR2486), tree
+`8397831cb8bdb1a14a13bc5f0cd7af603ea9ccaa`. S5 takes that actual source in
+merge `14b42ec2f59a844d377713f0a52f4beb5ca2f862`, retaining its final ordinary
+hand-out guard verbatim. Only the six recorded conflict paths differ from a
+fresh merge-tree. This admission enables qualification; the genuine old7 image
+campaign must still prove the no-new-floor compatibility conclusion.
+
+A real
 private-child control found another required prerequisite: an ordinary child
 spawned before PausePhase could reserve and deliver after the pause committed,
 because its final `permit_for_reservation` checked the effect and task marker
@@ -247,6 +255,40 @@ for fresh/cached/writer/admission orders, and bind new pause/relative/control
 facts in its native original lane. Any contrary legacy writer or new required
 execution fence is reported before consuming a registry mark. Reserved7,
 timer8..12/bit31 are not repurposed; no alternate floor/downgrade is permitted.
+
+## Native enrollment on actual7
+
+The existing typed TeamCall, staged native Plan/Reference, validated original
+and common `ops::apply_inputs` remain the only Person path. All five S5 actions
+are explicitly enrolled in `person_actions/prepared/phases/controls.rs`; their
+`scope` is not replaced by the old flat phase selector. Source, relative target
+and every crossed phase bind exact current generation/BASE/open episode/NEW
+identities, bounded headers, proposal nodes and original publication requests.
+Resume/replacement also compare the exact current pause episode or explicit
+legacy absence before consent. Availability and serialized fields grant no
+authority. SetPhaseAcceptance has no Session CLI alternative.
+
+Move/acceptance preparation acquires the existing exact project/task custody
+before the native review snapshot. The common writer independently reacquires
+that same finite cohort before its Teams transaction, then passes its retained
+handle to the original's fresh-facts check and operation context. No second
+ProjectStore opens under either caller's custody. A proof for fewer, extra or
+different selected/relative/crossed phases is refused before consent. The
+canonical resource digest binds project/home/team, copy objects and markers,
+exact task IDs/revisions and phase scopes, complementing the indexed full
+history predicate. Its serialized references are capped at 2 MiB. Phase-source
+references have a separate 1-MiB per-phase and 8-MiB aggregate native bound;
+these do not concatenate or weaken S4's separate 262144-byte BASE/NEW snapshots,
+200-row/262144-byte proposal or 530000-byte per-original-request checks.
+
+Non-S5 originals retain their existing fact-digest encoding. Receipt/unknown
+lookup stays on actual7's original-only read route, without fresh task custody
+or execution. The six native-model controls exercise real row/document writers,
+metadata review and the common original writer; their `Validated::fixture`
+models consent and is not physical GUI or installed-application evidence.
+Actual7's existing Unix execution restriction remains; S5 introduces no Windows
+Person fallback or caller-proof reroute. No registry/layout execution mark is
+allocated by this enrollment.
 
 ## Single read and window projection
 

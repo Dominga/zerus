@@ -40,6 +40,7 @@ pub(super) fn task_bytes(dir: &Path, task: &str, remaining: &mut u64) -> Result<
     Ok(())
 }
 
+#[derive(serde::Serialize)]
 pub(super) struct Copy {
     points: Vec<(PathBuf, u64, u64)>,
     markers: Vec<(PathBuf, Vec<u8>)>,

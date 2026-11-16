@@ -3,6 +3,7 @@
 use super::*;
 use crate::teams::ops::tests::{Harness, TEAM};
 use zerus_client_core::teams::action::TeamAction;
+mod controls;
 
 fn sample() -> (Harness, Runtime, Arc<wire::Plan>, Arc<platform::FileLock>) {
     let h = Harness::new();

@@ -225,7 +225,16 @@ impl Evidence {
         self.current()
     }
     pub fn fresh(&self, db: &Connection) -> Result<()> {
-        let (_, current) = self.prepared.bound_facts(db, self.config.as_deref())?;
+        self.fresh_with_phase_resources(db, None)
+    }
+    pub fn fresh_with_phase_resources(
+        &self,
+        db: &Connection,
+        custody: Option<&Result<store::phase_controls::task_custody::TaskCustody>>,
+    ) -> Result<()> {
+        let (_, current) =
+            self.prepared
+                .bound_facts_with_phase_resources(db, self.config.as_deref(), custody)?;
         if current != self.intent.facts {
             return Err(Problem::new(
                 zerus_team_plan::problem::code::STALE_REVISION,

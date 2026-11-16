@@ -1,7 +1,7 @@
 //! Sealed admission shared by the ordinary Teams writer and native originals.
 //! A serialized actor or saved result never constructs this value.
 use super::{super::person_gesture as card, required};
-use crate::teams::ops;
+use crate::teams::{ops, store::phase_controls::task_custody::TaskCustody};
 #[cfg(test)]
 use crate::teams::store;
 use rusqlite::Connection;
@@ -130,10 +130,14 @@ impl Evidence<'_> {
             Self::Fixture => Ok(()),
         }
     }
-    pub(crate) fn fresh(&self, db: &Connection) -> Result<()> {
+    pub(crate) fn fresh(
+        &self,
+        db: &Connection,
+        custody: Option<&Result<TaskCustody>>,
+    ) -> Result<()> {
         match self {
             Self::Card(intent) => card::fresh(db, intent),
-            Self::Action(original) => original.fresh(db),
+            Self::Action(original) => original.fresh_with_phase_resources(db, custody),
             Self::Intake(original) => original.fresh(db),
             #[cfg(test)]
             Self::Fixture => Ok(()),

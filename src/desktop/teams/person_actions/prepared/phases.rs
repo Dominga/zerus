@@ -5,8 +5,10 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use zerus_team_plan::draft::DraftNode;
+mod controls;
 
 enum Selection<'a> {
+    Controls(&'a TeamAction),
     Draft {
         phase: u32,
         generation: Option<u64>,
@@ -28,6 +30,11 @@ fn selection(action: &TeamAction) -> Option<Selection<'_>> {
     // Deliberately exhaustive: adding a future control requires enrolling
     // its actual identities here, including any nested scope/relative/pause.
     Some(match action {
+        SetPhaseBarrier { .. }
+        | PausePhase { .. }
+        | ResumePhase { .. }
+        | MovePhase { .. }
+        | SetPhaseAcceptance { .. } => Selection::Controls(action),
         SubmitDraftPhase { phase, .. } => Selection::Draft {
             phase: *phase,
             generation: None,
@@ -376,11 +383,23 @@ pub(super) fn capture(db: &Connection, team: &str, action: &TeamAction) -> Resul
     let Some(selection) = selection(action) else {
         return Ok(None);
     };
+    if let Selection::Controls(action) = selection {
+        return controls::capture(db, team, action).map(Some);
+    }
+    capture_selected(db, team, selection)
+}
+
+fn capture_selected(
+    db: &Connection,
+    team: &str,
+    selection: Selection<'_>,
+) -> Result<Option<Value>> {
     store::execution_fence(db)?;
     let phase = match &selection {
         Selection::Draft { phase, .. }
         | Selection::Current { phase, .. }
         | Selection::Correction { phase, .. } => *phase,
+        Selection::Controls(_) => return Err(required()),
     };
     let header = point(
         db,
@@ -402,6 +421,7 @@ pub(super) fn capture(db: &Connection, team: &str, action: &TeamAction) -> Resul
     let episode = episode(db, team, phase)?;
     let mut snapshots = Vec::new();
     match selection {
+        Selection::Controls(_) => return Err(required()),
         Selection::Correction {
             base,
             episode: expected,

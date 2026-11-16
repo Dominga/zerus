@@ -127,7 +127,34 @@ impl Prepared {
         db: &Connection,
         config: Option<&Config>,
     ) -> Result<(Option<Team>, String)> {
-        let (team, ordinary) = self.facts(db)?;
+        self.bound_facts_with_phase_resources(db, config, None)
+    }
+
+    pub fn bound_facts_with_phase_resources(
+        &self,
+        db: &Connection,
+        config: Option<&Config>,
+        custody: Option<&Result<store::phase_controls::task_custody::TaskCustody>>,
+    ) -> Result<(Option<Team>, String)> {
+        let (team, mut ordinary) = self.facts(db)?;
+        use store::phase_controls::task_custody::Selection;
+        let selection = match &self.request.operation {
+            ops::Operation::MovePhase {
+                scope, relative_to, ..
+            } => Some(Selection::Interval(scope.phase(), relative_to.phase())),
+            ops::Operation::SetPhaseAcceptance { scope, .. } => Some(Selection::One(scope.phase())),
+            _ => None,
+        };
+        if let Some(selection) = selection {
+            let held = custody
+                .ok_or_else(required)?
+                .as_ref()
+                .map_err(Clone::clone)?;
+            let references =
+                held.native_facts(db, team.as_ref().ok_or_else(required)?, selection)?;
+            ordinary = wire::digest(&("phase-control-resource-v1", ordinary, references))
+                .ok_or_else(required)?;
+        }
         if let ops::Operation::AdvanceBase { .. } = &self.request.operation {
             let config = config.ok_or_else(required)?;
             let team = team.ok_or_else(required)?;

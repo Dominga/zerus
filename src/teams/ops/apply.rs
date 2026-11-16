@@ -144,7 +144,7 @@ fn apply_inputs(
         }
         // Bound the native point-read bodies before the common kernel reads
         // its team. The snapshot cannot change under this writer transaction.
-        intent.fresh(&tx)?;
+        intent.fresh(&tx, task_custody.as_ref())?;
     }
     let own_observations = gesture
         .as_mut()
@@ -484,6 +484,7 @@ pub(crate) fn observe_native_intake(
         team: &team,
         op: &request.operation,
         request_id: &request.request_id,
+        task_custody: None,
         now,
         reply: Reply {
             ok: true,

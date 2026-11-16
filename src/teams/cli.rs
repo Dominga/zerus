@@ -45,6 +45,7 @@ pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
                 | "rename-team"
                 | "set-goal"
                 | "set-deps"
+                | "set-phase-acceptance"
                 | "stop"
                 | "archive"
                 | "stop-member"

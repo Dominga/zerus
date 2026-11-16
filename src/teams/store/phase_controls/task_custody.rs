@@ -1,11 +1,13 @@
 //! Exact task documents are held before the Teams writer. A cached Todo
 //! observation alone cannot exclude a person's unobserved send reservation.
 use super::*;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use zerus_replica::{ProjectStore, Stage};
 mod copy;
 
+#[derive(Clone, Copy)]
 pub(crate) enum Selection {
     Neighbors(u32),
     Interval(u32, u32),
@@ -37,6 +39,34 @@ fn blocked(reason: &str) -> Availability {
     }
 }
 
+fn selected(db: &Connection, team: &str, selection: Selection) -> Result<Vec<Phase>> {
+    let mut ordered = phases(db, team)?;
+    ordered.retain(|p| p.n != 0);
+    ordered.sort_by_key(|p| (if p.order == 0 { p.n } else { p.order }, p.n));
+    let position = |n| {
+        ordered
+            .iter()
+            .position(|p| p.n == n)
+            .ok_or_else(|| storage("The phase task custody scope is missing."))
+    };
+    let (lo, hi) = match selection {
+        Selection::One(n) => {
+            let i = position(n)?;
+            (i, i)
+        }
+        Selection::Neighbors(n) => {
+            let i = position(n)?;
+            (i.saturating_sub(1), (i + 1).min(ordered.len() - 1))
+        }
+        Selection::Interval(a, b) => {
+            let a = position(a)?;
+            let b = position(b)?;
+            (a.min(b), a.max(b))
+        }
+    };
+    Ok(ordered[lo..=hi].to_vec())
+}
+
 impl TaskCustody {
     /// The first snapshot is released before acquiring project custody.
     /// Only indexed phase membership is read; no task/catalog enumeration.
@@ -51,30 +81,7 @@ impl TaskCustody {
         let tx = db.unchecked_transaction().map_err(storage)?;
         let header = rows::team(&tx, team)?
             .ok_or_else(|| storage("The phase task custody team is missing."))?;
-        let mut ordered = phases(&tx, team)?;
-        ordered.retain(|p| p.n != 0);
-        ordered.sort_by_key(|p| (if p.order == 0 { p.n } else { p.order }, p.n));
-        let position = |n| {
-            ordered
-                .iter()
-                .position(|p| p.n == n)
-                .ok_or_else(|| storage("The phase task custody scope is missing."))
-        };
-        let (lo, hi) = match selection {
-            Selection::One(n) => {
-                let i = position(n)?;
-                (i, i)
-            }
-            Selection::Neighbors(n) => {
-                let i = position(n)?;
-                (i.saturating_sub(1), (i + 1).min(ordered.len() - 1))
-            }
-            Selection::Interval(a, b) => {
-                let a = position(a)?;
-                let b = position(b)?;
-                (a.min(b), a.max(b))
-            }
-        };
+        let selected = selected(&tx, team, selection)?;
         let mut answer = Self {
             team: team.into(),
             home: header.home,
@@ -85,7 +92,7 @@ impl TaskCustody {
             copy: None,
         };
         let mut total = 0usize;
-        for p in &ordered[lo..=hi] {
+        for p in &selected {
             let availability = unstarted(&tx, team, p)?;
             let mut tasks = Vec::new();
             if availability.allowed && p.state == PhaseState::Approved {
@@ -236,6 +243,56 @@ impl TaskCustody {
             }
         }
         unstarted(db, &team.id, p)
+    }
+
+    /// Canonical references to the same retained project/documents, never a
+    /// second read under Teams custody. This digest grants no admission.
+    pub(crate) fn native_facts(
+        &self,
+        db: &Connection,
+        team: &Team,
+        selection: Selection,
+    ) -> Result<String> {
+        let required = selected(db, &team.id, selection)?;
+        if required.len() != self.phases.len()
+            || required.iter().any(|p| !self.phases.contains_key(&p.n))
+        {
+            return Err(Problem::new(
+                code::INVALID_STATE,
+                "The exact phase task custody is incomplete.",
+            ));
+        }
+        let mut scopes = Vec::new();
+        for (id, proof) in &self.phases {
+            let p = phase(db, &team.id, *id)?;
+            let current = self.check(db, team, &p)?;
+            if !current.allowed {
+                return Err(Problem::new(
+                    code::INVALID_STATE,
+                    current
+                        .reason
+                        .unwrap_or_else(|| "The exact phase task custody is unavailable.".into()),
+                ));
+            }
+            scopes.push((&proof.scope, &proof.tasks));
+        }
+        let bytes = serde_json::to_vec(&(
+            "phase-control-task-custody-v1",
+            &self.team,
+            &self.home,
+            &self.project,
+            self.revision,
+            &self.copy,
+            scopes,
+        ))
+        .map_err(storage)?;
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(Problem::new(
+                code::OVER_CAP,
+                "The phase task scope exceeds the control proof bounds.",
+            ));
+        }
+        Ok(format!("{:x}", Sha256::digest(bytes)))
     }
 }
 

@@ -9,7 +9,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::State;
+use tauri::{Manager, State};
 use zerus_client_core::tasks::{checked_queried_page, queried_page_call, PageScope};
 use zerus_client_core::{attachments, reads::CachedAttachment, task_details, tasks_write};
 
@@ -339,8 +339,6 @@ impl TaskWrites {
 #[tauri::command]
 pub async fn task_board_action(
     state: State<'_, TaskWrites>,
-    app: State<'_, crate::commands::AppState>,
-    teams: State<'_, crate::teams::Teams>,
     composers: State<'_, crate::composer::Composers>,
     window: tauri::AppHandle,
     project: String,
@@ -352,8 +350,16 @@ pub async fn task_board_action(
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
     let permit = state.begin()?;
-    let service = app.desktop_service();
-    let native_actions = teams.native_actions();
+    // The native AppHandle selects these managed services; renderer input
+    // cannot provide a service, an action original or a Person admission.
+    let service = window
+        .try_state::<crate::commands::AppState>()
+        .ok_or_else(|| "The desktop app state is unavailable.".to_owned())?
+        .desktop_service();
+    let native_actions = window
+        .try_state::<crate::teams::Teams>()
+        .ok_or_else(|| "The native team action state is unavailable.".to_owned())?
+        .native_actions();
     let composers = composers.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;

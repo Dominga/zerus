@@ -733,3 +733,104 @@ fn generation_collection_retires_a_cursor_before_the_first_partial_delete() {
         "a half-collected generation returned a partial page"
     );
 }
+
+#[test]
+fn native_candidate_points_use_both_indexes_and_their_own_generation_stamp() {
+    let root = fixture();
+    let selected = path(root.path());
+    let mut value = record();
+    storage::atomic(&selected, &value.to_string()).unwrap();
+    assert!(repair_to_end(root.path()).complete);
+    let reader = pages::Reader::open(root.path()).unwrap();
+    let store = Store::read(root.path()).unwrap();
+    let mut statement = store
+        .db
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            pages::TERMINAL_CANDIDATES
+        ))
+        .unwrap();
+    let plan = statement
+        .query_map(
+            params![string(&value, "name"), reader.generation().unwrap()],
+            |row| row.get::<_, String>(3),
+        )
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("SEARCH locator USING INDEX sources_name")),
+        "{plan:?}"
+    );
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("SEARCH s USING INDEX sqlite_autoindex_snapshots")),
+        "{plan:?}"
+    );
+    assert!(!plan.iter().any(|step| step.contains("SCAN")), "{plan:?}");
+    let found = reader.terminal_candidates(string(&value, "name")).unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].1["record"]["run_id"], value["run_id"]);
+    value["phase"] = json!("working");
+    storage::atomic(&selected, &value.to_string()).unwrap();
+    assert!(
+        reader.terminal_candidates(string(&value, "name")).is_err(),
+        "old native membership borrowed a changed source stamp"
+    );
+}
+
+#[test]
+fn native_candidates_share_point_bytes_and_refuse_capped_ambiguity() {
+    let root = fixture();
+    fs::create_dir(root.path().join("sessions")).unwrap();
+    let mut value = record();
+    value["layout"] = json!("id");
+    value["subagents"] = json!((0..100)
+        .map(|n| (
+            format!("child-{n}"),
+            json!({"state":"working","prompt":"x".repeat(1400)})
+        ))
+        .collect::<serde_json::Map<_, _>>());
+    for _ in 0..2 {
+        value["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        storage::atomic(
+            &root
+                .path()
+                .join("sessions")
+                .join(format!("{}.json", string(&value, "session_id"))),
+            &value.to_string(),
+        )
+        .unwrap();
+    }
+    assert!(repair_to_end(root.path()).complete);
+    let reader = pages::Reader::open(root.path()).unwrap();
+    assert_eq!(
+        reader
+            .terminal_candidates(string(&value, "name"))
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        reader.terminal_candidates(string(&value, "name")).is_err(),
+        "native point lookups escaped the shared512KiB budget"
+    );
+    drop(reader);
+    value["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+    storage::atomic(
+        &root
+            .path()
+            .join("sessions")
+            .join(format!("{}.json", string(&value, "session_id"))),
+        &value.to_string(),
+    )
+    .unwrap();
+    assert!(repair_to_end(root.path()).complete);
+    let reader = pages::Reader::open(root.path()).unwrap();
+    assert!(reader
+        .terminal_candidates(string(&value, "name"))
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous"));
+}

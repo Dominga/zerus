@@ -222,6 +222,57 @@ pub(super) fn selected_record(
     Ok(record)
 }
 
+// Read a locator from the already observed pane, with the existing native
+// observation clock. It is no membership proof and starts no server/agent.
+fn native_locator(
+    terminal: &str,
+    pane: &(String, String, String),
+    names: &BTreeMap<String, String>,
+    until: Instant,
+) -> anyhow::Result<(String, String)> {
+    anyhow::ensure!(
+        Instant::now() < until,
+        "Native display lookup deadline exceeded"
+    );
+    let mut command = std::process::Command::new("tmux");
+    command.args(["display-message","-p","-t",&pane.0,"#{pane_id}\t#{session_id}\t#{@hgs_run}\t#{HGS_SESSION_ID}\t#{HGS_RESUME_SESSION_ID}\t#{HGS_SESSION}"]);
+    let (status, stdout, _) =
+        crate::platform::run_bounded(&mut command, [8192, 4096], until, &|| false).map_err(
+            |_| anyhow::anyhow!("Native display locator is unavailable or exceeded its bound"),
+        )?;
+    anyhow::ensure!(status.success(), "Native display locator is unavailable");
+    let text = std::str::from_utf8(&stdout)?;
+    let fields = text.trim_end_matches('\n').split('\t').collect::<Vec<_>>();
+    anyhow::ensure!(
+        fields.len() == 6
+            && fields[0] == pane.0
+            && fields[2] == pane.2
+            && names.get(fields[1]).is_some_and(|name| name == terminal),
+        "Native display identity changed"
+    );
+    let sid = if fields[3].is_empty() {
+        fields[4]
+    } else {
+        fields[3]
+    };
+    anyhow::ensure!(
+        sid.is_empty() || session_id::canonical(sid),
+        "Native display session ID is invalid"
+    );
+    anyhow::ensure!(
+        fields[5].len() <= 2048,
+        "Native display label exceeds its bound"
+    );
+    Ok((
+        sid.to_owned(),
+        if fields[5].is_empty() {
+            terminal.to_owned()
+        } else {
+            fields[5].to_owned()
+        },
+    ))
+}
+
 pub(in crate::state) fn merge(
     mut value: Value,
     ids: &BTreeMap<String, String>,
@@ -441,6 +492,66 @@ pub(in crate::state) fn merge(
                 keep_warm::enrich(&mut row, warm.as_ref(), &record);
                 question_routing::enrich(&mut row, routing.as_ref());
                 rows.push(row);
+            }
+            // Resolve deferred terminal membership before a slow provider can
+            // consume the shared native observation clock.
+            if query.paged && query.cursor.is_none() {
+                let mut untracked = Vec::new();
+                let reader = reader.as_ref().unwrap();
+                let mut probes = 0;
+                for row in std::mem::take(&mut live) {
+                    let terminal = string(&row, "name");
+                    let panes = snapshot.get(terminal);
+                    let mut bound = false;
+                    if let Some(panes) = panes.filter(|panes| {
+                        panes.len() == 1 && panes[0].1 == "0" && !panes[0].2.is_empty()
+                    }) {
+                        probes += 1;
+                        anyhow::ensure!(
+                            probes <= 128,
+                            "Native display lookup count exceeds its bound"
+                        );
+                        let (sid, label) =
+                            native_locator(terminal, &panes[0], &names, native_until)?;
+                        let candidates = if sid.is_empty() {
+                            reader.terminal_candidates(&label)?
+                        } else {
+                            reader
+                                .parent(&json!({"session_id":sid}))?
+                                .into_iter()
+                                .collect()
+                        };
+                        for (source, seed) in candidates {
+                            let record = &seed["record"];
+                            if source.starts_with("dsh/")
+                                || source.starts_with("opencode/")
+                                || terminal_name(record) != terminal
+                                || !matches(record, Some(panes))
+                            {
+                                continue;
+                            }
+                            let record = selected_record(
+                                &root,
+                                &source,
+                                &seed,
+                                &mut canonical_bytes,
+                                &mut canonical_files,
+                                16,
+                                until,
+                            )?;
+                            // Suppression uses the same exact owner predicate as the
+                            // normal page projection, on fresh canonical bytes.
+                            if terminal_name(&record) == terminal && matches(&record, Some(panes)) {
+                                bound = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !bound {
+                        untracked.push(row);
+                    }
+                }
+                live = untracked;
             }
             rows.extend(checked(dsh::listing_records(&deepseek, native_until))?);
             rows.extend(checked(opencode::listing_records(&opencode, native_until))?);

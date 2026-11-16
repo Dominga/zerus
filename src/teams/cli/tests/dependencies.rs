@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 //! The graph page comes from the real operations and CLI queue writer.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
@@ -25,9 +27,9 @@ fn set_deps_cli_is_person_only_and_queue_carries_both_kinds_and_off_page_edges()
         assert_eq!((exit, code(&reply)), (1, "not_allowed"));
     }
     let input = ask();
-    let (reply, exit) = h.cli(&Caller::Person, "set-deps", &input);
+    let (reply, exit) = h.native_command("set-deps", &input);
     assert_eq!(exit, 0, "{reply}");
-    assert_eq!(h.cli(&Caller::Person, "set-deps", &input), (reply, 0));
+    assert_eq!(h.native_command("set-deps", &input), (reply, 0));
     h.apply(
         &person(),
         Operation::SetDeps {
@@ -108,11 +110,11 @@ fn queue_edit_eligibility_rejects_reserved_and_historical_effects_on_pending_nod
     );
     read();
     let input = json!({"request_id":uuid::Uuid::new_v4().to_string(), "team":TEAM, "expected_revision":h.revision(), "node":b, "deps":[{"node":a}]}).to_string();
-    let (reply, exit) = h.cli(&Caller::Person, "set-deps", &input);
+    let (reply, exit) = h.native_command("set-deps", &input);
     assert_eq!((exit, code(&reply)), (1, "invalid_state"));
     assert_eq!(
         reply["error"]["message"],
         "Dependencies can only be edited before this task starts or has an attempt or hand-out recorded."
     );
-    assert_eq!(h.cli(&Caller::Person, "set-deps", &input), (reply, 1));
+    assert_eq!(h.native_command("set-deps", &input), (reply, 1));
 }

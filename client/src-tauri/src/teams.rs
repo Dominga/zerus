@@ -22,14 +22,13 @@ use serde_json::Value;
 use tauri::State;
 use zerus_client_core::actions::{Exit, Invocation};
 use zerus_client_core::run_limited;
-use zerus_client_core::teams::action::{
-    run_action, Admission, Intents, Pending, TeamCall, TeamOutcome,
-};
+use zerus_client_core::teams::action::{Admission, Intents, Pending, TeamCall, TeamOutcome};
 use zerus_client_core::teams::read::valid_team;
 use zerus_client_core::teams::{TeamsFollow, TeamsPoller};
 
 use crate::commands::AppState;
 
+pub mod observed;
 mod settings;
 
 /// The one Teams reader of this computer and the intents whose actions it
@@ -39,11 +38,17 @@ pub struct Teams {
     poller: Mutex<Option<TeamsPoller>>,
     intents: Mutex<Intents>,
     decisions: std::sync::Arc<crate::desktop_service::team_person::Decisions>,
+    actions: std::sync::Arc<crate::desktop_service::team_person_actions::Actions>,
 }
 
 impl Teams {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn native_actions(
+        &self,
+    ) -> std::sync::Arc<crate::desktop_service::team_person_actions::Actions> {
+        self.actions.clone()
     }
 
     fn poller(&self) -> MutexGuard<'_, Option<TeamsPoller>> {
@@ -226,8 +231,8 @@ async fn run(
             // panicking or failed worker: an unknown outcome, never a stray
             // Pending entry.
             let pending = Pending::new(&teams.intents, &call);
-            let hgs = zerus_client_core::default_hgs();
             let sent = call.clone();
+            let actions = teams.actions.clone();
             let decisions = teams.decisions.clone();
             let outcome = match tauri::async_runtime::spawn_blocking(move || {
                 if matches!(
@@ -238,7 +243,9 @@ async fn run(
                         app, service, decisions, sent, check_only,
                     )
                 } else {
-                    run_action(&hgs, &sent)
+                    crate::desktop_service::team_person_actions::run(
+                        app, service, actions, sent, check_only,
+                    )
                 }
             })
             .await
@@ -264,6 +271,7 @@ async fn run(
 pub fn team_intent_dismiss(teams: State<'_, Teams>, call: TeamCall) -> Result<(), String> {
     if teams.intents().dismiss(&call) {
         teams.decisions.dismiss(&call.request_id);
+        teams.actions.dismiss(&call.request_id);
         Ok(())
     } else {
         Err("Only an uncertain action can be dismissed.".into())

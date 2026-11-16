@@ -49,6 +49,8 @@ pub(crate) use team_deliver::FIXTURE_NATIVE_INPUT;
 #[cfg(all(test, unix))]
 pub(crate) use team_deliver::fixture_delivery;
 
+pub(crate) mod native_team;
+
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
 const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not record it";

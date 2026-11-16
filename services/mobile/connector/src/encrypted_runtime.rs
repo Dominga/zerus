@@ -1091,8 +1091,12 @@ mod tests {
     const MACHINE: &str = "00000000-0000-4000-8000-000000000020";
     const REQUEST: &str = "00000000-0000-4000-8000-000000000021";
     const DISPATCH_CALLS: usize = if cfg!(windows) { 2 } else { 1 };
+    #[cfg(unix)]
+    mod listing_control;
+
     #[derive(Default)]
     struct NativeFixture {
+        listing: RefCell<Option<Value>>,
         calls: RefCell<Vec<Vec<String>>>,
         payloads: RefCell<Vec<Option<Value>>>,
         observation: RefCell<Option<Observation>>,
@@ -1179,7 +1183,12 @@ mod tests {
                         if observation.change_after_listing {
                             observation.machine = "00000000-0000-4000-8000-000000000099".into();
                         }
-                        Ok(Output::Json(json!({"sessions": []})))
+                        Ok(Output::Json(
+                            self.listing
+                                .borrow()
+                                .clone()
+                                .unwrap_or_else(|| json!({"sessions": []})),
+                        ))
                     }
                     ["swarm", "get"] => Ok(Output::Json(json!({"schema": 1,
                         "initialized": false, "organization": {"projects": []}}))),

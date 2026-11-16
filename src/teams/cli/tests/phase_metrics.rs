@@ -1,3 +1,5 @@
+//! Person-positive setup uses an explicit admitted-writer model; reads and
+//! Session/negative caller checks still use the production CLI unchanged.
 //! Estimated phase inputs are admitted and serialized by the real product.
 use super::harness::*;
 use crate::teams::cli::actor::Caller;
@@ -22,7 +24,7 @@ fn produced() -> Value {
     .collect();
     let request = json!({"request_id":uid(740),"team":TEAM,"expected_revision":h.revision(),"phase":1,
         "draft":{"title":"Estimated plan","nodes":nodes}});
-    let (reply, exit) = h.cli(&Caller::Person, "submit-draft-phase", &request.to_string());
+    let (reply, exit) = h.native_command("submit-draft-phase", &request.to_string());
     assert_eq!(exit, 0, "{reply}");
     let mut context = serde_json::Map::new();
     for (key, command) in [

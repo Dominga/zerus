@@ -17,7 +17,7 @@ fn pause_request(h: &Harness) -> Request {
     )
 }
 fn retry_once(h: &mut Harness, request: &Request) {
-    let first = crate::teams::ops::apply(&mut h.store, &person(), request, 1234).unwrap();
+    let first = super::apply_fixture(&mut h.store, &person(), request, 1234).unwrap();
     assert_eq!(
         h.store.team(TEAM).unwrap().unwrap().status,
         TeamStatus::Paused
@@ -25,7 +25,7 @@ fn retry_once(h: &mut Harness, request: &Request) {
     assert_eq!(saved(h, &request.request_id), 1);
     let count = h.store.journal(TEAM, 200, None).unwrap().rows.len();
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &person(), request, 1235).unwrap(),
+        super::apply_fixture(&mut h.store, &person(), request, 1235).unwrap(),
         first
     );
     assert_eq!(h.store.journal(TEAM, 200, None).unwrap().rows.len(), count);
@@ -43,7 +43,7 @@ fn statement_failures_are_not_saved_refusals_and_the_same_request_is_processed_a
         let before=h.store.team(TEAM).unwrap();
         let journal=h.store.journal(TEAM,200,None).unwrap();
         h.store.db.as_ref().unwrap().execute_batch(trigger).unwrap();
-        let problem=crate::teams::ops::apply(&mut h.store,&person(),&request,1234).unwrap_err();
+        let problem=super::apply_fixture(&mut h.store,&person(),&request,1234).unwrap_err();
         assert_eq!(problem.code,"storage_failed");
         assert_eq!(saved(&h,&request.request_id),0);
         assert_eq!(h.store.team(TEAM).unwrap(),before);
@@ -70,7 +70,7 @@ fn commit_failure_leaves_no_receipt_and_the_same_request_is_processed_after_repa
         observed.fetch_add(1, Ordering::SeqCst);
         true
     }));
-    let problem = crate::teams::ops::apply(&mut h.store, &person(), &request, 1234).unwrap_err();
+    let problem = super::apply_fixture(&mut h.store, &person(), &request, 1234).unwrap_err();
     h.store
         .db
         .as_ref()
@@ -90,7 +90,7 @@ fn a_logical_invalid_state_remains_saved_but_a_failed_refusal_write_does_not() {
     let mut h = Harness::new();
     let r = request(1, Operation::Resume);
     h.store.db.as_ref().unwrap().execute_batch("CREATE TRIGGER fail_write BEFORE INSERT ON requests BEGIN SELECT RAISE(ABORT,'fixture refusal receipt failure'); END;").unwrap();
-    let failed = crate::teams::ops::apply(&mut h.store, &person(), &r, 1234).unwrap_err();
+    let failed = super::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap_err();
     assert_eq!(failed.code, "storage_failed");
     assert_eq!(saved(&h, &r.request_id), 0);
     h.store
@@ -99,12 +99,12 @@ fn a_logical_invalid_state_remains_saved_but_a_failed_refusal_write_does_not() {
         .unwrap()
         .execute_batch("DROP TRIGGER fail_write")
         .unwrap();
-    let logical = crate::teams::ops::apply(&mut h.store, &person(), &r, 1235).unwrap_err();
+    let logical = super::apply_fixture(&mut h.store, &person(), &r, 1235).unwrap_err();
     assert_eq!(logical.code, code::INVALID_STATE);
     assert_eq!(saved(&h, &r.request_id), 1);
     h.run(&person(), Operation::Pause).unwrap();
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &person(), &r, 1236).unwrap_err(),
+        super::apply_fixture(&mut h.store, &person(), &r, 1236).unwrap_err(),
         logical
     );
 }
@@ -113,10 +113,10 @@ fn a_logical_invalid_state_remains_saved_but_a_failed_refusal_write_does_not() {
 fn a_lost_success_reply_reopens_and_replays_the_same_request_once() {
     let mut h = Harness::new();
     let r = pause_request(&h);
-    let reply = crate::teams::ops::apply(&mut h.store, &person(), &r, 1234).unwrap();
+    let reply = super::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap();
     h.store = Store::open(h.temp.path()).unwrap();
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &person(), &r, 1235).unwrap(),
+        super::apply_fixture(&mut h.store, &person(), &r, 1235).unwrap(),
         reply
     );
     assert_eq!(saved(&h, &r.request_id), 1);
@@ -138,11 +138,11 @@ fn a_session_bound_elsewhere_is_a_saved_logical_refusal() {
             ownership_nonce: m.ownership_nonce,
         },
     );
-    let problem = crate::teams::ops::apply(&mut h.store, &service(), &r, 1234).unwrap_err();
+    let problem = super::apply_fixture(&mut h.store, &service(), &r, 1234).unwrap_err();
     assert_eq!(problem.code, code::INVALID_STATE);
     assert_eq!(saved(&h, &r.request_id), 1);
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &service(), &r, 1235).unwrap_err(),
+        super::apply_fixture(&mut h.store, &service(), &r, 1235).unwrap_err(),
         problem
     );
     assert!(h
@@ -188,7 +188,7 @@ fn reusing_an_effect_identity_is_a_saved_logical_refusal() {
             effect_request_id: id,
         },
     );
-    let problem = crate::teams::ops::apply(&mut h.store, &service(), &r, 1234).unwrap_err();
+    let problem = super::apply_fixture(&mut h.store, &service(), &r, 1234).unwrap_err();
     assert_eq!(problem.code, code::INVALID_STATE);
     assert_eq!(saved(&h, &r.request_id), 1);
     assert_eq!(h.store.effects(TEAM, 200, None).unwrap().rows.len(), 1);
@@ -211,13 +211,13 @@ fn a_writer_waits_past_two_seconds_for_the_other_connection_and_applies_once() {
         std::thread::sleep(std::time::Duration::from_millis(3200));
         writer.execute_batch("ROLLBACK").unwrap();
     });
-    let result = crate::teams::ops::apply(&mut h.store, &person(), &r, 1234);
+    let result = super::apply_fixture(&mut h.store, &person(), &r, 1234);
     release.join().unwrap();
     assert!(result.is_ok(), "{result:?}");
     assert_eq!(configured, 8000);
     assert_eq!(saved(&h, &r.request_id), 1);
     assert_eq!(
-        crate::teams::ops::apply(&mut h.store, &person(), &r, 1235).unwrap(),
+        super::apply_fixture(&mut h.store, &person(), &r, 1235).unwrap(),
         result.unwrap()
     );
     assert_eq!(h.store.journal(TEAM, 200, None).unwrap().rows.len(), 2);
@@ -248,7 +248,7 @@ fn a_busy_statement_after_begin_stays_storage_failed_and_leaves_no_receipt() {
         Some(rusqlite::ErrorCode::DatabaseBusy)
     );
     db.execute_batch("CREATE TRIGGER fail_busy BEFORE UPDATE OF status ON teams BEGIN SELECT busy_statement(); END").unwrap();
-    let problem = crate::teams::ops::apply(&mut h.store, &person(), &r, 1234).unwrap_err();
+    let problem = super::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap_err();
     assert_eq!(problem.code, "storage_failed");
     assert_eq!(saved(&h, &r.request_id), 0);
     h.store

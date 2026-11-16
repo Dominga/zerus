@@ -69,3 +69,31 @@ fn missing_gesture_does_not_create_a_team_store() {
     );
     assert!(!h.temp.path().join("teams/teams-v1.sqlite3").exists());
 }
+
+#[test]
+fn person_gesture_is_required_for_team_decisions_beyond_owner_cards() {
+    let mut h = Harness::new();
+    let before = h.store.team(TEAM).unwrap().unwrap();
+    let r = request(
+        before.revision,
+        Operation::RenameTeam {
+            name: "Changed without a window gesture".into(),
+        },
+    );
+    refused(
+        super::super::apply(&mut h.store, &person(), &r, 1234),
+        "person_gesture_required",
+    );
+    assert_eq!(h.store.team(TEAM).unwrap().unwrap(), before);
+}
+
+#[test]
+fn person_gesture_is_required_before_first_create_writes_a_database() {
+    let mut h = Harness::empty();
+    let r = request(0, create());
+    refused(
+        super::super::apply(&mut h.store, &person(), &r, 1234),
+        "person_gesture_required",
+    );
+    assert!(!h.temp.path().join("teams/teams-v1.sqlite3").exists());
+}

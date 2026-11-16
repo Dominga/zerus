@@ -255,8 +255,42 @@ pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .filter_map(|p| {
+            Some((
+                p["id"].as_str()?.to_owned(),
+                p["name"].as_str().unwrap_or_default().to_owned(),
+            ))
+        })
         .collect())
+}
+
+/// One existing project name for native review, from bounded committed
+/// primary bytes. It takes no catalog writer lock, creates no catalog/lock
+/// file, and supplies no caller, membership or absence authority.
+pub(crate) fn existing_project_name(config: &Config, id: &str) -> Result<String> {
+    use anyhow::Context as _;
+    adoption::guard_load(config)?;
+    ensure!(
+        !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control),
+        "invalid project ID"
+    );
+    let bytes = read_regular(&config.dir.join("swarm/catalog.json"), 128 * 1024 * 1024).map_err(
+        |error| anyhow::anyhow!("The existing project catalog is unavailable ({error:?})."),
+    )?;
+    let data: store::Store =
+        serde_json::from_slice(&bytes).context("read the existing project catalog")?;
+    data.catalog.validate()?;
+    let values = data.catalog.values();
+    adoption::guard_load(config)?;
+    ensure!(
+        values.get(&catalog::Key::project(id, "alive")) == Some(&json!(true)),
+        "no project {id:?} in the catalog"
+    );
+    Ok(values
+        .get(&catalog::Key::project(id, "name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
 }
 
 /// The catalog lock, held for a test until dropped.

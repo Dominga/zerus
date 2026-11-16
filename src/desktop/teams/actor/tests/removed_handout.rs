@@ -361,7 +361,8 @@ fn a_removal_that_lands_while_the_delivery_child_runs_is_recorded_once() {
                         member: "m1".into(),
                     },
                 );
-                crate::teams::ops::apply(&mut store, &person(), &request, T0).unwrap();
+                crate::teams::ops::tests::apply_fixture(&mut store, &person(), &request, T0)
+                    .unwrap();
             }))
         });
         a.tick(&mut h.store, &mut p, TEAM, T0, false).unwrap();

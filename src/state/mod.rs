@@ -83,6 +83,22 @@ pub(crate) use task_binding_index::rows as task_binding_rows;
 mod process_index;
 // Advisory display data only; no production reader uses it in this slice.
 mod listing_metadata;
+pub(crate) use listing_metadata::control::MARKER as LISTING_METADATA_MARKER;
+pub(crate) use listing_metadata::listing::Query as ListingQuery;
+pub(crate) fn display_name(row: &Value) -> &str {
+    string(row, "name")
+}
+pub(crate) fn merge_ordinary_listing(
+    value: Value,
+    ids: &BTreeMap<String, String>,
+    archives: bool,
+    query: &ListingQuery,
+) -> Result<Value> {
+    listing_metadata::listing::merge(value, ids, archives, query)
+}
+pub(crate) fn listing_index(args: &[String]) -> Result<Value> {
+    listing_metadata::control::dispatch(args)
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_index_writer;
 mod labels;
@@ -630,6 +646,16 @@ fn label_row(session: &mut Value, record: &Value) {
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
     // An approval answered in Terminal sends no hook.
     let record = kimi_completion::reconcile(claude_approval::reconcile(record));
+    live_display_row(session, record, shared, process_work)
+}
+
+// Display-only inputs must never enter the canonical reconciliation above.
+fn live_display_row(
+    session: &mut Value,
+    record: Value,
+    shared: &Shared,
+    process_work: &mut processes::WorkSample,
+) -> Result<()> {
     session["resumable"] = json!(
         !string(&record, "conversation_id").is_empty()
             && string(&record, "error").is_empty()
@@ -1531,6 +1557,12 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             return Err("Unexpected archive catalog worker arguments".into());
         }
         return archive_catalog::worker();
+    }
+    if args.first().map(String::as_str) == Some("listing-metadata-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected listing metadata worker arguments".into());
+        }
+        return listing_metadata::worker::entry();
     }
     if args.first().map(String::as_str) == Some("task-binding-index-worker") {
         if args.len() != 1 {

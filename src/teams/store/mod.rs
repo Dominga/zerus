@@ -16,14 +16,18 @@ pub(crate) mod editing;
 mod holder;
 pub(crate) mod layout;
 pub(crate) mod phase_controls;
+mod phase_read;
 pub(crate) mod phase_snapshot;
 pub(crate) mod planning;
 pub(crate) mod publication;
 pub(crate) mod rework;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
+mod native_floor;
 mod native_person;
 pub(in crate::teams) mod non_delivery;
+pub(crate) mod observed_timing;
+pub(crate) mod person_actions;
 pub use decision_state::DecisionState;
 pub(crate) mod bases;
 pub(crate) mod pages;
@@ -48,8 +52,8 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-// Ordinary opens migrate native evidence to 4. Publication raises its floor
-// to 5 and SendBack to 6; raising the ceiling never opts ordinary queues in.
+// Cumulative native admission preserves the original layout-four nonce and
+// receipts while installing every publication/rework prerequisite at seven.
 pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = versions::CORE_LEGACY;
 pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = versions::CORE_PLANNING;
 pub(crate) const NATIVE_PERSON_LAYOUT: u32 = versions::CORE_NATIVE_PERSON;
@@ -333,8 +337,8 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if layout::native(version) {
-        native_person::validate(db)?;
+    if version == versions::CORE_NATIVE_FLOOR {
+        native_floor::validate(db)?;
         return schema_extensions(db);
     }
     let tx = db
@@ -367,15 +371,17 @@ fn initialize(db: &mut Connection) -> Result<()> {
         )
         .map_err(storage)?;
     }
-    schema_extensions(&tx)?;
-    if layout::native(current) {
+    if current == versions::CORE_NATIVE_FLOOR {
         // Another current opener won the writer. A current but damaged leaf
         // cannot be mistaken for an unmigrated legacy store.
-        native_person::validate(&tx)?;
+        native_floor::validate(&tx)?;
     } else {
-        native_person::migrate(&tx)?;
-        tx.pragma_update(None, "user_version", NATIVE_PERSON_LAYOUT)
-            .map_err(storage)?;
+        if layout::native(current) {
+            native_person::validate(&tx)?;
+        }
+        native_floor::legacy(&tx, current)?;
+        schema_extensions(&tx)?;
+        native_floor::migrate(&tx)?;
     }
     tx.commit().map_err(storage)
 }
@@ -435,6 +441,9 @@ pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
             code::INVALID_STATE,
             "store schema is newer than this version of Zerus",
         ));
+    }
+    if version == versions::CORE_NATIVE_FLOOR {
+        native_floor::validate(db)?;
     }
     Ok(())
 }

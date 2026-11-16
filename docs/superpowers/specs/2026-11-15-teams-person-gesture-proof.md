@@ -247,7 +247,7 @@ migration must state which remaining operations still have the `.31` limit.
 | Catalog/template import/save/remove and creation | Native exact revision/content and template bundle; guard legacy writers and first-store creation too. Reads and explicit exports do not gain mutation authority. |
 | Settings/delegations, owner-card decisions, dependencies, membership, name/goal, Stop/Archive team/member | Typed permit for every new Person decision, not just affirmative approvals. Bind exact team/revision/card/member and decision content. |
 | Person alternatives on Pause/Resume, route/admit/hold/release/return/reassign/cancel, draft phases, Accept/Reply/AddTask | Require a permit when acting as Person; keep independently proved lead/member authority and existing delegation/restriction checks. Fence task intake's implicit Person admission before task/document writes. |
-| `advance_base` and phase acceptance | Apply this same rule when these writers land, including exact reviewed ref/base and phase generation. This main revision has no `advance_base` operation; approval availability for phase drafts is explicitly false. Do not invent a current CLI entry or treat future operations as implicitly authorized. |
+| `advance_base` and phase acceptance | Apply this same rule when these writers land, including exact reviewed ref/base and phase generation. The original design baseline lacked these operations. S2 explicitly enrolls the admitted advance-base, publication and rework actions with their exact canonical sources; later variants remain closed until separately enrolled. |
 | Service observers, standing confirmations and task/session execution | Keep current narrow Service/session authority. They do not turn into Person actors and cannot refresh a Person permit. Existing standing-confirmation scope is unchanged. |
 
 Ancestry, markers and hosted per-call proof remain defense in depth and still
@@ -346,3 +346,115 @@ is not a killed authority mutant.
 Every authority-changing slice receives G1 review and local qualification.
 The coordinator chooses slices; this note authorizes no implementation or
 installation and changes no current Person/session/service behavior.
+
+## Slice 2 implementation protocol (in progress)
+
+Slice 2 covers team mutations and decisions, first Create, and task intake.
+The coordinator separated ordinary commands on live team-owned tasks into
+S2b (`zerus-63rru.31.4`), immediately after S2 and before this parent closes.
+The Person bypass in those ordinary task commands remains interim until S2b;
+its same-user limit must remain explicit. Preview and catalog/template
+configuration remain for S3. Session and Service authority does not widen.
+
+The existing frontend control line is 64 KiB, while a valid draft-phase
+request may contain 250000 bytes. V2 therefore binds a small full-plan
+reference (request UUID, team, expected revision, exact byte count and SHA256)
+in the native original. A separate, data-only native preparation request
+stages pieces of at most 32 KiB. It requires the genuine original window
+child and Service/configuration binding, but grants no Person admission.
+Its typed consumer cannot consume a Person action. Completed data must decode
+as the exact closed plan and match its reference before canonical review.
+The cache holds at most 64 plans at the existing 256 KiB request bound,
+expires inert data, and never grants absence or replay authority. V1 owner-card
+intent encoding and original-receipt reads remain compatible.
+
+The action original is registered only after the native dialog accepts the
+canonical review. Its sealed permit binds the full plan, the computer,
+configuration/service epoch, the existing store object and immutable nonce,
+and the canonical team/target facts. It is checked after the appropriate
+writer locks and immediately before the first mutation. A card permit cannot
+be substituted for Create or another operation, including before first-store
+setup. New Person mutations without any permit refuse before store discovery.
+
+First Create must bind canonical state-directory identity and observed store
+absence, then exclude another first-store creator through setup. The proof is
+checked before setup as well as under the actual Teams writer transaction.
+The receipt binds the database object that was created, not merely the earlier
+absence. An existing or replaced store cannot be adopted through an absent
+binding. Ordinary older opens are fenced by the new schema. Supported older
+writers with an already-open connection must also re-read the monotonic
+execution floor under the writer lock, before original-receipt replay or any
+write. Arbitrary same-user executable replacement and direct store injection
+remain outside the stated boundary.
+
+The cumulative S2 core floor is 7. Publication 5 and separately reviewed
+rework 6 must be admitted first, and the engine which activates 7 must
+understand both. A later floor 6 cannot fence an engine already writing at 7.
+Neither ordinary open nor feature activation may lower an existing mark.
+The registry owns these numbers; S2 must not use a temporary alternative
+floor or combine the separately reviewed rework slice with this authority
+change. The migration preserves existing native nonces and receipts and all
+publication/rework rows. It creates the intake evidence leaf only when
+entirely absent in a legacy layout; a partial, corrupt or missing required
+current-layout leaf is unavailable and must not be reconstructed. Both
+writer-lock orderings and a connection opened before activation need explicit
+controls before final integration.
+
+Cumulative installation from native 4 or publication 5 without Send back
+installs the complete rework prerequisite inside the same writer transaction.
+It retains the 65,536-publication and 256 MiB preflight and raw parent rebuild,
+without decoding/re-encoding original snapshots or inventing an episode.
+A late failure rolls back the floor, prerequisites and raw rows together.
+
+Phase consent binds separate exact canonical sources: the selected episode
+and its retained BASE, the proposal (at most 200 rows and 262,144 aggregate
+bytes), and any reserved NEW approval (262,144 bytes per snapshot). Each
+saved original request retains its separate 530,000-byte bound; episode
+header/comment bounds are 4,096/16,384 bytes. The frontend's 250,000-byte
+input bound is distinct. Before consent and under writer custody, the same
+source identities and digests must match. A published correction switches
+current selection to NEW; the prior episode's BASE remains historical evidence,
+never a replacement for the current publication. Future controls must enroll
+their own identities explicitly; this slice does not grant unknown operations.
+
+Intake is a compound metadata action. Project locks precede the Teams writer
+lock. Native admission and a durable exact-request reservation must precede
+any task/document write. Only its live, nonserializable original custody may
+continue the admitted action; a reservation read after restart cannot restart
+it. A crash between the replicated task save and the queue receipt therefore
+stays Unknown. Retain the existing partial outcome when the task exists but
+its team queue refuses or cannot be confirmed. Preserve the existing Session
+and Service intake checks and settlement rules.
+
+The reserved UUID also fences the common Teams writer for every other actor;
+changing the actor or operation cannot spend it during the document-side gap.
+Only the original intake custodian may enter that reserved writer. Its permit
+borrows the original's project/document custody, so the outer original retains
+the project lock through the actual Teams commit. Finalization can restore a
+known refused intake's previous document binding and save its exact partial
+receipt in that same transaction. A storage-uncertain result keeps the durable
+Unknown reservation; no saved header can reconstruct the borrowed custodian.
+
+A still-current original may record a closed semantic refusal while holding
+its exact project and Teams writer, including a stale reviewed revision.
+That records data only: it creates no execution custodian and saves no task.
+A verified new-task absence may then be shown as not created; missing or
+storage-uncertain evidence stays Unknown. Final replies come from the durable
+original after commit, never an in-memory result tentatively written inside
+a transaction that final consent consumption may still roll back. The initial
+saved-task observation shares the queue/result transaction; a storage failure
+keeps the original Unknown rather than swallowing the observation error.
+
+The New task form must checkpoint its exact native original before any
+authority-bearing request is sent. Its recovery action reads the original
+receipt only; it cannot invoke `task add --team` again. A legacy or missing
+native original stays unavailable, never adopting a current revision. A
+proved not-sent preparation/cancel may show a new native confirmation; that
+fact alone grants no permission. Pending reservations and unknown originals
+remain bounded and cannot be replaced or reconstructed by a retry.
+
+Team metadata work must run off the desktop actor, with bounded admission and
+retained original lifetime until it settles. This is not the task-message
+native executor: that executor currently has a separate macOS refusal, which
+must not be counted as a positive Mac control for this path. The new metadata
+path needs its own private Arch and headless Mac qualification and G1 review.

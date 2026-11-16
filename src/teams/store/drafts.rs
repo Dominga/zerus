@@ -148,16 +148,10 @@ impl Store {
                 r.get(0)
             })
             .map_err(storage)?;
-        let episode = rework::latest(&tx, team, phase)?;
+        let source = super::phase_read::source(&tx, team, phase)?;
+        let episode = source.episode;
         let held = episode.as_ref().filter(|r| r.state != "published");
-        let publication = if let Some(r) = held {
-            Some(
-                publication::by_id(&tx, team, &r.base_publication)?
-                    .ok_or_else(|| storage("The rework base publication is missing."))?,
-            )
-        } else {
-            publication::publication(&tx, team, phase)?
-        };
+        let publication = source.publication;
         let nodes = if let Some(p) = &publication {
             generation = Some(p.generation);
             publication::snapshot(&tx, team, &p.id)?

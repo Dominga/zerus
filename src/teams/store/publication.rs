@@ -6,10 +6,25 @@ use zerus_team_plan::draft::DraftNode;
 
 pub(crate) const PUBLICATION_LAYOUT: u32 = versions::CORE_PUBLICATION;
 
+fn complete(db: &Connection) -> Result<bool> {
+    db.query_row("SELECT count(*)=11 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive','phase_draft_previous','phase_cards','phase_draft_dependencies','phase_draft_dependants')", [], |r| r.get(0)).map_err(storage)
+}
+
+pub(super) fn validate(db: &Connection) -> Result<()> {
+    if complete(db)? {
+        Ok(())
+    } else {
+        Err(storage(
+            "Publication evidence is incomplete; no team data was changed.",
+        ))
+    }
+}
+
+pub(super) fn has_evidence(db: &Connection) -> Result<bool> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name IN ('phase_reviews','phase_publications','phase_publication_nodes','phase_draft_previous','phase_cards','phase_draft_dependencies'))", [], |r| r.get(0)).map_err(storage)
+}
+
 pub(super) fn extend(db: &Connection) -> Result<()> {
-    let complete = |db: &Connection| -> Result<bool> {
-        db.query_row("SELECT count(*)=11 FROM sqlite_master WHERE name IN ('phase_reviews','phase_publications','phase_publication_pending','phase_publication_nodes','phase_publication_work','phase_nodes_live','phase_nodes_archive','phase_draft_previous','phase_cards','phase_draft_dependencies','phase_draft_dependants')", [], |r| r.get(0)).map_err(storage)
-    };
     if complete(db)? {
         return Ok(());
     }

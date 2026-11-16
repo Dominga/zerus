@@ -1,6 +1,9 @@
 use super::*;
 use std::fs;
 mod bench;
+mod mobile;
+mod parity;
+mod readers;
 mod writers;
 
 fn enable(root: &Path) {
@@ -636,6 +639,23 @@ fn every_binding_layout_is_eligible_but_archives_routes_and_wrong_identities_are
     let root = fixture();
     let mut value = record();
     for directory in storage::BINDING_DIRS {
+        let agent = if directory.starts_with("dsh/") {
+            "dsh"
+        } else if directory.starts_with("opencode/") {
+            "opencode"
+        } else {
+            "codex"
+        };
+        value["name"] = json!(format!("{agent}/example/one"));
+        value["agent"] = json!(agent);
+        if agent != "codex" {
+            value["backend"] = json!(agent);
+            value["conversation_id"] = json!(if agent == "dsh" {
+                "session-native"
+            } else {
+                "ses_native"
+            });
+        }
         let id = directory.ends_with("sessions");
         value["layout"] = if id { json!("id") } else { Value::Null };
         let file = if id {
@@ -1011,7 +1031,7 @@ fn an_unknown_future_cache_schema_is_unavailable_without_failing_canonical_io() 
     let path = path(root.path());
     let value = record();
     let store = Store::open(root.path()).unwrap();
-    store.db.execute_batch("PRAGMA user_version=2;").unwrap();
+    store.db.execute_batch("PRAGMA user_version=999;").unwrap();
     drop(store);
     write_at(root.path(), &path, &value, |publication| {
         storage::atomic_observed(&path, &value.to_string(), publication)
@@ -1029,7 +1049,7 @@ fn an_unknown_future_cache_schema_is_unavailable_without_failing_canonical_io() 
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        999
     );
     assert!(path.is_file());
 }

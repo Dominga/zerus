@@ -109,6 +109,22 @@ pub(in crate::desktop::teams) trait Ports {
     ) -> Result<zerus_replica::Changes>;
     /// The trusted adapter reads under the project lock and records the fact.
     fn observe(&mut self, store: &mut Store, task: &TaskRef) -> Result<()>;
+    fn timing_supported(&self) -> bool {
+        false
+    }
+    /// Default adapters retain their ordinary observation behavior. Only the
+    /// native task-document reader returns a held, source-proven snapshot.
+    fn observe_timing(
+        &mut self,
+        store: &mut Store,
+        task: &TaskRef,
+        _epoch: &str,
+        _generation: Option<String>,
+        _offset: Option<u64>,
+    ) -> Result<Option<crate::teams::tasks::timing::TimingRead>> {
+        self.observe(store, task)?;
+        Ok(None)
+    }
     /// Both a current native fleet row and the session's task index must agree.
     fn free(&mut self, team: &Team, member: &Member) -> Result<bool>;
     /// The same answer as [`Ports::free`] from the same read, and when the

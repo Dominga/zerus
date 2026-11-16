@@ -140,18 +140,24 @@ fn receipt_replay_never_repeats_an_edit_and_stale_inputs_write_nothing() {
             draft: draft(&[1]),
         },
     );
-    let first = apply(&mut h.store, &person(), &r, 1234).unwrap();
-    assert_eq!(apply(&mut h.store, &person(), &r, 1234).unwrap(), first);
+    let first = crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap();
+    assert_eq!(
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap(),
+        first
+    );
     edit(&mut h, 1, 1, draft(&[1, 2])).unwrap();
     let actual = h.store.phase_draft(TEAM, 1).unwrap();
-    assert_eq!(apply(&mut h.store, &person(), &r, 1234).unwrap(), first);
+    assert_eq!(
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &r, 1234).unwrap(),
+        first
+    );
     assert_eq!(h.store.phase_draft(TEAM, 1).unwrap(), actual);
     let mut changed = r.clone();
     if let Operation::SubmitDraftPhase { draft, .. } = &mut changed.operation {
         draft.title = "Other".into();
     }
     refused(
-        apply(&mut h.store, &person(), &changed, 1234),
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &changed, 1234),
         code::DUPLICATE,
     );
     refused(edit(&mut h, 1, 1, draft(&[1])), code::STALE_REVISION);
@@ -164,7 +170,7 @@ fn receipt_replay_never_repeats_an_edit_and_stale_inputs_write_nothing() {
         },
     );
     refused(
-        apply(&mut h.store, &person(), &stale, 1234),
+        crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &stale, 1234),
         code::STALE_REVISION,
     );
     assert_eq!(h.store.phase_draft(TEAM, 1).unwrap(), actual);

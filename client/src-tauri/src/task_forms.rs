@@ -398,15 +398,24 @@ fn not_queued(reply: &serde_json::Map<String, Value>, task: &str, team: &str) ->
         .unwrap_or_default();
     Some(json!({"task": task, "team": team, "code": code, "reason": reason}))
 }
-fn submitted(
+fn submitted_native(
     slot: &mut Slot,
     store: &DraftStore,
     recover: bool,
     backlog: bool,
     target: TaskTarget,
-    read: impl Fn(&str, &str) -> Result<Value, String>,
-    run: impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
+    io: (
+        impl Fn(&str, &str) -> Result<Value, String>,
+        impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
+    ),
+    mut native: impl FnMut(
+        &mut Slot,
+        &DraftStore,
+        bool,
+        &Request,
+    ) -> Result<serde_json::Map<String, Value>, String>,
 ) -> Result<(bool, Option<String>), String> {
+    let (read, run) = io;
     if slot.blocked {
         return Err(zerus_client_core::drafts::NOT_RESTORED.into());
     }
@@ -472,30 +481,28 @@ fn submitted(
             return Err("Creation was interrupted. Press Enter to recover this same card.".into());
         }
         let (_, intent) = request(slot)?;
-        let target = TaskTarget {
-            host: intent.host,
-            session: if intent.session == "any" {
-                String::new()
-            } else {
-                intent.session
-            },
-            session_id: intent.session_id,
-            mode: String::new(),
+        let result = if intent.team.is_some() {
+            native(slot, store, recover, &intent)
+        } else {
+            let target = TaskTarget {
+                host: intent.host.clone(),
+                session: if intent.session == "any" {
+                    String::new()
+                } else {
+                    intent.session.clone()
+                },
+                session_id: intent.session_id.clone(),
+                mode: String::new(),
+            };
+            run(&TaskCall::add_named(
+                &intent.project,
+                &intent.title,
+                &intent.request_id,
+                &target,
+                intent.stage == "backlog",
+            ))
         };
-        let add = |target: TaskTarget| {
-            if let Some(team) = &intent.team {
-                TaskCall::add_team_named(&intent.project, &intent.title, &intent.request_id, team)
-            } else {
-                TaskCall::add_named(
-                    &intent.project,
-                    &intent.title,
-                    &intent.request_id,
-                    &target,
-                    intent.stage == "backlog",
-                )
-            }
-        };
-        run(&add(target)).and_then(|reply| {
+        result.and_then(|reply| {
             let task = tasks_write::created(&reply, &intent.request_id)?;
             if task["project"].as_str() != Some(&slot.project) {
                 return Err(
@@ -512,7 +519,8 @@ fn submitted(
         Ok(v) => v,
         Err(error) => {
             slot.stored.sending = false;
-            slot.stored.uncertain = true;
+            slot.stored.uncertain =
+                slot.kind == Kind::Title || slot.stored.form_state.contains_key("request");
             checkpoint(slot, store)?;
             return Err(error);
         }
@@ -523,11 +531,120 @@ fn submitted(
     slot.stored.sending = false;
     slot.stored.uncertain = false;
     slot.stored.form_state.remove("request");
+    slot.stored.form_state.remove("team_native_original");
     slot.stored.form_state.remove("initialized");
     checkpoint(slot, store)?;
     slot.rev += 1;
     slot.error.clear();
     Ok((true, created))
+}
+
+fn submit_team_native(
+    app: &tauri::AppHandle,
+    service: Option<std::sync::Arc<crate::desktop_service::Service>>,
+    actions: &crate::desktop_service::team_person_actions::Actions,
+    slot: &mut Slot,
+    store: &DraftStore,
+    recover: bool,
+    request: &Request,
+) -> Result<serde_json::Map<String, Value>, String> {
+    use zerus_client_core::desktop::team_person_actions as wire;
+    let team = request
+        .team
+        .as_ref()
+        .ok_or("The reserved team is unavailable.")?;
+    let draft = wire::TaskDraft {
+        request_id: request.request_id.clone(),
+        team: team.clone(),
+        action: wire::Action::NewTask {
+            project: request.project.clone(),
+            title: request.title.clone(),
+            backlog: request.stage == "backlog",
+        },
+    };
+    let original = slot
+        .stored
+        .form_state
+        .get("team_native_original")
+        .map(|value| {
+            serde_json::from_value::<wire::TaskOriginal>(value.clone()).map_err(|_| {
+                "The original native task evidence is unavailable. Nothing was replayed."
+            })
+        })
+        .transpose()?;
+    let had_original = original.is_some();
+    match crate::desktop_service::team_person_actions::run_task(
+        app,
+        service,
+        actions,
+        &draft,
+        original,
+        recover,
+        |original| {
+            slot.stored.form_state.insert(
+                "team_native_original".into(),
+                serde_json::to_value(original).map_err(|e| e.to_string())?,
+            );
+            slot.stored.sending = true;
+            checkpoint(slot, store)
+        },
+    ) {
+        Ok(reply) => Ok(reply),
+        Err(error) => {
+            if error.closed_without_task
+                || (!error.uncertain
+                    && !had_original
+                    && !slot.stored.form_state.contains_key("team_native_original"))
+            {
+                // Proven not sent: preserve the title draft, but a later
+                // submit must be a new native review with a new UUID.
+                slot.stored.form_state.remove("request");
+                slot.stored.form_state.remove("team_native_original");
+                slot.stored.sending = false;
+                slot.stored.uncertain = false;
+                checkpoint(slot, store)?;
+            }
+            Err(error.message)
+        }
+    }
+}
+
+/// Existing form tests model native responses explicitly. The callback is
+/// inert test data and creates no native permit or canonical Team/Task row.
+#[cfg(test)]
+fn submitted(
+    slot: &mut Slot,
+    store: &DraftStore,
+    recover: bool,
+    backlog: bool,
+    target: TaskTarget,
+    read: impl Fn(&str, &str) -> Result<Value, String>,
+    run: impl Fn(&TaskCall) -> Result<serde_json::Map<String, Value>, String>,
+) -> Result<(bool, Option<String>), String> {
+    submitted_native(
+        slot,
+        store,
+        recover,
+        backlog,
+        target,
+        (read, &run),
+        |slot, _, recover, request| {
+            if recover && !slot.stored.form_state.contains_key("team_native_original") {
+                return Err(
+                    "The original native task evidence is unavailable. Nothing was replayed."
+                        .into(),
+                );
+            }
+            // Compatibility DTO models retain their existing response generator;
+            // production never invokes this legacy team-task command.
+            run(&TaskCall::add_team_named(
+                &request.project,
+                &request.title,
+                &request.request_id,
+                request.team.as_deref().unwrap(),
+            ))
+        },
+    )
 }
 /// The New task form's submit, as the webview sends it: strict, so a field
 /// this version does not know is refused, never left out of what is sent.
@@ -551,6 +668,8 @@ pub async fn task_form_submit(
     writes: State<'_, TaskWrites>,
     composers: State<'_, Composers>,
     app: State<'_, crate::commands::AppState>,
+    teams: State<'_, crate::teams::Teams>,
+    window: tauri::AppHandle,
     input: Submit,
 ) -> Result<Value, String> {
     let Submit {
@@ -572,6 +691,8 @@ pub async fn task_form_submit(
     let permit = editor.lane.begin()?;
     let composers = composers.inner().clone();
     let pump = app.pump();
+    let service = app.desktop_service();
+    let native_actions = teams.native_actions();
     tauri::async_runtime::spawn_blocking(move || {
         let (_write, _permit) = (write, permit);
         let mut guard = crate::composer::lock(&editor.slot);
@@ -620,14 +741,26 @@ pub async fn task_form_submit(
         } else {
             TaskTarget::default()
         };
-        let result = submitted(
+        let result = submitted_native(
             slot,
             &composers.0.store,
             recover,
             backlog,
             assignment,
-            document,
-            |call| tasks_write::run(&zerus_client_core::default_hgs(), call),
+            (document, |call: &TaskCall| {
+                tasks_write::run(&zerus_client_core::default_hgs(), call)
+            }),
+            |slot, store, recover, request| {
+                submit_team_native(
+                    &window,
+                    service.clone(),
+                    &native_actions,
+                    slot,
+                    store,
+                    recover,
+                    request,
+                )
+            },
         );
         let (saved, created) = match result {
             Ok(value) => value,
@@ -637,7 +770,7 @@ pub async fn task_form_submit(
                 } else if slot.kind == Kind::NewCard
                     && slot.stored.form_state.contains_key("request")
                 {
-                    format!("{error}\nPress Enter to retry with the same card identity.")
+                    format!("{error}\nPress Enter to check the original card result.")
                 } else {
                     error
                 };
@@ -711,6 +844,51 @@ mod tests {
             },
         )
         .unwrap();
+    }
+    /// Literal legacy draft request data, saved by the real DraftStore. It
+    /// predates native custody and must never grant a new authority-bearing call.
+    #[test]
+    fn legacy_team_form_recovery_does_not_call_the_cli_writer() {
+        let root = crate::composer::tests::dir("task-native-legacy-recovery");
+        let store = crate::composer::tests::drafts(&root);
+        let forms = TaskForms::default();
+        let mut slot = opened(
+            &forms,
+            &store,
+            Kind::NewCard,
+            "example".into(),
+            String::new(),
+            |_, _| panic!(),
+        )
+        .unwrap();
+        slot.stored.form_state.insert("request".into(),json!({"project":"example","title":"Legacy queued card","request_id":ID,"stage":"todo","session":"any","host":"","session_id":"","team":"33333333-3333-4333-8333-333333333333"}));
+        checkpoint(&mut slot, &store).unwrap();
+        destination(&mut slot, None).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = submitted(
+            &mut slot,
+            &store,
+            true,
+            false,
+            TaskTarget::default(),
+            |_, _| panic!(),
+            |_| {
+                calls.set(calls.get() + 1);
+                Ok(json!({"task":{"uuid":ID,"project":"example"}})
+                    .as_object()
+                    .unwrap()
+                    .clone())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a legacy draft has no native original to recover"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "legacy recovery must read no new CLI writer"
+        );
     }
     #[test]
     fn title_restore_empty_draft_cursor_and_unknown_fields_survive_reopening() {
@@ -964,19 +1142,15 @@ mod tests {
             false,
             TaskTarget::default(),
             |_, _| panic!(),
-            |again| {
-                assert_eq!(again, &call, "recovery sends the same reserved card");
-                let id = again.args[again
-                    .args
-                    .iter()
-                    .position(|arg| arg == "--request-id")
-                    .unwrap()
-                    + 1]
-                .clone();
-                Ok(json!({"task":{"uuid":id,"project":"example","stage":"todo","title":"Queued card"}}).as_object().unwrap().clone())
-            },
+            |_| panic!("legacy team recovery never repeats the CLI writer"),
         );
-        assert!(result.unwrap().0);
+        assert!(result.is_err());
+        // This is a separate legacy non-team compatibility case; it must not
+        // adopt or overwrite the refused team's saved original.
+        restored.stored.form_state.remove("request");
+        restored.stored.sending = false;
+        restored.stored.uncertain = false;
+        checkpoint(&mut restored, &store).unwrap();
         // An older reserved draft without a team recovers to any session.
         let mut older = open();
         edit(&mut older, "Older card");

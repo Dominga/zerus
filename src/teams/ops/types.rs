@@ -232,6 +232,10 @@ pub enum Operation {
         scope: zerus_team_plan::phase_control::PhaseControlScope,
         acceptance: Acceptance,
     },
+    RecordTimingFact {
+        node: u32,
+        observation: Box<super::observed_timing::TimingInput>,
+    },
     SendBackPhase {
         phase: u32,
         publication: String,

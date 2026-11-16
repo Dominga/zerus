@@ -26,7 +26,7 @@ fn reported_task(h: &mut Harness) -> (TaskRef, u32) {
         machine: "00000000-0000-4000-8000-0000000000aa",
         actor: TaskActor::Person,
     };
-    let node = crate::teams::tasks::send(&caller, &task, TEAM, None, None)
+    let node = crate::teams::tasks::models::send(&caller, &task, TEAM, None, None)
         .unwrap()
         .node;
     let store = ProjectStore::open(&h.temp.path().join("replica"), &task.project).unwrap();

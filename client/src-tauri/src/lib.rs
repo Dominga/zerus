@@ -129,6 +129,7 @@ mod task_forms;
 mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
+mod task_team;
 #[cfg(feature = "live")]
 mod team_drawers;
 #[cfg(feature = "live")]
@@ -1745,6 +1746,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         teams::teams_tasks_changed,
         teams::teams_page,
         teams::teams_phases,
+        teams::observed::teams_observed,
         team_drawers::teams_drawer_page,
         team_profile_export::team_profile_export,
         team_providers::teams_provider_config,

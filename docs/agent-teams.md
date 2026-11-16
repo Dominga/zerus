@@ -144,8 +144,9 @@ exactly what the dialog showed you:
   **Check** asks again with the same request, so it can never create a second
   team.
 
-`hgs team create` at a terminal may leave out the digest and the permissions;
-the team then takes the template as the catalog holds it at that moment.
+Create team requires native confirmation in the Zerus window. A Person call
+to `hgs team create`, including through `@host`, returns
+`person_gesture_required` before creating anything.
 
 Team and template names may use ordinary Unicode letters. Creating a team,
 saving a catalog or importing a template refuses control characters, line
@@ -309,8 +310,8 @@ invented outcome.
 In **New team**, choose **Plan a goal first**, enter a goal and review the
 template and permissions. **Start planning** starts only the lead, in its own
 worktree. Other members and the integration branch wait for your approval of
-the initial plan. The CLI equivalent is `hgs team start-planning --template ID`
-with the usual creation request on stdin and a nonblank goal.
+the initial plan. A Person call to `hgs team start-planning` is refused with
+`person_gesture_required`; start planning in the window.
 
 The lead receives a durable inbox notice and can read the original goal with
 `hgs team current`. It submits drafts that you can inspect in **Layers**.
@@ -382,9 +383,12 @@ later slices.
   queue"), with the same running/paused choices. Stopped, archived, finished
   and not-yet-running teams are not offered. Identically named live teams
   include an identifying suffix in both menus.
-- From a terminal: `hgs task add --project PROJECT --team TEAM < prompt.txt`
-  for a new task, `hgs task target REF team TEAM` for an existing one.
-  `--role` and `--pipeline` route the task as you send it.
+- An independently proved agent may use
+  `hgs task add --project PROJECT --team TEAM < prompt.txt`.
+  `--role` and `--pipeline` retain their existing routing checks. A Person
+  creates or sends a task through the window; Person intake from the CLI
+  requires a native gesture. Ordinary commands on an existing team-owned
+  task remain an interim path for S2b, as listed below.
 
 The task stays an ordinary task with a `team` key that names its team and
 home computer. A task you send, or the lead sends, is admitted at once. A task
@@ -736,26 +740,28 @@ tool approvals.
   A private process namespace also prevents the caller proof from seeing
   the host outside it: the refusal names that limit and the remedy. Run team
   commands outside that sandbox or turn its private process namespace off.
-- Owner-card **Decide** requires an explicit native confirmation in the Zerus
-  window. A person's `hgs team decide` command is refused with
-  `person_gesture_required`, including remote commands. Decide the card in the
-  window on the computer which owns the team. Neither a CLI Person claim nor
-  a renderer `confirmed` flag grants this permission. A lost result is checked
-  by its original receipt only; an absent or unreadable receipt never replays
-  the decision.
-- After this first migration slice, all other Person operations remain interim:
-  creating and editing teams, Start planning, draft phase submission/editing,
-  settings (including validation-provider overrides) and membership,
-  dependency changes, advance-base, queue and phase decisions,
-  intake, preview and catalog/template changes. Future phase approval,
-  acceptance operations also remain interim until the
-  following slice explicitly admits them. They move to native
-  gesture admission in the following slices. For these operations, a person's
-  command is still recognized by an interim rule: no live agent session
-  may be among its process ancestors. It guards against accidents and against
-  an agent that merely drops its session markers, not against one that sets
-  out to pass as you. Every reply to such a command carries a note that
-  states what this rule cannot detect.
+- Person team decisions and mutations require explicit native confirmation in
+  the Zerus window on the computer that owns the team. This includes owner-card
+  **Decide**, Create, Start planning, team settings and membership, dependencies,
+  advance-base, queue and phase decisions (including Send back and correction
+  approval/rejection), and sending or creating a task for a team. A person's CLI command for these actions returns
+  `person_gesture_required`, including remote commands. Independently proved
+  lead/member commands and service facts retain their existing scope.
+- A CLI Person claim or renderer `confirmed` flag grants no permission. The
+  native confirmation binds the exact payload, computer, configuration, store,
+  team, revision and original UUID. After an uncertain result, Check reads only
+  that original receipt; missing, corrupt or foreign evidence never replays the
+  action. An unknown task intake preserves its original and cannot be resumed
+  or replaced with a new UUID. A new confirmation is allowed only for a known
+  closed refusal or a later explicit new action.
+- Two Person writer groups remain interim until the following slices: ordinary
+  task rename/edit/stage/target/send/cancel commands on a live team-owned task
+  (S2b), and preview, computer configuration, catalog/template and legacy
+  import/save/remove writers (S3). These still rely on process ancestry as
+  defense in depth. That rule guards against accidents and a session merely
+  dropping markers; it cannot stop same-user arbitrary code, detach/re-exec,
+  replacement of trusted software or state redirection. The full Person
+  authority migration is incomplete until both groups move to native admission.
 - An accepted or cancelled queue entry is already decided and takes no
   Cancel. A task's later run must be observed as its own current attempt;
   the team's cancellation never takes authority over an unrelated run.

@@ -998,9 +998,9 @@ fn permit_for_reservation(
 ) -> Result<Permit> {
     let fresh = permit(store, body, here)?;
     if fresh.kind == "handout" {
-        // Spawn admission precedes the child's project/task lock. A phase
-        // pause or barrier may win between them. Recheck the same kernel
-        // under the Teams writer retained through the reservation save.
+        // Spawn admission precedes this project's task lock. Recheck the
+        // existing readiness kernel under the Teams writer retained through
+        // the new attempt's save. In-hands reopen and receipt recovery differ.
         crate::teams::ops::handout_admissible(
             store
                 .db

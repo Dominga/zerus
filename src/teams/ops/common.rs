@@ -15,6 +15,7 @@ pub(super) struct Context<'a> {
     /// The earlier decision this operation's decision replaced, for the
     /// journal.
     pub superseded: Option<u64>,
+    pub timing: Option<super::observed_timing::Decision>,
 }
 impl Context<'_> {
     pub fn node(&self, id: u32) -> Result<Node> {

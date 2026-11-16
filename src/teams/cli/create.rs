@@ -39,6 +39,19 @@ pub(super) fn run_kind(
     let mut store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
     actor::person_only(&identity, command)?;
+    let request = prepare(config, &store, template, provided, planning)?;
+    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
+    super::commands::reply_view(&identity.actor, &request.team, &reply)
+}
+/// Pure request preparation shared by the command and explicit admitted
+/// writer models. It grants no actor or execution authority.
+pub(super) fn prepare(
+    config: &Config,
+    store: &Store,
+    template: &str,
+    provided: Option<&str>,
+    planning: bool,
+) -> Result<Request, Problem> {
     let mut fields = input::object(&request_input(provided)?)?;
     super::commands::refuse_operation_word(&fields)?;
     // The field is a digest when it is there, or it is left out. Present but
@@ -52,7 +65,7 @@ pub(super) fn run_kind(
         }
     }
     complete_delegations(&fields)?;
-    let (bundle, replay) = snapshot(&store, config, template, &fields, planning)?;
+    let (bundle, replay) = snapshot(store, config, template, &fields, planning)?;
     fields.insert(
         "op".into(),
         json!(if planning { "start_planning" } else { "create" }),
@@ -66,9 +79,9 @@ pub(super) fn run_kind(
     if !replay {
         check_template(&request)?;
     }
-    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
-    super::commands::reply_view(&identity.actor, &request.team, &reply)
+    Ok(request)
 }
+
 fn snapshot(
     store: &Store,
     config: &Config,

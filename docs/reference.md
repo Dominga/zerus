@@ -6038,16 +6038,29 @@ Unknown options and repeated valued options are refused ("given twice");
 a repeated switch is accepted and reads as once. `--team` takes a lowercase
 canonical UUID; a lead or a member may omit it for its own team.
 
-**Owner-card decisions.** A person decides an owner card in the Zerus window,
-after its native confirmation of the canonical card, computer, decision and
-revision. `hgs team decide` returns `person_gesture_required`, including an
-unmarked, detached or remotely forwarded Person command. A renderer
-`confirmed` flag, an actor label or a saved receipt supplies no new permission.
-An uncertain decision is checked only through its exact original receipt;
-missing, corrupt or foreign evidence never resends it. Teams schema 3 retains
-the native intent with the decision's receipt and fences older CLI writers.
-The remaining Person operations below still use the interim caller rule
-during the following migration slices.
+**Person team decisions and mutations.** Perform these in the Zerus window
+on the computer that owns the team, after native confirmation of the exact
+operation, payload, computer, configuration, store, team, revision and UUID.
+This includes owner-card Decide, Create/Start planning, settings, membership,
+dependencies, advance-base, queue/phase decisions and team task intake.
+A person's CLI command returns `person_gesture_required`, including unmarked,
+detached and remotely forwarded commands. A renderer `confirmed` flag, actor
+label or saved receipt supplies no new permission. Independently proved
+Session and Service operations retain their existing authority checks.
+
+Check reads only the exact original receipt. Missing, corrupt or foreign
+evidence never sends the operation again, adopts a new revision or restarts
+an unknown task intake. The native task original is reserved before document
+writes; its one live custodian keeps project exclusion through the team commit.
+Core layout 7 includes the cumulative native evidence and fences older writers;
+its migration preserves existing nonce, receipts and phase evidence.
+
+Ordinary commands that mutate a live team-owned task (rename, edit, stage,
+target, send and cancel) remain interim for S2b. Preview, computer
+configuration, catalog/template and legacy import/save/remove writers remain
+interim for S3. The ancestry check below is defense in depth for those paths,
+not a proof against same-user arbitrary code, detach/re-exec or redirected
+state. The parent migration remains open until these writers are covered.
 
 **Who runs other commands.** `hgs team` proves its caller with one interim check.
 With the preview on, so does an `hgs task` command that touches a team: one
@@ -8718,6 +8731,50 @@ that machine's own listing, so their `host` is the name the machine gives itself
 (its first `HGS_SELF` name, otherwise its host name), which may differ from the
 alias; an unreachable peer's entry names the alias. Key a peer by the alias you
 asked for, as Zerus does; the local entry's `peers` lists those aliases.
+
+<a id="bounded-ordinary-listing"></a>
+
+Ordinary listing automatically initializes its internal display cache on qualified
+Linux computers with no existing policy. No cache switch is needed for normal
+use. `hgs listing-index disable --json` remains an explicit kill switch;
+`enable --json` and `status --json` remain available for diagnostics. Existing
+disabled, malformed or unreadable policy is preserved. Initialization/enable
+reports or temporarily refuses as `building`; a coalesced background worker establishes coverage
+independently of automatic recovery policy. Status distinguishes disabled,
+building, ready and unavailable. macOS/Windows activation and desktop watch
+consumption are separate follow-ups; their existing paths remain in use.
+
+When explicitly disabled or policy is unavailable, ordinary Linux `ls` accepts only a completely preflighted
+small inventory: at most 256 directory entries and 16 MiB of canonical record
+bodies, with 250-ms preflight/verification checks. Larger, changing or unsupported
+input refuses with a nonzero exit and no partial JSON. With the cache active, an
+unready, stale or corrupt index also refuses; it never rescues a request by
+scanning full canonical records. Stable pages use the exact generation's native
+row versions and a separate read-only SQLite transaction. The legacy JSON body
+is complete or refused (64 MiB/10-second cooperative response bound).
+
+`hgs ls --json --local --paged --page-size 64` returns at most 128 rows and a
+512-KiB response; the archive preview and first-page untracked terminals are
+additional observations under that same byte ceiling. `listing_page` contains ABI
+`session-listing-metadata-v1`, `coverage: ready`, `generation`, `complete` and
+`next_cursor`. Continue with the exact opaque `--cursor`; an expired/replaced
+cut requires a fresh first page. Parent point reads share a 512-KiB query budget.
+Known ordinary live Claude/Codex rows use their versioned public display projection
+only after the exact generation/native versions and a complete ordinary composer
+are observed. This display-only path never reconciles records or constructs native
+answer/admission proof. Private, approval, startup, unknown, Kimi and native-child
+overlays retain exact fresh canonical selection: at most 256 files for a full
+ordinary/mobile listing, or 16 for explicit pages. Both retain the shared 16-MiB
+canonical byte budget, independent 16-MiB/256-entry indirect observation budget,
+and original response deadline. First-page deferred live ownership still needs
+its original fresh canonical proof and shares the unchanged 16-file page budget.
+A file ceiling is not a promise that arbitrarily large or slow records fit these
+unchanged byte/time limits. A limit or late freshness failure refuses the whole
+body; no row is silently degraded or omitted. Unknown native state
+remains unknown. Display rows, stamps and tombstones grant no caller, lifecycle,
+confirmation, custody or cleanup authority. Automatic archive reconciliation
+uses bounded background candidates and fresh canonical process/run/archive
+checks; uncertain evidence retains the binding. Archive previews remain separate.
 
 A launch with `--launch-id` that no session or record of the snapshot carries, and
 whose session existed before the snapshot was taken, has ended: such launches

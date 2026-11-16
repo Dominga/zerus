@@ -218,7 +218,13 @@ pub(super) fn user_prompt(record: &Value) -> &Value {
     if record["keep_warm_quiet"].is_object() {
         return &record["keep_warm_quiet"]["prompt"];
     }
-    if system_prompt(string(record, "prompt")).is_some() { &NONE } else { &record["prompt"] }
+    if record["_listing"]["system_prompt"] == true
+        || system_prompt(string(record, "prompt")).is_some()
+    {
+        &NONE
+    } else {
+        &record["prompt"]
+    }
 }
 
 fn detail(event: &Value) -> String {
@@ -618,7 +624,11 @@ fn observed_summary(record: &Value, live_pane: bool) -> Value {
             output["activity_detail"] = output["status_detail"].clone();
             output["resume_message_reason"] = json!(codex_goal_resume::WAIT);
         }
-        let fallback = if recognized.is_some() { None } else { startup_choice::current(record) };
+        let fallback = if recognized.is_some() || storage::listing_scope::public(record) {
+            None
+        } else {
+            startup_choice::current(record)
+        };
         let shown = recognized.is_some() || fallback.is_some();
         if let Some(question) = fallback {
             output["activity"] = json!("busy");
@@ -648,6 +658,11 @@ pub(super) fn notification_summary(record: &Value, live_pane: bool) -> Result<Va
 /// question, the phase the summary shows and its detail. A later recognized
 /// panel wins. Dispatch refuses each of them (`input::checked_input`).
 pub(super) fn terminal_chooser(record: &Value) -> Option<(Value, &'static str, &'static str)> {
+    // Ordinary ls already recognized this row's complete composer in its
+    // held read-only frame. Native cards/proofs require the canonical path.
+    if storage::listing_scope::public(record) {
+        return None;
+    }
     type Current = fn(&Value) -> Option<Value>;
     let choosers: [(Current, &str, &str); 13] = [
         (claude_approval::current, "approval", "Claude is waiting for your tool or safety approval"),

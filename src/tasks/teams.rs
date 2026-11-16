@@ -88,8 +88,15 @@ pub(super) fn actor(
         return super::actor(&machines.here, args, forwardable);
     }
     caller(config, machines, args, forwardable)
-        .map(|caller| caller.actor)
+        .and_then(intake_actor)
         .map_err(problem)
+}
+
+fn intake_actor(caller: Caller<'_>) -> std::result::Result<Actor, Problem> {
+    if matches!(caller.actor, Actor::Person) {
+        return Err(crate::desktop::teams::person_actions::required());
+    }
+    Ok(caller.actor)
 }
 
 /// A guarded local, foreign or invalid marker asks the shared proof even for
@@ -273,6 +280,25 @@ pub(super) fn guard(
 pub(super) fn clear(config: &Config, here: &str, task: &mut TaskDoc, who: &Actor) -> Result<()> {
     bridge::retarget(&config.state, here, task, who).map_err(problem)
 }
+#[cfg(test)]
+mod person_intake_tests {
+    use super::*;
+    #[test]
+    fn explicit_team_intake_refuses_person_before_task_store_or_schema_repair() {
+        // Literal caller-proof model only; no canonical Team/Task row or
+        // native Person gesture is invented by this fixture.
+        let state = tempfile::tempdir().unwrap();
+        let caller = Caller {
+            state: state.path(),
+            machine: "22222222-2222-4222-8222-222222222222",
+            actor: Actor::Person,
+        };
+        let error = intake_actor(caller).unwrap_err();
+        assert_eq!(error.code, "person_gesture_required");
+        assert!(!state.path().join("replica").exists());
+    }
+}
+
 // CLI integration coverage needs the Linux caller admission.
 #[cfg(all(test, target_os = "linux"))]
 mod tests;

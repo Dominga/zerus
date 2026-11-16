@@ -29,12 +29,13 @@ Use the stage's node and generation from current. Set pass to false to return
 it with exact findings. A report alone does not advance the pipeline. Only
 the stage's holder gives its verdict.
 
-Owner-card decide needs native confirmation in the Zerus window. A person's
-CLI decide returns person_gesture_required, also through @host. A Person
-label or JSON confirmed flag grants nothing. Check reads only the original
-receipt; missing evidence never replays a decision. Other Person operations
-(team creation/editing/settings/membership, queue/phase decisions, intake,
-preview and catalogs/templates) remain interim; see docs/agent-teams.md.
+Person team decisions, Create and intake require confirmation in the
+Zerus window on the owning computer. CLI returns person_gesture_required,
+also via @host. A Person label or confirmed flag grants nothing. Check reads
+the original receipt; missing evidence never replays an action.
+Ordinary team-task mutations (S2b) and preview/configuration/catalog/template/
+legacy writers (S3) remain interim. Ancestry cannot stop same-user arbitrary
+code, detach/re-exec or state redirection; see docs/agent-teams.md.
 
 Do
 - Keep your terminal at an empty prompt to receive work.

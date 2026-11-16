@@ -115,7 +115,7 @@ impl Fixture {
     }
 }
 fn bind(own: &super::super::ownership_launch::Fixture, store: &mut Store) {
-    ops::apply(
+    setup::apply_fixture(
         store,
         &setup::person(),
         &setup::request(0, setup::create()),

@@ -42,7 +42,10 @@ false in a defaults file that `QWEN_CODE_SYSTEM_DEFAULTS_PATH` names
 history" redraws the whole screen on every frame and tracks the mouse, so in a
 Zerus terminal a wheel scroll moved both views and the pane shook. The user's own
 Qwen settings still override it, and a `QWEN_CODE_SYSTEM_DEFAULTS_PATH` the user
-set is kept. A Qwen subscription account shows its plan (Lite, Plus or Pro) in
+set is kept. The same file adds a bare `Agent` ask rule: Qwen Code otherwise
+starts a subagent without asking, and the rule asks before every launch whatever
+its description. Qwen Code unions ask rules across settings files; YOLO still
+runs without asking. A Qwen subscription account shows its plan (Lite, Plus or Pro) in
 the composer's chip; Qwen reports its credits only once they run out.
 
 Activity, conversation history and search read the person's prompts and the

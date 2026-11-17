@@ -32,6 +32,11 @@ fn codex_supports_no_daemon(executable: &str) -> Result<bool> {
 /// terminal shook. Its sessions start with Qwen Code's own scrollback
 /// rendering instead, as a default in `QWEN_CODE_SYSTEM_DEFAULTS_PATH`, which
 /// the user's own settings still override. A path the user set is kept.
+///
+/// Owner, 2026-11-17: Qwen Code starts a subagent without asking (its agent
+/// tool is allowed by default). The defaults add a bare `Agent` ask rule, which
+/// matches every launch whatever its description or type; Qwen Code unions ask
+/// rules across settings files, and YOLO still runs without asking.
 fn qwen_defaults() -> Result<()> {
     if nonempty_env("QWEN_CODE_SYSTEM_DEFAULTS_PATH").is_some() {
         return Ok(());
@@ -49,12 +54,7 @@ fn qwen_defaults() -> Result<()> {
         .and_then(|bytes| serde_json::from_slice::<Value>(crate::state::without_bom(&bytes)).ok())
         .filter(Value::is_object)
         .unwrap_or_else(|| json!({}));
-    if !defaults["ui"].is_object() {
-        defaults["ui"] = json!({});
-    }
-    if defaults["ui"].get("useTerminalBuffer").is_none() {
-        defaults["ui"]["useTerminalBuffer"] = json!(false);
-    }
+    qwen_default_settings(&mut defaults);
     let path = root().join("qwen-defaults.json");
     let wanted = format!("{defaults}\n");
     if std::fs::read_to_string(&path).ok().as_deref() != Some(wanted.as_str()) {
@@ -62,6 +62,45 @@ fn qwen_defaults() -> Result<()> {
     }
     std::env::set_var("QWEN_CODE_SYSTEM_DEFAULTS_PATH", &path);
     Ok(())
+}
+
+/// The settings Zerus adds to Qwen Code's defaults, keeping the administrator's.
+fn qwen_default_settings(defaults: &mut Value) {
+    if !defaults["ui"].is_object() {
+        defaults["ui"] = json!({});
+    }
+    if defaults["ui"].get("useTerminalBuffer").is_none() {
+        defaults["ui"]["useTerminalBuffer"] = json!(false);
+    }
+    if !defaults["permissions"].is_object() {
+        defaults["permissions"] = json!({});
+    }
+    if !defaults["permissions"]["ask"].is_array() {
+        defaults["permissions"]["ask"] = json!([]);
+    }
+    let ask = defaults["permissions"]["ask"].as_array_mut().expect("ask is an array");
+    if !ask.iter().any(|rule| rule == "Agent") {
+        ask.push(json!("Agent"));
+    }
+}
+
+#[cfg(test)]
+mod qwen_default_tests {
+    use super::*;
+
+    #[test]
+    fn qwen_defaults_ask_before_every_subagent_and_keep_the_administrators_rules() {
+        let mut empty = json!({});
+        qwen_default_settings(&mut empty);
+        assert_eq!(empty, json!({"ui": {"useTerminalBuffer": false}, "permissions": {"ask": ["Agent"]}}));
+        let mut admin = json!({"ui": {"useTerminalBuffer": true}, "permissions": {"ask": ["Bash(rm *)"], "deny": ["WebFetch"]}});
+        qwen_default_settings(&mut admin);
+        assert_eq!(admin["ui"]["useTerminalBuffer"], true);
+        assert_eq!(admin["permissions"]["ask"], json!(["Bash(rm *)", "Agent"]));
+        assert_eq!(admin["permissions"]["deny"], json!(["WebFetch"]));
+        qwen_default_settings(&mut admin);
+        assert_eq!(admin["permissions"]["ask"], json!(["Bash(rm *)", "Agent"]), "added once");
+    }
 }
 
 pub(super) fn agent_help(executable: &str) -> Result<String> {

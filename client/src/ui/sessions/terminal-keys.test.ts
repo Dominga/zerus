@@ -55,6 +55,28 @@ describe("Terminal's own keys (owner, 2026-11-13)", () => {
     expect(terminalKey(key("PageUp", "PageUp"), "windows", false)).toEqual({ kind: "pass" });
   });
 
+  it("gives a program that draws the whole screen its own scrolling and selection keys", () => {
+    for (const on of ["windows", "linux", "macos"] as const) {
+      // Qwen Code's history view scrolls with Shift+Up/Down; an editor selects with Shift and the arrows.
+      for (const name of ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"]) {
+        expect(terminalKey(key(name, name, { shiftKey: true }), on, false, true)).toEqual({ kind: "pass" });
+        expect(terminalKey(key(name, name, { ctrlKey: true, shiftKey: true }), on, false, true)).toEqual({ kind: "pass" });
+      }
+      // The engine keeps Shift+Page Up/Down for its own (empty) scrollback: the program gets its page keys.
+      expect(terminalKey(key("PageUp", "PageUp", { shiftKey: true }), on, false, true)).toEqual({ kind: "send", data: "\x1b[5~" });
+      expect(terminalKey(key("PageDown", "PageDown", { shiftKey: true }), on, false, true)).toEqual({ kind: "send", data: "\x1b[6~" });
+      expect(terminalKey(key("PageUp", "PageUp"), on, false, true)).toEqual({ kind: "pass" });
+      // Copy and the new line stay the terminal's.
+      expect(terminalKey(key("Enter", "Enter", { shiftKey: true }), on, false, true)).toEqual({ kind: "newline" });
+    }
+    expect(terminalKey(key("C", "KeyC", { ctrlKey: true, shiftKey: true }), "windows", true, true)).toEqual({ kind: "copy", clear: false });
+    expect(terminalKey(key("c", "KeyC", { ctrlKey: true }), "windows", true, true)).toEqual({ kind: "copy", clear: true });
+    expect(terminalKey(key("A", "KeyA", { ctrlKey: true, shiftKey: true }), "windows", false, true)).toEqual({ kind: "selectAll" });
+    // On the ordinary screen nothing changes.
+    expect(terminalKey(key("ArrowUp", "ArrowUp", { shiftKey: true }), "windows", false, false)).toEqual({ kind: "select", move: "up" });
+    expect(terminalKey(key("PageUp", "PageUp", { shiftKey: true }), "windows", false, false)).toEqual({ kind: "scroll", by: "page", up: true });
+  });
+
   it("leaves typing and the agent's chords alone", () => {
     for (const k of [key("a", "KeyA"), key("Escape", "Escape"), key("Tab", "Tab", { shiftKey: true }), key("v", "KeyV", { ctrlKey: true }), key("l", "KeyL", { ctrlKey: true })]) {
       expect(terminalKey(k, "windows", true)).toEqual({ kind: "pass" });

@@ -248,6 +248,66 @@ fn repaint_restores_screen_cursor_and_modes() {
     }
 }
 
+/// The history rows a terminal would show, newest last (`visual_rows` of them).
+fn history_rows(model: &ScreenModel) -> Vec<String> {
+    let grid = &model.screen.grid;
+    let mut above = model.screen.clone();
+    let sy = above.sy();
+    let mut rows = Vec::new();
+    for start in (0..grid.hsize).step_by(sy) {
+        for y in 0..sy {
+            above.grid.lines[grid.hsize + y] = grid.lines.get(start + y).cloned().unwrap_or_default();
+        }
+        rows.extend(visual_rows(&above).into_iter().take((grid.hsize - start).min(sy)));
+    }
+    rows
+}
+
+/// WhiteWh fork (owner, 2026-11-17: "the terminal does not scroll"): a
+/// terminal that attaches gets the pane's history in its scrollback, then the
+/// screen: both read back exactly as the pane holds them.
+#[test]
+fn history_fills_a_fresh_terminals_scrollback_before_the_repaint() {
+    let mut stream = Vec::new();
+    for n in 1..=23 {
+        stream.extend(format!("\x1b[3{}mline {n}\x1b[0m 中文 \x1b[44m{n:>3}\x1b[0m\r\n", n % 8).into_bytes());
+    }
+    stream.extend_from_slice(b"a row that is longer than the screen is wide wraps\r\n\x1b[1mprompt>\x1b[0m ");
+    // Two full pages of five rows, a part of a third, and a wrapped row.
+    let screen = model(5, 20, &stream);
+    assert!(screen.screen.grid.hsize > 10, "{}", screen.screen.grid.hsize);
+    let mut attached = ScreenModel::new(5, 20);
+    attached.process(&screen.history(2000));
+    // Every line left the screen: it is blank for the repaint that follows.
+    assert_eq!(plain(&attached), "\n\n\n\n\n");
+    assert_eq!(attached.screen.grid.hsize, screen.screen.grid.hsize);
+    assert_eq!(history_rows(&attached), history_rows(&screen));
+    attached.process(&screen.repaint());
+    assert_eq!(attached.visual(), screen.visual());
+    assert_eq!(attached.info(), screen.info());
+    assert_eq!(history_rows(&attached), history_rows(&screen));
+    // A limit keeps the newest lines.
+    let mut newest = ScreenModel::new(5, 20);
+    newest.process(&screen.history(7));
+    assert_eq!(newest.screen.grid.hsize, 7);
+    let all = history_rows(&screen);
+    assert_eq!(history_rows(&newest), all[all.len() - 7..]);
+}
+
+#[test]
+fn history_is_empty_without_lines_above_or_on_the_alternate_screen() {
+    let mut screen = model(3, 10, b"1\r\n2");
+    assert!(screen.history(2000).is_empty(), "nothing scrolled off yet");
+    screen.process(b"\r\n3\r\n4\r\n5");
+    assert!(!screen.history(2000).is_empty());
+    assert!(screen.history(0).is_empty());
+    // A full-screen program's terminal shows no scrollback: nothing is replayed.
+    screen.process(b"\x1b[?1049h\x1b[2Jfull screen");
+    assert!(screen.history(2000).is_empty());
+    screen.process(b"\x1b[?1049l");
+    assert!(!screen.history(2000).is_empty());
+}
+
 #[test]
 fn repaint_keeps_the_main_screen_under_the_alternate_screen() {
     let screen = model(3, 12, b"\x1b[32mmain\x1b[?1049h\x1b[0m\x1b[2;2Halternate");

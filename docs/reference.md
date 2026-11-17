@@ -5215,6 +5215,18 @@ arrow, Home or End extends a keyboard selection from the cursor, and
 Ctrl+Shift+A (⌘A) selects everything. Shift+Page Up/Down scrolls a page,
 Ctrl+Shift+Up/Down a line and Ctrl+Shift+Home/End to the top or the bottom
 (`client/src/ui/sessions/terminal-keys.ts`). Every other key goes to the agent.
+While a program draws the whole screen itself (the alternate screen: Qwen
+Code's own history view, an editor, a pager), the terminal has no lines above
+to scroll to, so the selection and scrolling keys go to the program instead,
+which has its own (Qwen Code scrolls with Shift+Up/Down and Page Up/Down), and
+Shift+Page Up/Down reach it as Page Up/Down. Copy, paste, the new line and
+select everything stay as above.
+
+On a Windows computer, a terminal that connects first receives the lines the
+session printed above its screen (the newest 2000 its session host keeps), so
+Terminal can scroll back to them right away instead of showing the current
+screen alone (WhiteWh fork; `ScreenModel::history`). A program on the alternate
+screen keeps its own history view.
 Right-click opens **Copy selection** and **Paste**. While the agent reads
 the mouse, a right-click goes to the agent; hold Shift for the menu.
 

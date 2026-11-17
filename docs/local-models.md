@@ -40,7 +40,17 @@ Zerus starts Qwen Code with its scrollback rendering: `ui.useTerminalBuffer` is
 false in a defaults file that `QWEN_CODE_SYSTEM_DEFAULTS_PATH` names
 (`qwen-defaults.json` in the state folder). Qwen Code's default "virtualized
 history" redraws the whole screen on every frame and tracks the mouse, so in a
-Zerus terminal a wheel scroll moved both views and the pane shook. The user's own
+Zerus terminal a wheel scroll moved both views and the pane shook. Measured with
+Qwen Code 0.27.4 behind the Windows session host, a streamed answer costs about
+53 KB/s of terminal output in the virtualized view and 21 KB/s with scrollback
+rendering, and a typed character 5.8 KB against 1 KB. The setting is read when
+Qwen Code starts: a session started before it (or by an older `hgs` on a peer)
+keeps the virtualized view until it is restarted. There, scrolling is Qwen
+Code's own: the wheel, Page Up/Down, Shift+Up/Down and Ctrl+Home/End, which
+Terminal passes on while a program draws the whole screen (see the Terminal
+keys in `docs/reference.md`). With scrollback rendering, Terminal scrolls its
+own lines, which on a Windows computer include what the session printed before
+the terminal connected. The user's own
 Qwen settings still override it, and a `QWEN_CODE_SYSTEM_DEFAULTS_PATH` the user
 set is kept. The same file adds a bare `Agent` ask rule: Qwen Code otherwise
 starts a subagent without asking, and the rule asks before every launch whatever

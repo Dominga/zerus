@@ -1595,6 +1595,52 @@ fn foreground_is_the_newest_child_of_the_root() {
     assert_eq!(foreground(10, &processes), 21);
 }
 
+/// WhiteWh fork (owner, 2026-11-17): a client that attaches gets the lines
+/// above the screen first, so its terminal can scroll back to them; a slow
+/// client's repaint stays the screen alone.
+#[test]
+fn an_attaching_client_gets_the_history_before_the_screen() {
+    let (host, launcher) = new_host();
+    let mut connection = connect(&host);
+    connection
+        .call::<Created>(create("l", "claude/p/a"))
+        .unwrap();
+    let session = host.find(&pane("claude/p/a")).unwrap();
+    let program = launcher.program(0);
+    let mut printed = Vec::new();
+    for n in 1..=60 {
+        printed.extend(format!("answer line {n}\r\n").into_bytes());
+    }
+    printed.extend_from_slice(b"READY");
+    program.write(&printed);
+    eventually("the output", || {
+        capture(&mut connection, pane("claude/p/a")).contains("READY")
+    });
+    let client = Attachment::new(1, 1, Size { cols: 80, rows: 24 });
+    session.attach(client.clone()).unwrap();
+    session.detach(client.id);
+    let Some(Out::Stream(first)) = client.next() else {
+        panic!("no first output")
+    };
+    // 60 lines and the prompt on 24 rows: 37 lines are above the screen.
+    // Each is drawn once, in order, before the screen's own rows.
+    let text = String::from_utf8_lossy(&first).into_owned();
+    let drawn = |n: usize| text.match_indices(&format!("answer line {n}\x1b[0m")).map(|(at, _)| at).collect::<Vec<_>>();
+    let mut before = 0;
+    for n in 1..=60 {
+        let at = drawn(n);
+        assert_eq!(at.len(), 1, "line {n} is drawn once");
+        assert!(at[0] > before, "line {n} follows line {}", n - 1);
+        before = at[0];
+    }
+    assert!(text.find("READY").is_some_and(|ready| ready > before));
+    // The terminal ends on the screen the pane shows.
+    let mut terminal = crate::screen::ScreenModel::new(24, 80);
+    terminal.process(&first);
+    let shown = terminal.capture(crate::screen::Capture::Plain);
+    assert!(shown.starts_with("answer line 38\n") && shown.contains("answer line 60\nREADY"), "{shown}");
+}
+
 #[test]
 fn a_client_that_falls_behind_gets_a_repaint_instead() {
     let (host, launcher) = new_host();

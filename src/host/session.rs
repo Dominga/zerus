@@ -45,6 +45,9 @@ pub(crate) const KILL_GRACE: Duration = Duration::from_secs(6);
 const DRAIN: Duration = Duration::from_secs(5);
 /// Output queued for one client beyond this is replaced by a repaint.
 const OUTBOX_LIMIT: usize = 4 << 20;
+/// WhiteWh fork: the lines of history a client gets when it attaches: all
+/// the screen model keeps (`screen::HISTORY_LIMIT`).
+const ATTACH_HISTORY: usize = 2000;
 const READ_BUFFER: usize = 64 * 1024;
 /// The bracketed-paste markers tmux writes around a paste.
 const PASTE_START: &[u8] = b"\x1b[200~";
@@ -498,7 +501,10 @@ impl Session {
         }
         screen.clients.push(client.clone());
         self.follow_latest(&mut screen);
-        let repaint = screen.model.repaint();
+        // WhiteWh fork: the pane's history first, so the client's terminal has
+        // scrollback above the screen it attaches to.
+        let mut repaint = screen.model.history(ATTACH_HISTORY);
+        repaint.extend(screen.model.repaint());
         // A repaint past the queue's limit still goes out whole.
         client.push_stream(&repaint, || repaint.clone());
         Ok(())

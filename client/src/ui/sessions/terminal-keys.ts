@@ -17,7 +17,9 @@ export type KeyAction =
   | { kind: "newline" }
   | { kind: "select"; move: Move }
   | { kind: "selectAll" }
-  | { kind: "scroll"; by: "line" | "page" | "edge"; up: boolean };
+  | { kind: "scroll"; by: "line" | "page" | "edge"; up: boolean }
+  /** Bytes for the program, in place of what the engine would send for the key. */
+  | { kind: "send"; data: string };
 
 const PASS: KeyAction = { kind: "pass" };
 
@@ -42,13 +44,28 @@ const MOVES: Record<string, Move> = { ArrowLeft: "left", ArrowRight: "right", Ar
  *   from the cursor; Ctrl+Shift+A (Command-A on macOS) selects everything.
  * - Scrolling: Shift+Page Up/Down by a page, Ctrl+Shift+Up/Down by a line,
  *   Ctrl+Shift+Home/End to the top or the bottom.
+ *
+ * `program` says the program draws the whole screen itself (the alternate
+ * screen: Qwen Code's own history view, an editor, a pager). The terminal then
+ * has no lines above to scroll to and no cursor of its own to select from, and
+ * the program has its own keys for both (owner, 2026-11-17: "the shortcuts are
+ * eaten"; Qwen Code scrolls with Shift+Up/Down and Page Up/Down). So there the
+ * selection and line/edge scrolling keys go to the program unchanged, and
+ * Shift+Page Up/Down, which the engine never sends, go as Page Up/Down.
  */
-export function terminalKey(event: Keys, on: Platform, selection: boolean): KeyAction {
+export function terminalKey(event: Keys, on: Platform, selection: boolean, program = false): KeyAction {
   const mac = on === "macos";
   if (copyKey(event, on)) return { kind: "copy", clear: false };
   if (!mac && event.key === "Insert" && exactly(event, { ctrl: true })) return selection ? { kind: "copy", clear: false } : PASS;
   if (on === "windows" && selection && exactly(event, { ctrl: true }) && letter(event, "C")) return { kind: "copy", clear: true };
   if (event.key === "Enter" && (exactly(event, { ctrl: true }) || exactly(event, { shift: true }))) return { kind: "newline" };
+  if (program) {
+    if ((event.key === "PageUp" || event.key === "PageDown") && exactly(event, { shift: true })) {
+      return { kind: "send", data: event.key === "PageUp" ? "\x1b[5~" : "\x1b[6~" };
+    }
+    if (letter(event, "A") && (mac ? exactly(event, { meta: true }) : exactly(event, { ctrl: true, shift: true }))) return { kind: "selectAll" };
+    return PASS;
+  }
   const move = MOVES[event.key];
   if (move && exactly(event, { shift: true })) return { kind: "select", move };
   if (letter(event, "A") && (mac ? exactly(event, { meta: true }) : exactly(event, { ctrl: true, shift: true }))) return { kind: "selectAll" };

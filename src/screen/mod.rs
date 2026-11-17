@@ -446,6 +446,37 @@ impl ScreenModel {
         out
     }
 
+    /// WhiteWh fork (owner, 2026-11-17: "the terminal does not scroll"): escape
+    /// sequences that put the newest `limit` lines of the pane's history into
+    /// the scrollback of a fresh terminal of the same size, for a client that
+    /// attaches. [`ScreenModel::repaint`] alone draws the visible rows, so a
+    /// terminal that attached had nothing above them to scroll to, whatever
+    /// the program had printed before. A page of history is painted as the
+    /// visible rows are, then line feeds on the last row scroll it out; the
+    /// screen is empty again for the next page and for the repaint that
+    /// follows. Empty while the program uses the alternate screen, whose
+    /// terminal shows no scrollback, and without history.
+    pub fn history(&self, limit: usize) -> Vec<u8> {
+        let screen = &self.screen;
+        let grid = &screen.grid;
+        let (sx, sy) = (screen.sx(), screen.sy());
+        let held = grid.hsize.min(grid.lines.len());
+        let mut out = Vec::new();
+        if screen.is_alternate() || limit == 0 || held == 0 {
+            return out;
+        }
+        let lines: Vec<&Line> = grid.lines[held - held.min(limit)..held].iter().collect();
+        out.extend_from_slice(
+            b"\x1b[?25l\x1b[0m\x1b(B\x1b)0\x0f\x1b[r\x1b[?6l\x1b[4l\x1b[?7h\x1b[H\x1b[2J",
+        );
+        for page in lines.chunks(sy) {
+            paint(&mut out, page, sx);
+            cursor_to(&mut out, sy - 1, 0);
+            out.extend(std::iter::repeat_n(b'\n', page.len()));
+        }
+        out
+    }
+
     /// The stored cells, like tmux 3.8's `capture-pane -R`, for debugging.
     fn grid_dump(&self) -> String {
         let grid = &self.screen.grid;

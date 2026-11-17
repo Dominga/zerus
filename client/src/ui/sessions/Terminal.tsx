@@ -159,12 +159,14 @@ export function TerminalTab() {
       else if (focus.y >= buffer.viewportY + term.rows) term.scrollToLine(focus.y - term.rows + 1);
     };
     term.attachCustomKeyEventHandler((event) => {
-      const action = terminalKey(event, platform, term.hasSelection());
+      // A program that draws the whole screen has its own scrolling and selection keys.
+      const action = terminalKey(event, platform, term.hasSelection(), term.buffer.active.type === "alternate");
       if (action.kind === "pass") return true;
       if (event.type !== "keydown") return false;
       event.preventDefault();
       if (action.kind === "copy") { copySelection(); if (action.clear) term.clearSelection(); }
       else if (action.kind === "newline") terminal.input(encoder.encode("\n"), screen);
+      else if (action.kind === "send") terminal.input(encoder.encode(action.data), screen);
       else if (action.kind === "select") extend(action.move);
       else if (action.kind === "selectAll") term.selectAll();
       else if (action.by === "page") term.scrollPages(action.up ? -1 : 1);

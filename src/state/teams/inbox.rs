@@ -1969,6 +1969,33 @@ pub(crate) fn overdue(items: &[Item], told: &[String], now: f64) -> Vec<Item> {
         .collect()
 }
 
+/// The longest wait between two reminders of an unread inbox.
+pub(crate) const REMINDER_CAP_SECONDS: f64 = 60.0 * 60.0;
+
+/// Owner, 2026-11-17: whether the free lead, whose open items were all told,
+/// is reminded now. The first reminder waits `minutes` after the last inbox
+/// message; each further one without a new item waits twice as long, up to
+/// an hour.
+pub(crate) fn reminder_due(inbox: &Inbox, open: usize, minutes: u64, now: f64) -> bool {
+    if open == 0 || minutes == 0 || inbox.told_at == 0.0 {
+        return false;
+    }
+    let base = minutes as f64 * 60.0;
+    let wait = (base * 2f64.powi(inbox.reminded.min(16) as i32)).min(REMINDER_CAP_SECONDS.max(base));
+    now - inbox.told_at >= wait
+}
+
+/// The reminder: how many items still wait and the command that lists them.
+/// It names no item; the inbox is the state and the list reads it fresh.
+pub(crate) fn reminder_text(team: &Team, open: usize) -> String {
+    format!(
+        "[Zerus team \u{b7} from: Zerus \u{b7} inbox]\nTeam: {}. {open} item(s) still wait for you in the team inbox; \
+         nothing new since the last list. Read them and act on each one: {} | hgs team inbox --json",
+        team.name,
+        json!({"team":team.id})
+    )
+}
+
 /// The single message that lists the lead's new items (C2): what stops a
 /// member first, then the rest, each part oldest first.
 pub(crate) fn text(team: &Team, items: &[Item], now: f64) -> String {

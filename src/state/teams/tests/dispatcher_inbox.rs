@@ -420,3 +420,81 @@ fn a_queued_budget_is_applied_as_the_members_own() {
         assert!(error.contains("the folder belongs to"), "{error}");
     });
 }
+
+/// Owner, 2026-11-17: a free lead whose told items still wait is reminded,
+/// later each time, until a new item starts the full list again.
+#[test]
+fn a_free_lead_with_told_items_is_reminded_with_a_growing_wait() {
+    let lead = session("claude/x/lead", "r0", true);
+    let mut t = team();
+    {
+        let task = t.task_mut(1).unwrap();
+        task.attempts.push(Attempt {
+            n: 1,
+            id: "A1".into(),
+            member: "dev".into(),
+            state: AttemptState::Reported,
+            report: Some(Report { text: "Done".into(), at: 5.0, ..Default::default() }),
+            ..Default::default()
+        });
+        task.status = TaskStatus::Submitted;
+    }
+    // One message reaches the lead per tick: the report's own reminder is
+    // off here so only the inbox reminder is seen.
+    t.settings.remind_lead_minutes = 0;
+    // The report was told at 100 s; nothing new since.
+    let items = inbox::items(&t);
+    assert!(!items.is_empty());
+    t.inbox.told = items.iter().map(|item| item.key.clone()).collect();
+    t.inbox.told_at = 100.0;
+    let reminded = |t: &Team, seen: &[Seen], at: f64| steps(t, seen, at).contains(&Step::InboxReminder);
+    let minutes = t.settings.inbox_reminder_minutes as f64;
+    assert_eq!(minutes, 10.0);
+    assert!(!reminded(&t, &[lead.clone()], 100.0 + minutes * 60.0 - 1.0));
+    assert!(reminded(&t, &[lead.clone()], 100.0 + minutes * 60.0));
+    assert!(!steps(&t, &[lead.clone()], 100.0 + minutes * 60.0).contains(&Step::Inbox));
+    // Each reminder doubles the wait, up to an hour.
+    t.inbox.reminded = 1;
+    assert!(!reminded(&t, &[lead.clone()], 100.0 + 20.0 * 60.0 - 1.0));
+    assert!(reminded(&t, &[lead.clone()], 100.0 + 20.0 * 60.0));
+    t.inbox.reminded = 9;
+    assert!(!reminded(&t, &[lead.clone()], 100.0 + 60.0 * 60.0 - 1.0));
+    assert!(reminded(&t, &[lead.clone()], 100.0 + 60.0 * 60.0));
+    // A lead in its own turn is not reminded.
+    let mut busy = lead.clone();
+    busy.free = false;
+    busy.idle = false;
+    busy.activity = "busy".into();
+    busy.phase = "working".into();
+    assert!(!reminded(&t, &[busy], 100.0 + 2.0 * 3600.0));
+    // 0 turns it off.
+    let mut off = t.clone();
+    off.settings.inbox_reminder_minutes = 0;
+    assert!(!reminded(&off, &[lead.clone()], 100.0 + 2.0 * 3600.0));
+    // A new item is the full list, not a reminder.
+    let mut fresh = t.clone();
+    fresh.inbox.told.clear();
+    let found = steps(&fresh, &[lead.clone()], 100.0 + 2.0 * 3600.0);
+    assert!(found.contains(&Step::Inbox) && !found.contains(&Step::InboxReminder), "{found:?}");
+    // An empty inbox is never reminded.
+    assert!(!inbox::reminder_due(&t.inbox, 0, 10, 1e9));
+    // The reminder names the count and the command, no item text.
+    let text = inbox::reminder_text(&t, 3);
+    assert!(text.contains("3 item(s) still wait") && text.contains("hgs team inbox --json"), "{text}");
+    assert!(!text.contains("Done"), "{text}");
+}
+
+#[test]
+fn inbox_reminder_minutes_is_bounded_and_survives_old_json() {
+    let mut t = team();
+    let mut events = Vec::new();
+    let refused = ops::apply(&mut t, "settings", &json!({"settings":{"inbox_reminder_minutes":1441}}), &Actor::Human, &BTreeSet::new(), &mut events);
+    assert!(refused.unwrap_err().to_string().contains("inbox_reminder_minutes"));
+    ops::apply(&mut t, "settings", &json!({"settings":{"inbox_reminder_minutes":30}}), &Actor::Human, &BTreeSet::new(), &mut events).unwrap();
+    assert_eq!(t.settings.inbox_reminder_minutes, 30);
+    // A team saved before the setting existed gets the default; an inbox
+    // record never reminded adds no key.
+    let old: Settings = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(old.inbox_reminder_minutes, 10);
+    assert!(serde_json::to_value(Inbox::default()).unwrap().get("reminded").is_none());
+}

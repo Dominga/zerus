@@ -183,6 +183,12 @@ pub(crate) struct Settings {
     /// At most one inbox message reaches the lead per this many seconds (C2).
     #[serde(default = "default_inbox_interval")]
     pub inbox_interval_seconds: u64,
+    /// Owner, 2026-11-17: minutes after the lead's last inbox message before
+    /// a free lead whose inbox still holds open items, none of them new, is
+    /// reminded to read it. Each reminder without a new item doubles the
+    /// wait, up to an hour; a new list starts over. 0 turns it off.
+    #[serde(default = "default_inbox_reminder")]
+    pub inbox_reminder_minutes: u64,
     /// Task 186 (docs/lore.md 11.11 `urgent_bound`): minutes an urgent team
     /// message may wait for a safe point (or, rung once, for its read) before
     /// the lead hears, or the owner for a message to the lead; 1 to 120.
@@ -383,6 +389,9 @@ fn default_blocked_timeout() -> u64 {
 fn default_inbox_interval() -> u64 {
     120
 }
+fn default_inbox_reminder() -> u64 {
+    10
+}
 
 fn default_urgent_bound() -> u64 {
     10
@@ -448,6 +457,7 @@ impl Default for Settings {
             start_timeout_seconds: default_start_timeout(),
             blocked_timeout_seconds: default_blocked_timeout(),
             inbox_interval_seconds: default_inbox_interval(),
+            inbox_reminder_minutes: default_inbox_reminder(),
             urgent_bound_minutes: default_urgent_bound(),
             urgent_alarm_minutes: default_urgent_alarm(),
             remind_lead_minutes: default_remind_lead(),
@@ -1676,6 +1686,10 @@ pub(crate) struct Inbox {
     /// is not told again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub closed: Vec<ClosedItem>,
+    /// Owner, 2026-11-17: reminders sent since the last list that named a new
+    /// item; each one doubles the wait for the next.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub reminded: u32,
 }
 
 /// Task #24: a told inbox item that closed, and when.
@@ -1691,7 +1705,7 @@ pub(crate) const CLOSED_MEMORY_SECONDS: f64 = 30.0 * 60.0;
 impl Inbox {
     /// An empty record adds no key to an old team's JSON.
     pub(crate) fn is_empty(&self) -> bool {
-        self.told_at == 0.0 && self.told.is_empty() && self.closed.is_empty()
+        self.told_at == 0.0 && self.told.is_empty() && self.closed.is_empty() && self.reminded == 0
     }
 
     /// Task #24: whether the item `key` was told: it is still listed as told,

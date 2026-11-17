@@ -4357,6 +4357,16 @@ For an urgent message to the lead, you get the Waiting item instead
 Hand-outs, stage hand-outs and the lead's inbox message ring at once (the
 inbox keeps its own `inbox_interval_seconds`).
 
+The inbox message names new items only. A free lead whose inbox still holds
+items it was told about, none of them new, gets a one-line reminder with their
+count and `hgs team inbox --json` (`InboxReminder`, journal `inbox_reminded`;
+owner, 2026-11-17). The first comes `inbox_reminder_minutes` after the lead's
+last inbox message (default 10, 0 to 1440, 0 turns it off; a setting the lead
+may change); each further reminder without a new item waits twice as long, up
+to an hour, and the next full list starts over. A lead in its own turn, or
+asking on its screen, is not reminded, and one tick still sends the lead at
+most one message.
+
 The lead's inbox message reaches a lead in its own turn the same way: for a
 Claude or Codex lead it is stored at once (`InboxWaits`, journal
 `message_waits`) and never typed. A Claude lead takes an urgent one at its next

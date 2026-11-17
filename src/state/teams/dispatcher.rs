@@ -456,6 +456,9 @@ pub(crate) enum Step {
     /// Task 186: the same list for a lead in its own turn, stored without
     /// typing anything; it waits for the lead's next safe point (hard rule 3).
     InboxWaits,
+    /// Owner, 2026-11-17: the free lead's open items were all told and it has
+    /// not acted on them: one short line says how many still wait.
+    InboxReminder,
     /// Reminds the free lead once that a report still waits for a decision (C4).
     /// Reminds a sub-lead once that its report waits for a decision (N9).
     RemindReviewer { task: u32, member: String },
@@ -1712,6 +1715,8 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let interval = team.settings.inbox_interval_seconds as f64;
         if new + again > 0 && (team.inbox.told_at == 0.0 || now - team.inbox.told_at >= interval) {
             steps.push(if lead_ready { Step::Inbox } else { Step::InboxWaits });
+        } else if lead_ready && new + again == 0 && inbox::reminder_due(&team.inbox, items.len(), team.settings.inbox_reminder_minutes, now) {
+            steps.push(Step::InboxReminder);
         }
     }
     // Task #26: a sub-lead with reports to read and no session is started, so
@@ -2413,7 +2418,7 @@ pub(crate) fn steps_with(team: &Team, seen: &[Seen], now: f64, listed: Option<&B
         let given = steps.iter().any(|step| match step {
             Step::HandOut { member: to, .. } | Step::StageOut { member: to, .. } | Step::Resume { member: to, .. } => *to == member.id,
             Step::Rebalance { to, .. } => *to == member.id,
-            Step::Inbox => member.id == team.lead,
+            Step::Inbox | Step::InboxReminder => member.id == team.lead,
             _ => false,
         });
         if given || !super::doorbell::due(member, now) {
@@ -3085,6 +3090,7 @@ fn coalesce_lead(steps: Vec<Step>) -> Vec<Step> {
         matches!(
             step,
             Step::Inbox
+                | Step::InboxReminder
                 | Step::RemindReport { .. }
                 | Step::PlanStarved { .. }
                 | Step::BudgetRed { .. }
@@ -10038,7 +10044,37 @@ fn tell_lead_inbox(store: &mut Store, team: &Team, ring: bool) -> anyhow::Result
         }
         inbox::mark_told_inbox(&mut team.inbox, &new, &open, now());
         team.inbox.told_at = now();
+        team.inbox.reminded = 0;
         events.push(Event::new("inbox_told", json!({"items":named})));
+        Ok(())
+    })
+}
+
+/// Owner, 2026-11-17: remind the free lead that its told items still wait.
+/// Composed from the team as it is now: an inbox emptied meanwhile, or a new
+/// item that the full list will name, sends nothing.
+fn remind_lead_inbox(store: &mut Store, team: &Team) -> anyhow::Result<()> {
+    let fresh = store.load(&team.id)?.context("Unknown team")?;
+    let team = &fresh;
+    let lead = team.member(&team.lead).and_then(|m| m.session.clone()).context("the lead has no session")?;
+    let items = inbox::items(team);
+    let at = now();
+    if items.iter().any(|item| !team.inbox.knows(&item.key, at))
+        || !inbox::reminder_due(&team.inbox, items.len(), team.settings.inbox_reminder_minutes, at)
+    {
+        return Ok(());
+    }
+    let text = inbox::reminder_text(team, items.len());
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let outcome = super::doorbell::post_and_ring(store, &team.id, &team.lead, &lead, &request_id, "inbox", "zerus", inbox::urgency(items.iter()), &text);
+    if matches!(outcome, Sent::Refused(_)) {
+        return Ok(());
+    }
+    let open = items.len();
+    change(store, &team.id, |team, events| {
+        team.inbox.told_at = at;
+        team.inbox.reminded = team.inbox.reminded.saturating_add(1);
+        events.push(Event::new("inbox_reminded", json!({"items":open,"reminder":team.inbox.reminded})));
         Ok(())
     })
 }
@@ -11333,6 +11369,7 @@ fn run_step(store: &mut Store, team: &Team, step: &Step, host: &str) -> anyhow::
         }),
         Step::Inbox => tell_lead_inbox(store, team, true),
         Step::InboxWaits => tell_lead_inbox(store, team, false),
+        Step::InboxReminder => remind_lead_inbox(store, team),
         Step::SubInbox { member } => tell_sub_inbox(store, team, member),
         Step::SubBrief { member } => send_sub_brief(store, team, member),
         Step::RingMessages { member } => super::doorbell::ring(store, team, member).map(drop),

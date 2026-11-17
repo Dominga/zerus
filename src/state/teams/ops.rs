@@ -266,6 +266,7 @@ fn validate_settings(settings: &Settings) -> anyhow::Result<()> {
     // Section 9.2: the tree bounds are set on the master.
     // Task 95: 0 turns the stalled-lead notice off; a day is the longest wait.
     ensure!(settings.lead_stall_minutes <= 1440, "lead_stall_minutes is 0 (off) to 1440");
+    ensure!(settings.inbox_reminder_minutes <= 1440, "inbox_reminder_minutes is 0 (off) to 1440");
     ensure!((1..=120).contains(&settings.urgent_bound_minutes), "urgent_bound_minutes is 1 to 120");
     ensure!(settings.defer_minutes <= 1440, "defer_minutes is 0 (off) to 1440");
     // Task 277: an urgent message unread this long is an alarm; 0 turns it off.

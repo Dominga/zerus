@@ -60,6 +60,14 @@ pub const NOT_SAVED_CHECKPOINT: &str =
     "Draft not saved: its delivery identity is invalid. Nothing was sent.";
 /// The manifest field of a reserved deferred input ([`StoredDraft::checkpoint`]).
 const CHECKPOINT: &str = "deferred_input";
+/// The manifest field of [`StoredDraft::uncertain_reason`].
+const UNCERTAIN_REASON: &str = "uncertain_reason";
+/// The most of an uncertain end's reason a manifest keeps.
+const REASON_CHARS: usize = 1000;
+
+fn bounded_reason(reason: &str) -> String {
+    reason.trim().chars().take(REASON_CHARS).collect()
+}
 /// Saved drafts skips larger manifests.
 pub(crate) const MAX_MANIFEST: u64 = 1024 * 1024;
 const PREVIEW_CHARS: usize = 200;
@@ -96,6 +104,13 @@ pub struct StoredDraft {
     /// Saved while the message was being sent.
     pub sending: bool,
     pub uncertain: bool,
+    /// Why the delivery ended uncertain, as the composer showed it when the
+    /// call ended ("... unreachable", "Delivery timed out ..."). A draft
+    /// loaded again shows it instead of [`INTERRUPTED`], which says nothing
+    /// about what happened. Empty for a draft saved while sending (its end is
+    /// not known) and for every other draft, whose manifest then keeps its
+    /// exact bytes. Text for the person only: nothing decides by it.
+    pub uncertain_reason: String,
     /// The deferred input reserved before its dispatch (zerus-5wmh.66.4.4):
     /// its request identity and consent checkpoint, saved with the draft.
     /// Data only: nothing sends from it, and an imported or recovered draft
@@ -369,6 +384,10 @@ fn save_direct(root: &Path, key: &str, draft: &StoredDraft) -> Result<(), String
     if !draft.session_label.is_empty() {
         manifest["session_label"] = json!(draft.session_label);
     }
+    // Only an uncertain end that said why adds its reason.
+    if draft.uncertain && !draft.sending && !draft.uncertain_reason.is_empty() {
+        manifest[UNCERTAIN_REASON] = json!(bounded_reason(&draft.uncertain_reason));
+    }
     // Only a reserved deferred input adds its field: every other manifest
     // keeps its exact earlier bytes.
     if let Some(checkpoint) = &draft.checkpoint {
@@ -450,6 +469,7 @@ fn load_once(root: &Path, key: &str) -> (StoredDraft, bool) {
         session_label: text("session_label"),
         sending: flag("sending"),
         uncertain: flag("uncertain"),
+        uncertain_reason: bounded_reason(&text(UNCERTAIN_REASON)),
         checkpoint: None,
     };
     let mut valid = true;
@@ -511,9 +531,17 @@ fn loaded((mut draft, valid): (StoredDraft, bool)) -> Loaded {
     // reserved deferred input may have had its call run: it stays uncertain
     // until the user allows a retry, never continued from here.
     let held = draft.checkpoint.is_some() && !draft.uncertain && !draft.sending;
+    // Only a delivery that ended uncertain knows why; one saved while
+    // sending, or held without an end, keeps the general notice.
+    let ended = draft.uncertain && !draft.sending;
     draft.uncertain = draft.uncertain || draft.sending || draft.checkpoint.is_some();
+    if !ended {
+        draft.uncertain_reason.clear();
+    }
     let notice = if held {
         Some(UNCONFIRMED.to_owned())
+    } else if !draft.uncertain_reason.is_empty() {
+        Some(draft.uncertain_reason.clone())
     } else {
         draft.uncertain.then(|| INTERRUPTED.to_owned())
     };

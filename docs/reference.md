@@ -5540,7 +5540,13 @@ The durable journal has bounded previews and stable pages. See
 [Agent coordination](agent-coordination.md).
 Confirmed sends clear the outgoing draft; failures retain it. After an interrupted
 or uncertain send, check Activity or Terminal before explicitly allowing another
-send. Saving failures are shown in the editor and retried locally; sending starts
+send. An uncertain send keeps the reason its call ended with (a timeout, an
+unreachable computer, the agent's own message) in its draft, so the composer
+still shows it after the session was left and opened again or the app
+restarted; only a send interrupted before its end shows the general "Delivery
+was interrupted". A Send or answer that `hgs` never forwarded to another
+computer (`no remote operation was sent`) is a plain failure, not an uncertain
+delivery. Saving failures are shown in the editor and retried locally; sending starts
 only after its recovery snapshot has been saved.
 
 Delivery verifies the exact run, process, conversation and native input state.

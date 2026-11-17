@@ -1110,6 +1110,54 @@ fn an_invalid_checkpoint_keeps_text_and_attachments_on_read_and_refused_save() {
     assert_eq!(load(&store, KEY).draft.draft, valid.draft);
 }
 
+/// A send to a peer that ended uncertain (2026-11-17): once its composer was
+/// loaded again, only "Delivery was interrupted" was left, and why it ended
+/// was gone. The end's own reason is saved with the uncertain draft.
+#[test]
+fn an_uncertain_end_reloads_with_its_reason() {
+    let scratch = Scratch::new("uncertain-reason");
+    let store = DraftStore::open(scratch.0.join("drafts"));
+    let why = "hgs: studio unreachable";
+    let mut ended = draft("maybe sent", &[]);
+    ended.uncertain = true;
+    ended.uncertain_reason = format!("  {why}\n");
+    ended.checkpoint = Some(Box::new(checkpoint(1)));
+    save(&store, KEY, ended.clone()).unwrap();
+    let loaded = load(&store, KEY);
+    assert!(loaded.draft.uncertain);
+    assert_eq!(loaded.notice.as_deref(), Some(why));
+    assert_eq!(loaded.draft.uncertain_reason, why);
+    assert_eq!(loaded.draft.checkpoint, ended.checkpoint);
+    // Without a reason the notice is the general one, and the manifest has no field.
+    ended.uncertain_reason.clear();
+    save(&store, KEY, ended.clone()).unwrap();
+    assert_eq!(load(&store, KEY).notice.as_deref(), Some(INTERRUPTED));
+    let manifest =
+        fs::read_to_string(folder(&scratch.0.join("drafts"), KEY).join("draft.json")).unwrap();
+    assert!(!manifest.contains("uncertain_reason"), "{manifest}");
+    // A draft saved while sending has no end yet: an older reason is not its own.
+    ended.uncertain_reason = why.into();
+    ended.sending = true;
+    save(&store, KEY, ended.clone()).unwrap();
+    let loaded = load(&store, KEY);
+    assert_eq!(loaded.notice.as_deref(), Some(INTERRUPTED));
+    assert!(loaded.draft.uncertain_reason.is_empty());
+    // Nor has a draft that is not uncertain.
+    ended.sending = false;
+    ended.uncertain = false;
+    ended.checkpoint = None;
+    save(&store, KEY, ended).unwrap();
+    let loaded = load(&store, KEY);
+    assert_eq!(loaded.notice, None);
+    assert!(loaded.draft.uncertain_reason.is_empty());
+    // A long reason is kept bounded.
+    let mut long = draft("maybe sent", &[]);
+    long.uncertain = true;
+    long.uncertain_reason = "x".repeat(5000);
+    save(&store, KEY, long).unwrap();
+    assert_eq!(load(&store, KEY).draft.uncertain_reason.len(), 1000);
+}
+
 #[test]
 fn a_held_identity_reloads_uncertain_and_no_rename_replaces_it() {
     let scratch = Scratch::new("checkpoint-held");

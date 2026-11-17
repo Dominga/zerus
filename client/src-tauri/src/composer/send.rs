@@ -1874,11 +1874,17 @@ impl Composers {
                 if uncertain {
                     composer.error = true;
                     composer.uncertain = true;
+                    composer.uncertain_reason = detail.to_owned();
                     composer.notice = detail.to_owned();
                 }
             } else {
                 composer.error = !ok;
                 composer.uncertain = uncertain;
+                composer.uncertain_reason = if uncertain {
+                    detail.to_owned()
+                } else {
+                    String::new()
+                };
                 composer.notice = if ok {
                     "Submitted to terminal".into()
                 } else {
@@ -4026,6 +4032,48 @@ pub(crate) mod tests {
             archive_id: Some("10000000-0000-4000-8000-000000000001".into()),
             ..session()
         }
+    }
+
+    /// A send to a peer ended uncertain, its composer was dropped from memory
+    /// and loaded again (2026-11-17): only "Delivery was interrupted" was
+    /// left of why. The end's reason is saved with the uncertain draft and
+    /// shown again; the draft, its identity and the Allow retry gate stay.
+    #[test]
+    fn an_uncertain_end_keeps_its_reason_when_its_composer_loads_again() {
+        let root = dir("uncertain-reason-reload");
+        let store = drafts(&root);
+        let (c, fake) = send_hub_on(&store);
+        *lock(&fake.outcome) = Box::new(|action, id| match action {
+            Action::Send { .. } => Outcome::Uncertain {
+                detail: "hgs: studio unreachable".into(),
+            },
+            _ => receipt(action, id),
+        });
+        let view = opened(&c, ready());
+        c.send_message(view.handle, 1, view.text_epoch, "maybe sent".into(), 0, 0);
+        let ended = until(&c, |v| !v.sending && v.uncertain);
+        assert!(ended.status.ends_with("hgs: studio unreachable"), "{}", ended.status);
+        assert_eq!(ended.text, "maybe sent");
+        c.flush();
+        store.flush();
+        let (again, fake) = send_hub_on(&store);
+        again.open(Some(session()));
+        again.observe(&state(ready()));
+        let view = until(&again, |v| v.loaded && v.available);
+        assert_eq!(view.status, ended.status);
+        assert_eq!(view.text, "maybe sent");
+        assert!(view.uncertain && view.status_error && !view.can_send);
+        assert!(lock(&fake.calls).is_empty(), "a reload sends nothing");
+        // Allow retry ends the doubt and its reason with it.
+        again.allow_retry(view.handle);
+        let view = until(&again, |v| !v.uncertain);
+        assert!(!view.status.contains("unreachable"), "{}", view.status);
+        again.flush();
+        store.flush();
+        let (third, _) = send_hub_on(&store);
+        third.open(Some(session()));
+        let view = until(&third, |v| v.loaded);
+        assert!(!view.uncertain && view.text == "maybe sent", "{view:?}");
     }
 
     #[test]

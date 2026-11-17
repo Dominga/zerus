@@ -548,6 +548,7 @@ impl Composers {
             composer.label = stored.label;
             composer.form_state = stored.form_state;
             composer.uncertain = stored.uncertain || stored.sending || copy.notice.is_some();
+            composer.uncertain_reason = stored.uncertain_reason;
             if let Some(notice) = copy.notice {
                 composer.show_error(notice);
             }
@@ -609,6 +610,7 @@ impl Composers {
         // the user allows a retry (zerus-5wmh.66.4.4).
         if composer.checkpoint.is_none() {
             composer.uncertain = uncertain;
+            composer.uncertain_reason = stored.uncertain_reason;
             composer.error = error;
             composer.notice = notice;
         }

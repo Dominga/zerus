@@ -373,6 +373,11 @@ impl Composers {
                 composer.error = false;
                 composer.notice = STILL_SENDING.into();
                 composer.handed = Some(Handed::new(plan, now));
+                // Still sending is no end: a reload keeps its general notice.
+                if !composer.uncertain_reason.is_empty() {
+                    composer.uncertain_reason.clear();
+                    self.save(composer);
+                }
             }
         }
         drop(hub);
@@ -564,6 +569,7 @@ impl Composers {
                 // Unknown for good: uncertain until Allow retry.
                 Outcome::Uncertain { .. } => {
                     composer.uncertain = true;
+                    composer.uncertain_reason = detail.clone();
                     composer.error = true;
                     composer.notice = detail;
                 }

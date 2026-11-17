@@ -445,6 +445,11 @@ pub(crate) struct Composer {
     pub(crate) recording_owner: Option<String>,
     pub(crate) waiting: Option<String>,
     pub(crate) uncertain: bool,
+    /// Why the delivery ended uncertain, as its call's end said it. Saved
+    /// with the draft while it is uncertain, so a composer loaded again
+    /// (after 64 others were opened, or a restart) still says what happened
+    /// instead of the general "Delivery was interrupted". Text only.
+    pub(crate) uncertain_reason: String,
     pub(crate) error: bool,
     pub(crate) notice: String,
     /// The waiting send of this draft was given up at its time limit
@@ -510,6 +515,7 @@ impl Composer {
             recording_owner: None,
             waiting: None,
             uncertain: false,
+            uncertain_reason: String::new(),
             error: false,
             notice: String::new(),
             gave_up: None,
@@ -560,6 +566,11 @@ impl Composer {
             session_label: self.session_label.clone(),
             sending: self.sending,
             uncertain: self.uncertain,
+            uncertain_reason: if self.uncertain && !self.sending {
+                self.uncertain_reason.clone()
+            } else {
+                String::new()
+            },
             checkpoint: self.checkpoint.clone().map(Box::new),
         }
     }
@@ -1019,6 +1030,7 @@ impl Composers {
         }
         composer.form_state = stored.form_state;
         composer.uncertain = stored.uncertain || stored.sending || loaded.notice.is_some();
+        composer.uncertain_reason = stored.uncertain_reason;
         // Its original identity, as data: a reload never continues it.
         composer.checkpoint = stored.checkpoint.map(|checkpoint| *checkpoint);
         if let Some(notice) = loaded.notice {
@@ -1127,6 +1139,7 @@ impl Composers {
                             // An uncertain delivery stays uncertain, and
                             // keeps its reserved identity (zerus-5wmh.66.4.4).
                             newer.uncertain = moved.uncertain;
+                            newer.uncertain_reason = moved.uncertain_reason;
                             newer.checkpoint = moved.checkpoint;
                             newer.error = moved.error;
                             newer.notice = moved.notice;
@@ -1516,6 +1529,7 @@ impl Composers {
             return;
         };
         composer.uncertain = false;
+        composer.uncertain_reason.clear();
         composer.error = false;
         composer.notice.clear();
         composer.checkpoint = None;

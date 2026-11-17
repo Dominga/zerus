@@ -1594,7 +1594,9 @@ fn classify_answer(
         Exit::TimedOut | Exit::WriteFailed => uncertain(TIMED_OUT),
         Exit::Abnormal { stderr } => uncertain(detail(&stderr, -1)),
         Exit::Code { code, stderr, .. } if code != 0 => {
-            if code == 1 && !stderr.to_lowercase().contains("delivery uncertain") {
+            if (code == 1 && !stderr.to_lowercase().contains("delivery uncertain"))
+                || not_forwarded(code, &stderr)
+            {
                 failed(detail(&stderr, code))
             } else {
                 uncertain(detail(&stderr, code))
@@ -1805,8 +1807,28 @@ fn classify_confirm_send(target: &Target, invocation: &Invocation, exit: Exit) -
     }
 }
 
+/// The end of `hgs`'s message when a peer command failed while it was
+/// prepared, before its operation reached the peer (`src/cli.rs`,
+/// `NOT_FORWARDED`): the shell and capability probes of a computer that
+/// answers too slowly, for one.
+pub const NOT_FORWARDED: &str = "no remote operation was sent";
+
+/// Whether `hgs` itself says nothing reached the peer: exit 3 with its one
+/// line `hgs: ... no remote operation was sent`, and no word of an uncertain
+/// delivery. Any other exit 3 (a link that dropped during the command) may
+/// have run it.
+fn not_forwarded(code: i32, stderr: &str) -> bool {
+    let line = stderr.trim();
+    code == 3
+        && !line.contains(['\n', '\r'])
+        && line.starts_with("hgs: ")
+        && line.ends_with(NOT_FORWARDED)
+        && !line.to_lowercase().contains("uncertain")
+}
+
 /// `requestSendMessage`'s outcome. Only a timeout before the start, a failed
-/// start or a plain exit 1 without "delivery uncertain" is a definite
+/// start, a plain exit 1 without "delivery uncertain" or a peer command hgs
+/// never forwarded ([`not_forwarded`]) is a definite
 /// failure; anything else may have reached the agent. Success needs the
 /// receipt to echo the request, agent, session, run and conversation, and a
 /// first message (no conversation yet) to say so. A request that asked hgs
@@ -1836,7 +1858,9 @@ fn classify_send(
         Exit::Abnormal { stderr } => uncertain(detail(&stderr, -1)),
         Exit::Code { code, stderr, .. } if code != 0 => {
             let text = detail(&stderr, code);
-            if code != 1 || stderr.to_lowercase().contains("delivery uncertain") {
+            if not_forwarded(code, &stderr) {
+                failed(text)
+            } else if code != 1 || stderr.to_lowercase().contains("delivery uncertain") {
                 uncertain(text)
             } else {
                 failed(text)
@@ -2755,6 +2779,48 @@ mod tests {
         assert_eq!(outcome(&receipt), invalid);
         receipt["first_message"] = json!(true);
         assert!(matches!(outcome(&receipt), Outcome::Done { .. }));
+    }
+
+    /// A Send to a session on a busy Windows peer (2026-11-17): hgs gave up
+    /// while it prepared the call, exit 3, before anything reached the peer,
+    /// and the composer locked as if the message might have arrived. Only
+    /// hgs's own one line ending in the marker is a definite failure; every
+    /// other exit 3 may have run the command.
+    #[test]
+    fn a_peer_send_hgs_never_forwarded_is_a_definite_failure() {
+        let t = target("studio");
+        let action = send("hi", vec![]);
+        let inv = invocation(&t, &action, "req-1").unwrap();
+        let outcome = |exit| classify(&t, &action, &inv, exit);
+        let prepared = "hgs: studio unreachable: Remote SSH request timed out; no remote operation was sent";
+        assert_eq!(
+            outcome(exit(3, b"", &format!("{prepared}\n"))),
+            failed(prepared)
+        );
+        assert_eq!(
+            outcome(exit(3, b"", &format!("{prepared}\r\n"))),
+            failed(prepared)
+        );
+        for maybe_sent in [
+            "hgs: studio unreachable\n",
+            "hgs: link to studio dropped; check the command's result\n",
+            "hgs: studio: the connection to the peer ended\n",
+            // Not hgs's own single line, or it speaks of an uncertain delivery.
+            "studio unreachable: Remote SSH request timed out; no remote operation was sent\n",
+            "hgs: delivery uncertain: pane closed\nhgs: no remote operation was sent\n",
+            "hgs: delivery uncertain; no remote operation was sent\n",
+            "hgs: no remote operation was sent, perhaps\n",
+        ] {
+            assert!(
+                matches!(outcome(exit(3, b"", maybe_sent)), Outcome::Uncertain { .. }),
+                "{maybe_sent}"
+            );
+        }
+        // The marker belongs to exit 3 only.
+        assert!(matches!(
+            outcome(exit(255, b"", &format!("{prepared}\n"))),
+            Outcome::Uncertain { .. }
+        ));
     }
 
     fn held_send(agent: Option<&str>) -> Action {
@@ -4656,6 +4722,17 @@ mod tests {
         assert_eq!(
             outcome(asked(), chosen(), exit(2, b"", "")),
             uncertain("Answer transfer failed (exit 2).")
+        );
+        // hgs never forwarded it to the peer: nothing answered.
+        let prepared =
+            "hgs: studio unreachable: Remote SSH request timed out; no remote operation was sent";
+        assert_eq!(
+            outcome(asked(), chosen(), exit(3, b"", &format!("{prepared}\n"))),
+            failed(prepared)
+        );
+        assert_eq!(
+            outcome(asked(), chosen(), exit(3, b"", "hgs: studio unreachable\n")),
+            uncertain("hgs: studio unreachable")
         );
         let timed_out = uncertain("Answer delivery timed out. Check Terminal before retrying.");
         assert_eq!(outcome(asked(), chosen(), Exit::TimedOut), timed_out);

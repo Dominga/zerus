@@ -245,16 +245,21 @@ fn supports_within(
     let command = encode(&discover(config, peer, deadline)?, &["--help"])?;
     let output = read(config, peer, &command, deadline)?;
     let help = String::from_utf8_lossy(&output.stdout);
-    let supported = output.status.success()
-        && markers.iter().all(|(marker, exact)| {
-            if *exact {
-                help.lines().any(|line| line.trim() == *marker)
-            } else {
-                help.contains(marker)
-            }
-        });
+    let supported = output.status.success() && lists(&help, markers);
     available(deadline)?;
     Ok(supported)
+}
+
+/// Whether a peer's help lists every marker: an `exact` one as a whole
+/// trimmed line, the others anywhere.
+pub(crate) fn lists(help: &str, markers: &[(&str, bool)]) -> bool {
+    markers.iter().all(|(marker, exact)| {
+        if *exact {
+            help.lines().any(|line| line.trim() == *marker)
+        } else {
+            help.contains(marker)
+        }
+    })
 }
 
 /// Only fixed ASCII syntax reaches the remote login shell (PowerShell or cmd).
@@ -609,6 +614,17 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    #[test]
+    fn help_lists_exact_markers_as_whole_lines_and_the_others_anywhere() {
+        let help = "usage\n  hgs [@host] wait begin\n   session-id-selector-v1  \nwatch-v12\n";
+        assert!(lists(help, &[]));
+        assert!(lists(help, &[("session-id-selector-v1", true), ("hgs [@host] wait", false)]));
+        // An exact marker is a whole trimmed line, never a part of one.
+        assert!(!lists(help, &[("watch-v1", true)]));
+        assert!(lists(help, &[("watch-v1", false)]));
+        assert!(!lists(help, &[("session-id-selector-v1", true), ("iron-rules-v1", false)]));
     }
 
     #[cfg(target_os = "linux")]

@@ -111,24 +111,38 @@ pub struct Answer {
 
 /// Runs `args` (the remote hgs argv) on `alias` through its broker. None when
 /// no broker could take the request, so the caller may use its own ssh; an
-/// error once the request may have reached the peer.
-#[cfg(windows)]
+/// error once the request may have reached the peer. The caller checks what
+/// the command needs of the peer first ([`supports`]).
 pub fn request(config: &Config, alias: &str, args: &[String], stdin: Option<Vec<u8>>) -> Option<Result<Answer, String>> {
+    request_with(config, alias, args, stdin, true)
+}
+
+/// Whether the peer's hgs lists every marker in its help, asked through the
+/// channel: no ssh connection of its own, which to a Windows computer costs
+/// seconds and, twice within the six seconds a command's preparation gets,
+/// failed sends to a busy peer before anything was sent. `start`: whether a
+/// broker may be started for the question; a command that keeps its own ssh
+/// asks only a broker that already runs. None when no broker answered, so the
+/// caller asks over its own ssh; an error when the answer was lost.
+pub fn supports(config: &Config, alias: &str, markers: &[(&str, bool)], start: bool) -> Option<Result<bool, String>> {
+    if markers.is_empty() {
+        return Some(Ok(true));
+    }
+    Some(request_with(config, alias, &["--help".into()], None, start)?.map(|answer| {
+        answer.code == 0 && crate::remote_shell::lists(&String::from_utf8_lossy(&answer.stdout), markers)
+    }))
+}
+
+#[cfg(windows)]
+fn request_with(config: &Config, alias: &str, args: &[String], stdin: Option<Vec<u8>>, start: bool) -> Option<Result<Answer, String>> {
     if std::env::var_os("HGS_PEER_CHANNEL").is_some_and(|value| value == "0") {
         return None;
     }
     if failed_recently(config, alias, None) {
         return None;
     }
-    if args.first().is_some_and(|arg| arg == "rules") {
-        match request(config, alias, &["--help".into()], None)? {
-            Ok(answer) if answer.code == 0 && String::from_utf8_lossy(&answer.stdout).contains("iron-rules-v1") => {},
-            Ok(_) => return Some(Err("Update the selected computer to use iron rules".into())),
-            Err(error) => return Some(Err(error)),
-        }
-    }
     let name = pipe_name(config, alias).ok()?;
-    let mut stream = connect(config, &name, alias)?;
+    let mut stream = connect(config, &name, alias, start)?;
     let request = json!({"args": args, "stdin": stdin.map(|input| STANDARD.encode(input))});
     if write_frame(&mut stream, &request).is_err() {
         return None;
@@ -149,7 +163,7 @@ pub fn request(config: &Config, alias: &str, args: &[String], stdin: Option<Vec<
 }
 
 #[cfg(not(windows))]
-pub fn request(_: &Config, _: &str, _: &[String], _: Option<Vec<u8>>) -> Option<Result<Answer, String>> {
+fn request_with(_: &Config, _: &str, _: &[String], _: Option<Vec<u8>>, _: bool) -> Option<Result<Answer, String>> {
     None
 }
 
@@ -168,13 +182,14 @@ fn pipe_name(config: &Config, alias: &str) -> io::Result<String> {
     Ok(format!(r"\\.\pipe\hgs-peer-{digest}"))
 }
 
-/// A connection to the broker of `alias`, starting one when none runs.
+/// A connection to the broker of `alias`, starting one when none runs and
+/// `start` allows it.
 #[cfg(windows)]
-fn connect(config: &Config, name: &str, alias: &str) -> Option<crate::host::pipe::PipeStream> {
+fn connect(config: &Config, name: &str, alias: &str, start: bool) -> Option<crate::host::pipe::PipeStream> {
     use crate::host::pipe::{connect, ConnectError};
     match connect(name, Instant::now() + Duration::from_millis(500)) {
         Ok(stream) => return Some(stream),
-        Err(ConnectError::NoHost) => {}
+        Err(ConnectError::NoHost) if start => {}
         Err(_) => return None,
     }
     let program = std::env::current_exe().ok()?;

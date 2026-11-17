@@ -57,7 +57,22 @@ Polling and JSON commands use it (`ls`, `inspect`, `archives`, `worktrees`,
 `git-status`, `dirs`, `project`, `analytics`, `account ls|inspect`, and
 `terminal`, `send`, `settings`, `effort`, `history` with `--json`). Interactive
 commands, launches and everything else keep their own ssh. A request that no
-broker took uses its own ssh as before. When a broker cannot connect, for example
+broker took uses its own ssh as before.
+
+A command's preparation asks the broker too. Before a command runs, `hgs` finds
+the peer's login shell and, when the command needs a capability (a session
+selected by `--session-id`, as every Send from the desktop is), reads the peer's
+`hgs --help`: two more ssh connections, which together get six seconds. To a
+busy Windows computer each takes seconds, and on 2026-11-17 a Send from
+Activity ended there before anything was sent, yet showed as "may have been
+delivered". A listed command now asks the running broker for the help and goes
+through it without any ssh connection of its own (a send that took 5 to 6 s in
+preparation takes under half a second); a command that keeps its own ssh asks a
+broker that already runs for the help and still finds the shell itself. When
+preparation fails all the same, the message ends with `no remote operation was
+sent`, and the desktop shows that Send or answer as not sent, with its draft
+kept and no Allow retry (`NOT_FORWARDED` in `src/cli.rs` and
+`client/core/src/actions.rs`). When a broker cannot connect, for example
 to a peer whose hgs predates the channel, it records that in
 `~/.config/hgs/peer-channel/<alias>.failed` and requests use their own ssh for
 ten minutes. `HGS_PEER_CHANNEL=0` turns the channel off.

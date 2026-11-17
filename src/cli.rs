@@ -2598,6 +2598,8 @@ fn remote_via(
         );
         return Ok(0);
     }
+    // WhiteWh fork: the stdin a Windows peer's channel was offered and did not take.
+    let mut channel_input: Option<Option<Vec<u8>>> = None;
     let remote = if global_dry || has(&args, "--dry-run") { remote } else {
         let mut markers: Vec<(&str, bool)> = match command {
             "--expect-machine" if args.get(1).is_some_and(|v| v == "session-action-status") => vec![("guarded-create-v1", false), ("lifecycle-receipt-status-v1", true)],
@@ -2644,9 +2646,37 @@ fn remote_via(
             words.retain(|arg| arg != "--bounded");
         }
         if command == "analytics" { words.push("--read-only".into()); }
-        crate::remote_shell::adapt(config, target, &words, &remote, &markers,
-            "Update the selected computer before using this command; the required capability is missing")
-            .map_err(|e| if e.code == 3 { Error::new(3, format!("{target} unreachable: {}", e.message)) } else { e })?
+        const MISSING: &str = "Update the selected computer before using this command; the required capability is missing";
+        // WhiteWh fork: a Windows peer's lasting channel answers what the
+        // command needs of the peer, and takes a listed command itself, before
+        // any ssh connection of this command's own. Shell discovery and the
+        // help probe each cost one such connection, seconds to a busy Windows
+        // computer, and share six seconds: together they ended a Send to a busy
+        // peer before anything was sent.
+        let mut verified = false;
+        if crate::windows_peer::is_windows(config, target) {
+            let listed = crate::peer_channel::routed(command, &args);
+            match crate::peer_channel::supports(config, target, &markers, listed.is_some()) {
+                Some(Ok(true)) => verified = true,
+                Some(Ok(false)) => return Err(Error::new(1, MISSING)),
+                // No broker, or its answer was lost: this command's own ssh asks.
+                Some(Err(_)) | None => {}
+            }
+            if let (true, Some(reads_stdin)) = (verified, listed) {
+                let input = channel_stdin(reads_stdin)?;
+                match crate::peer_channel::request(config, target, &channel_args(command, &remote_args), input.clone()) {
+                    Some(Ok(answer)) => return channel_answer(answer),
+                    Some(Err(error)) => return Err(Error::new(3, error)),
+                    // No broker took it: its own ssh below, with the stdin already read.
+                    None => channel_input = Some(input),
+                }
+            }
+        }
+        // Planning only asks; a failure here ends the command before its
+        // operation reaches the peer, and says so for a caller that must
+        // tell "not sent" from "maybe sent" (the desktop's Send and answers).
+        crate::remote_shell::adapt(config, target, &words, &remote, if verified { &[] } else { &markers }, MISSING)
+            .map_err(|e| if e.code == 3 { Error::new(3, not_forwarded(target, &e.message)) } else { e })?
     };
     if global_dry || has(&args, "--dry-run") {
         if let Some(title) = tab {
@@ -2682,25 +2712,19 @@ fn remote_via(
     // WhiteWh fork: a Windows peer answers listed commands through its lasting
     // channel (src/peer_channel.rs); `ls --json` does so in peer_json_archives.
     if crate::windows_peer::is_windows(config, target) {
-        let mut windows_args = remote_args.clone();
-        if command == "analytics" {
-            windows_args.push("--read-only".into());
-        }
         if let Some(reads_stdin) = crate::peer_channel::routed(command, &args) {
-            let input = if reads_stdin {
-                let mut bytes = Vec::new();
-                io::stdin().read_to_end(&mut bytes)?;
-                Some(bytes)
-            } else {
-                None
-            };
-            match crate::peer_channel::request(config, target, &windows_args, input.clone()) {
-                Some(Ok(answer)) => {
-                    io::stdout().write_all(&answer.stdout)?;
-                    io::stdout().flush()?;
-                    io::stderr().write_all(&answer.stderr)?;
-                    return Ok(answer.code);
+            // The channel was asked above when it answered the capability
+            // question; otherwise it is asked now, after this command's own probes.
+            let (input, answered) = match channel_input.take() {
+                Some(input) => (input, None),
+                None => {
+                    let input = channel_stdin(reads_stdin)?;
+                    let answered = crate::peer_channel::request(config, target, &channel_args(command, &remote_args), input.clone());
+                    (input, answered)
                 }
+            };
+            match answered {
+                Some(Ok(answer)) => return channel_answer(answer),
                 Some(Err(error)) => return Err(Error::new(3, error)),
                 // No broker took it: the command's own ssh, with the stdin already read.
                 None => {
@@ -2732,6 +2756,50 @@ fn remote_via(
         return Err(Error::new(3, format!("{target} unreachable")));
     }
     Ok(rc)
+}
+
+/// The end of the message of a peer command that failed while it was
+/// prepared: nothing of its operation reached the peer. The desktop reads it
+/// (`client/core/src/actions.rs`, `NOT_FORWARDED`) to tell a Send or an answer
+/// that was not sent from one that may have been, so the text is a contract.
+pub(crate) const NOT_FORWARDED: &str = "no remote operation was sent";
+
+/// `message` of a failed preparation for `target`, ending in [`NOT_FORWARDED`].
+fn not_forwarded(target: &str, message: &str) -> String {
+    let message = message.trim_end().trim_end_matches('.');
+    if message.ends_with(NOT_FORWARDED) {
+        format!("{target} unreachable: {message}")
+    } else {
+        format!("{target} unreachable: {message}; {NOT_FORWARDED}")
+    }
+}
+
+/// WhiteWh fork: the argv a Windows peer's channel runs for `command`.
+fn channel_args(command: &str, remote_args: &[String]) -> Vec<String> {
+    let mut args = remote_args.to_vec();
+    if command == "analytics" {
+        args.push("--read-only".into());
+    }
+    args
+}
+
+/// WhiteWh fork: this command's stdin, read whole for the channel when the
+/// command reads it there.
+fn channel_stdin(reads_stdin: bool) -> Result<Option<Vec<u8>>> {
+    if !reads_stdin {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// WhiteWh fork: the peer's answer as this command's own output and exit code.
+fn channel_answer(answer: crate::peer_channel::Answer) -> Result<i32> {
+    io::stdout().write_all(&answer.stdout)?;
+    io::stdout().flush()?;
+    io::stderr().write_all(&answer.stderr)?;
+    Ok(answer.code)
 }
 
 /// WhiteWh fork: a Windows peer's command whose stdin was read for the channel,
@@ -4760,6 +4828,38 @@ mod tests {
         for command in SESSION_COMMANDS {
             assert!(selector_markers(command, &args(&["--session-id", id])).unwrap().is_some(), "{command}");
         }
+    }
+
+    /// A peer command that fails while it is prepared ends its message with
+    /// the contract text the desktop reads: nothing reached the peer.
+    #[test]
+    fn a_failed_preparation_says_nothing_was_sent() {
+        assert_eq!(
+            not_forwarded("studio", "Remote SSH request timed out"),
+            "studio unreachable: Remote SSH request timed out; no remote operation was sent"
+        );
+        // A message that already ends with it is not doubled.
+        assert_eq!(
+            not_forwarded("studio", "Could not identify the command shell on studio; no remote operation was sent"),
+            "studio unreachable: Could not identify the command shell on studio; no remote operation was sent"
+        );
+        assert_eq!(
+            not_forwarded("studio", "ssh: connect to host studio port 22: Connection timed out.\r\n"),
+            "studio unreachable: ssh: connect to host studio port 22: Connection timed out; no remote operation was sent"
+        );
+        assert!(not_forwarded("studio", "x").ends_with(NOT_FORWARDED));
+    }
+
+    /// WhiteWh fork: the channel runs the peer's argv as the ssh path would.
+    #[test]
+    fn the_channel_runs_the_forwarded_arguments() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let words = args(&["send", "claude/p", "--session-id", "id", "--json"]);
+        assert_eq!(channel_args("send", &words), words);
+        assert_eq!(
+            channel_args("analytics", &args(&["analytics", "--json"])),
+            args(&["analytics", "--json", "--read-only"])
+        );
     }
 
     #[test]

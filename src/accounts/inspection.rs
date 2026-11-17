@@ -1824,12 +1824,12 @@ fi
         echo.set_nonblocking(true).unwrap();
         let echo_port = echo.local_addr().unwrap().port();
         let decoy = match decoy {
-            Decoy::Ephemeral => std::net::TcpListener::bind(("127.0.0.2", 0)).unwrap(),
+            Decoy::Ephemeral => std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap(),
             Decoy::EchoPort => std::net::TcpListener::bind(("127.0.0.2", echo_port)).unwrap(),
         };
         decoy.set_nonblocking(true).unwrap();
-        let decoy_port = decoy.local_addr().unwrap().port();
-        let proxy = format!("http://127.0.0.2:{decoy_port}");
+        let decoy_address = decoy.local_addr().unwrap();
+        let proxy = format!("http://{decoy_address}");
         let base = format!(
             "{}://{host}:{echo_port}",
             if https { "https" } else { "http" }
@@ -1837,7 +1837,7 @@ fi
         let config = match curlrc {
             CurlrcProbe::None => String::new(),
             CurlrcProbe::Proxy => format!("proxy = \"{proxy}\"\n"),
-            CurlrcProbe::ConnectTo => format!("connect-to = \"::127.0.0.2:{decoy_port}\"\n"),
+            CurlrcProbe::ConnectTo => format!("connect-to = \"::{decoy_address}\"\n"),
             CurlrcProbe::Resolve => {
                 format!("resolve = \"localhost:{echo_port}:127.0.0.2\"\n")
             }
@@ -1887,9 +1887,10 @@ fi
     mod proxy_rows {
         use super::*;
 
-        // The six ambient settings from the review. Each must reach the
-        // stand-in directly and leave the 127.0.0.2 listener empty; a row that
-        // passes without exercising its setting would be no test at all.
+        // Each ambient setting must reach the stand-in directly and leave the
+        // distinct decoy endpoint empty. Five rows use separate ports on the
+        // configured loopback address; --resolve requires another address on
+        // the same port. A row that never exercises its setting is no test.
 
         #[test]
         fn http_proxy_cannot_route_the_test_base() {
@@ -1957,6 +1958,10 @@ fi
         }
 
         #[test]
+        #[cfg_attr(
+            target_os = "macos",
+            ignore = "curl --resolve needs a second loopback address on the same port; standard macOS has no configured 127.0.0.2"
+        )]
         fn a_curlrc_resolve_cannot_move_the_test_base() {
             let _lock = curl_lock();
             direct_request(

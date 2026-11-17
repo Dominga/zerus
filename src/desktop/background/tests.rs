@@ -56,6 +56,7 @@ impl Fixture {
         let owner = Arc::new(location.lock().unwrap());
         let mut broker = feed::Broker::new(&epoch);
         let runtime = Runtime {
+            input_acknowledgment: crate::desktop::input_acknowledgment::Worker::default(),
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             teams: crate::desktop::teams::Worker::new(&config, &epoch, owner.clone()),
             fleet: fleet::Runtime::empty_for_test(&epoch),
@@ -149,6 +150,21 @@ impl Fixture {
             broker,
             runtime,
         }
+    }
+}
+
+#[test]
+fn cached_readiness_matches_the_published_components_including_drain() {
+    let mut f = Fixture::new();
+    for stopping in [false, true] {
+        if stopping {
+            f.runtime.drain(&mut f.store, Duration::ZERO).unwrap();
+        }
+        let mut value = json!({});
+        f.runtime.decorate(&mut value);
+        let published = ["fleet", "presence", "reads", "attention", "approvals"]
+            .map(|component| value["lifecycle"]["background"][component]["ready"] == true);
+        assert_eq!(f.runtime.readiness(), published, "stopping={stopping}");
     }
 }
 

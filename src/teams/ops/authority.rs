@@ -18,9 +18,32 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
     let lead = matches!(actor, Actor::Session { team: id, member, .. } if id == &team.id && member == &team.lead);
     let member = matches!(actor, Actor::Session { team: id, member, .. } if id == &team.id && member != &team.lead);
     let allowed = match op {
+        Operation::SetPhaseAcceptance { .. } => person,
+        Operation::SetPhaseBarrier { .. }
+        | Operation::PausePhase { .. }
+        | Operation::ResumePhase { .. }
+        | Operation::MovePhase { .. } => person || lead,
+        Operation::ApprovePhase { .. } | Operation::ApprovePhaseCorrections { .. } => {
+            person || service
+        }
+        Operation::SendBackPhase { .. } | Operation::AcceptPhase { .. } => {
+            person || (lead && team.settings.delegations.accept_results)
+        }
+        Operation::SubmitPhaseCorrections { .. } | Operation::EditPhaseCorrections { .. } => {
+            person || lead
+        }
+        Operation::RejectPhaseCorrections { .. }
+        | Operation::UndoPhaseCorrectionRejection { .. } => person,
+        Operation::ReconcileCorrectionReview { .. }
+        | Operation::ReconcilePhaseReview { .. }
+        | Operation::ReconcilePublication { .. }
+        | Operation::PublicationTaskProblem { .. }
+        | Operation::ReconcilePhase { .. } => service,
+        Operation::RejectPhase { .. } | Operation::UndoRejectPhase { .. } => person,
         Operation::Verdict { .. } => member,
         Operation::CloseCard { .. } => service,
-        Operation::ObserveTask { .. }
+        Operation::RecordTimingFact { .. }
+        | Operation::ObserveTask { .. }
         | Operation::HandoutIntent { .. }
         | Operation::HandoutOutcome { .. }
         | Operation::ReopenIntent { .. }
@@ -38,19 +61,28 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
         | Operation::RecordLateSession { .. }
         | Operation::RecordLateReport { .. }
         | Operation::RecordCancel { .. }
+        | Operation::ReconcileLeadQueue
         | Operation::ReconcileUnstaffed
         | Operation::EndStaleUnstaffed
         | Operation::SettleLeftHandout { .. }
         | Operation::UnbindMember { .. }
         | Operation::TellPausedStarted { .. }
         | Operation::ClosePausedStarted { .. } => service,
-        Operation::Create { .. }
+        Operation::SwapMember { .. }
+        | Operation::AddMember { .. }
+        | Operation::RenameTeam { .. }
+        | Operation::SetGoal { .. }
+        | Operation::Create { .. }
+        | Operation::StartPlanning { .. }
         | Operation::Stop
         | Operation::Archive
         | Operation::StopMember { .. }
         | Operation::ArchiveMember { .. }
+        | Operation::SetValidationConfig { .. }
         | Operation::ChangeSettings { .. }
-        | Operation::DecideCard { .. } => person,
+        | Operation::AdvanceBase { .. }
+        | Operation::DecideCard { .. }
+        | Operation::SetDeps { .. } => person,
         Operation::AddTask { .. } => true,
         Operation::Ask { .. } => member || person,
         Operation::Accept { .. } => person || (lead && team.settings.delegations.accept_results),
@@ -63,6 +95,8 @@ pub fn authority(actor: &Actor, op: &Operation, team: &Team) -> Result<()> {
             _ => person || lead || service,
         },
         Operation::Pause
+        | Operation::SubmitDraftPhase { .. }
+        | Operation::EditDraftPhase { .. }
         | Operation::Resume
         | Operation::PauseMember { .. }
         | Operation::ResumeMember { .. }

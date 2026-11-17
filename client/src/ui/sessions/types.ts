@@ -280,6 +280,8 @@ export interface ActivityItem {
   at: string;
   title?: string;
   body?: string;
+  /** A bounded recorded body whose remainder is unavailable in Activity. */
+  bodyTruncated?: boolean;
   /** The native prompt echo to restore if its attachment cannot be read. */
   echoBody?: string;
   code?: string;

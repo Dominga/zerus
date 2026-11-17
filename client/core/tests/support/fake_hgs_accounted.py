@@ -29,7 +29,11 @@ def wait_release():
 def holder():
     # Intentionally escape the helper group: cancellation must not chase a
     # detached session. Its pipe remains charged until the explicit release.
-    code = "import os,time;end=time.monotonic()+20\nwhile not os.path.exists(%r) and time.monotonic()<end: time.sleep(.01)" % str(RELEASE)
+    delay = CONFIG.get("holder_startup_delay_ms", 0) / 1000
+    assert 0 <= delay <= 10
+    code = ("import os,time\ntime.sleep(%r)\nopen(%r,'w').close()\n"
+            "end=time.monotonic()+20\nwhile not os.path.exists(%r) and time.monotonic()<end: time.sleep(.01)"
+            % (delay, str(ROOT / "holder-ready"), str(RELEASE)))
     pipe = CONFIG["pipe"]
     subprocess.Popen([sys.executable, "-c", code],
                      start_new_session=True,

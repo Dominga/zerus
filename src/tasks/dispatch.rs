@@ -581,7 +581,7 @@ pub(super) fn execute(config: &Config, action: &str, args: &[String]) -> Result<
                         result(state, text, &reload()?)
                     });
                 }
-                let (state, text) = super::attempts::refusal(&closed, &detail.borrow());
+                let (state, text) = super::attempts::refusal(config, &r.project.0, &closed, &detail.borrow());
                 return result(state, &text, &reload()?);
             }
             Admission::Uncertain(error) => {

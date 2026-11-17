@@ -48,6 +48,7 @@ fn plan(team: &Team, path: &Path) -> Plan {
         parent: None,
         launch_id: uuid::Uuid::new_v4().to_string(),
         session_name: String::new(),
+        member_generation: None,
         placement: p::Placement {
             source: path.to_str().unwrap().into(),
             git_dir: path.join("common").to_str().unwrap().into(),

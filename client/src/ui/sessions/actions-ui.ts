@@ -273,6 +273,7 @@ export function tagProblem(tag: string): string | undefined {
   if (!tag) return tr("Enter a session name.");
   if (tag !== tag.trim()) return tr("Remove spaces at the beginning or end.");
   if (/[/:.\p{Cc}]/u.test(tag)) return tr("Names cannot contain /, : or . or control characters.");
+  if (/[`$;&|<>(){}\[\]*?!#~\\'",\u2018-\u201e\p{Cf}]/u.test(tag)) return tr("Names cannot contain shell syntax or invisible formatting characters.");
   return undefined;
 }
 

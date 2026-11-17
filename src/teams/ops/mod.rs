@@ -3,17 +3,33 @@
 #![allow(dead_code)] // Used by the following CLI and service packages.
 mod apply;
 mod authority;
+mod base;
 mod common;
 mod decisions;
 mod delegation;
+mod dependencies;
+mod dependency_graph;
+mod drafts;
+mod editing;
 pub(super) mod handout;
 pub(crate) use handout::handout_admissible;
 mod integration;
 mod journal;
+pub(crate) mod lead_queue;
 mod members;
+pub(crate) mod observed_timing;
+mod phase_controls;
+pub(crate) use phase_controls::prepare as prepare_phase_controls;
+mod phase_review;
 mod pipeline;
+mod planning;
+mod provider_settings;
+pub(crate) mod publication;
 mod queue;
+#[cfg(test)]
+pub(crate) use queue::injected;
 mod readiness;
+pub(crate) mod rework;
 mod stage_task;
 mod talk;
 mod team;
@@ -23,8 +39,15 @@ mod unstaffed;
 pub use unstaffed::{unstaffed_changes, unstaffed_of, unstaffed_stages};
 mod validation;
 use super::store::{self, rows, DecisionState, Store};
+#[cfg(test)]
+pub(crate) use apply::apply_with_native;
+#[cfg(test)]
+pub(crate) use apply::apply_with_repository;
 #[allow(unused_imports)]
-pub use apply::apply;
+pub use apply::{apply, apply_with_config};
+pub(crate) use apply::{
+    apply_with_gesture, apply_with_native_context, observe_native_intake, replay,
+};
 pub use authority::authority;
 use common::*;
 #[allow(unused_imports)] // The teams actor consumes this read next.

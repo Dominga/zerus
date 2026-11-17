@@ -1,4 +1,5 @@
 import { sendErrorText } from "./send-error";
+import { OwnMessageBody } from "./OwnMessageBody";
 import { nativeRoute } from "./native-entry";
 import { withoutHeld } from "./held-message";
 import { tr, trNoop } from "../../i18n";
@@ -584,7 +585,7 @@ function ItemBody(props: { item: ActivityItem; scope?: AttachmentScope }) {
     <div class="act-body">
       <Show when={it().kind === "user"} fallback={<Body text={it().body ?? ""} />}>
         {/* A Codex question reply reads as Question and Your answer blocks (ActivityView.cpp:347-363). */}
-        <Show when={it().replies?.length} fallback={<Body text={it().body ?? ""} />}>
+        <Show when={it().replies?.length} fallback={<OwnMessageBody text={it().body ?? ""} truncated={it().bodyTruncated} />}>
           <For each={it().replies}>{(r) => (
             <div class="act-reply">
               <div class="act-reply-q">{tr("Question")}</div>

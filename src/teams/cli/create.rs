@@ -21,14 +21,37 @@ pub(super) fn run(
     args: &[String],
     provided: Option<&str>,
 ) -> Result<Value, Problem> {
+    run_kind(config, caller, args, provided, false)
+}
+pub(super) fn run_kind(
+    config: &Config,
+    caller: &Caller,
+    args: &[String],
+    provided: Option<&str>,
+    planning: bool,
+) -> Result<Value, Problem> {
+    let command = if planning { "start-planning" } else { "create" };
     let options = Options::parse(args, &["--template"], &[])?;
-    options.nothing_else("create")?;
+    options.nothing_else(command)?;
     let template = options
         .get("--template")
         .ok_or_else(|| input::usage("create needs --template TEMPLATE"))?;
     let mut store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
-    actor::person_only(&identity, "create")?;
+    actor::person_only(&identity, command)?;
+    let request = prepare(config, &store, template, provided, planning)?;
+    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
+    super::commands::reply_view(&identity.actor, &request.team, &reply)
+}
+/// Pure request preparation shared by the command and explicit admitted
+/// writer models. It grants no actor or execution authority.
+pub(super) fn prepare(
+    config: &Config,
+    store: &Store,
+    template: &str,
+    provided: Option<&str>,
+    planning: bool,
+) -> Result<Request, Problem> {
     let mut fields = input::object(&request_input(provided)?)?;
     super::commands::refuse_operation_word(&fields)?;
     // The field is a digest when it is there, or it is left out. Present but
@@ -42,8 +65,11 @@ pub(super) fn run(
         }
     }
     complete_delegations(&fields)?;
-    let (bundle, replay) = snapshot(&store, config, template, &fields)?;
-    fields.insert("op".into(), json!("create"));
+    let (bundle, replay) = snapshot(store, config, template, &fields, planning)?;
+    fields.insert(
+        "op".into(),
+        json!(if planning { "start_planning" } else { "create" }),
+    );
     fields.insert(
         "bundle".into(),
         serde_json::to_value(bundle).map_err(storage)?,
@@ -53,19 +79,23 @@ pub(super) fn run(
     if !replay {
         check_template(&request)?;
     }
-    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
-    super::commands::reply_view(&identity.actor, &request.team, &reply)
+    Ok(request)
 }
+
 fn snapshot(
     store: &Store,
     config: &Config,
     template: &str,
     fields: &Map<String, Value>,
+    planning: bool,
 ) -> Result<(Box<TemplateBundle>, bool), Problem> {
     if let Some(id) = fields.get("request_id").and_then(Value::as_str) {
         if let Some(saved) = store.creation_request(id)? {
-            if let Operation::Create { bundle, .. } = saved.operation {
-                if bundle.template.id == template {
+            let same_kind = matches!(saved.operation, Operation::StartPlanning { .. }) == planning;
+            if let Operation::Create { bundle, .. } | Operation::StartPlanning { bundle, .. } =
+                saved.operation
+            {
+                if same_kind && bundle.template.id == template {
                     return Ok((bundle, true));
                 }
             }
@@ -82,11 +112,16 @@ fn snapshot(
     Ok((Box::new(bundle), false))
 }
 fn check_template(request: &Request) -> Result<(), Problem> {
-    let Operation::Create {
+    let (Operation::Create {
         bundle,
         expected_template,
         ..
-    } = &request.operation
+    }
+    | Operation::StartPlanning {
+        bundle,
+        expected_template,
+        ..
+    }) = &request.operation
     else {
         unreachable!()
     };

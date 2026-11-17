@@ -564,6 +564,101 @@ fn actions() -> Harness {
     Harness::with_help("task-actions", help() + MARKER + ACTIONS)
 }
 
+const IDENTITY: &str = "Mobile task identity ABI: task-session-identity-v2";
+
+#[test]
+fn task_identity_is_advertised_only_by_the_exact_native_marker_and_task_operations() {
+    let supports = |help: String, windows: bool| {
+        let flags = Flags::from_help(&help);
+        let flags = if windows {
+            flags.windows_local()
+        } else {
+            flags
+        };
+        flags.advertised(true)["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("task_session_identity_v2"))
+    };
+    assert!(supports(format!("{ACTIONS}\n{IDENTITY}\n"), false));
+    for help in [
+        ACTIONS.to_owned(),
+        IDENTITY.to_owned(),
+        format!("{ACTIONS}\n{IDENTITY}-extra\n"),
+        format!("{ACTIONS}\nnot {IDENTITY}\n"),
+    ] {
+        assert!(!supports(help, false));
+    }
+    assert!(!supports(format!("{ACTIONS}\n{IDENTITY}\n"), true));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn task_identity_is_forwarded_once_without_a_legacy_retry() {
+    let harness = Harness::with_help(
+        "task-identity",
+        format!("{}{MARKER}{ACTIONS}\n{IDENTITY}\n", help()),
+    );
+    let payload = json!({"schema":2,"project":"project-1","task":TASK,
+        "session":"codex/stale-label","session_id":"launch_id:original"});
+    let id = "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c8d01";
+    // A known native refusal must stay a refusal. No rewritten schema-1 send.
+    harness.answer(
+        &SEND,
+        json!({"schema":1,"ok":false,"error":"selected session is gone"}),
+    );
+    assert_eq!(
+        harness.finished("task_send", id, payload.clone()).await["state"],
+        "failed"
+    );
+    assert_eq!(harness.calls(&SEND), [Some(payload.clone())]);
+    assert_eq!(
+        harness.execute("task_send", id, "", payload.clone()).await,
+        Outcome::Replayed
+    );
+    assert_eq!(harness.calls(&SEND).len(), 1);
+    // With no native answer the result is unknown, and that identity still runs once.
+    let unknown = Harness::with_help(
+        "task-identity-unknown",
+        format!("{}{ACTIONS}\n{IDENTITY}\n", help()),
+    );
+    assert_eq!(
+        unknown.finished("task_send", id, payload.clone()).await["state"],
+        "uncertain"
+    );
+    assert_eq!(
+        unknown.execute("task_send", id, "", payload.clone()).await,
+        Outcome::Replayed
+    );
+    assert_eq!(unknown.calls(&SEND), [Some(payload.clone())]);
+    // An older native host is refused before spawning a task action.
+    let old = actions();
+    let refused = old.finished("task_send", id, payload).await;
+    assert_eq!(refused["state"], "failed");
+    assert_eq!(
+        refused["error"],
+        "native task session identity ABI is unavailable"
+    );
+    assert!(old.calls(&SEND).is_empty());
+    // The read path preserves the same exact filter, including a stale label.
+    let filter = json!({"schema":2,"project":"project-1","limit":50,
+        "session":{"machine":"node-1","session":"codex/stale-label","session_id":"launch_id:original"}});
+    harness.answer(
+        &DONE,
+        json!({"schema":1,"tasks":[],"next":null,"total":0,"recent":0}),
+    );
+    assert_eq!(
+        harness
+            .finished(
+                "task_done",
+                "7d2c4e8a-1b3f-4a5c-9d6e-0f1a2b3c8d02",
+                filter.clone()
+            )
+            .await["state"],
+        "completed"
+    );
+    assert_eq!(harness.calls(&DONE), [Some(filter)]);
+}
+
 #[test]
 fn the_task_actions_are_advertised_only_with_their_marker() {
     let ops = |help: String| -> Vec<String> {
@@ -711,4 +806,51 @@ async fn a_done_page_is_a_short_read() {
     assert!(journal
         .claim("d", "task_done", Some("hash"), EPOCH + 121.0)
         .unwrap());
+}
+
+#[test]
+fn task_media_uploads_need_the_exact_native_marker_and_an_offered_exchange() {
+    const UPLOAD: &str = "Mobile task media ABI: task-media-upload-v1";
+    let supports = |help: String, windows: bool| {
+        let flags = Flags::from_help(&help);
+        let flags = if windows {
+            flags.windows_local()
+        } else {
+            flags
+        };
+        flags.advertised(true)["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("task_media_upload_v1"))
+    };
+    assert!(supports(format!("{MARKER}{UPLOAD}\n"), false));
+    for help in [
+        MARKER.to_owned(),
+        UPLOAD.to_owned(),
+        format!("{MARKER}{UPLOAD}-extra\n"),
+        format!("{MARKER}not {UPLOAD}\n"),
+    ] {
+        assert!(!supports(help, false));
+    }
+    assert!(!supports(format!("{MARKER}{UPLOAD}\n"), true));
+}
+
+#[test]
+fn admitted_edit_marker_needs_exchange_and_never_grants_plain_or_windows_advertisement() {
+    const EDIT: &str = "Mobile task edit ABI: task-admitted-edit-v1";
+    let flags = Flags::from_help(&format!("{MARKER}{EDIT}\n"));
+    assert!(flags.task_admitted_edit);
+    assert!(!flags.advertised(true)["features"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("task_admitted_edit_v1")));
+    for help in [
+        MARKER.to_owned(),
+        EDIT.to_owned(),
+        format!("{MARKER}{EDIT}-extra\n"),
+        format!("{MARKER}not {EDIT}\n"),
+    ] {
+        assert!(!Flags::from_help(&help).task_admitted_edit);
+    }
+    assert!(!flags.windows_local().task_admitted_edit);
 }

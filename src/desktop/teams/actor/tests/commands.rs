@@ -24,6 +24,10 @@ fn entry() {
         contracts::run();
         return;
     }
+    if mode == "superseded" {
+        contracts::superseded();
+        return;
+    }
     if mode == "stage-crash" {
         std::env::set_var("HGS_TEST_TEAM_STAGE_AFTER_SAVE", "1");
     }
@@ -185,5 +189,83 @@ impl Fixture {
         std::fs::read_to_string(self.config.state.join("native-inputs"))
             .map(|s| s.lines().count())
             .unwrap_or(0)
+    }
+}
+
+#[test]
+fn real_cli_orderings_never_label_the_later_acceptance_with_the_old_commit() {
+    use crate::teams::ops::{Operation, TaskStage};
+    if std::env::var_os("HGS_TEST_BIN").is_none() {
+        return;
+    }
+    const OLD: &str = "0123456789abcdef0123456789abcdef01234567";
+    for fact_first in [true, false] {
+        let mut f = Fixture::new();
+        f.submitted();
+        f.reported();
+        f.h.run(&person(), Operation::Accept { node: f.node }).unwrap();
+        let first = f.h.accept_decision(f.node);
+        if fact_first {
+            f.h.run(
+                &service(),
+                Operation::RecordIntegration {
+                    node: f.node,
+                    decision: first,
+                    commit: OLD.into(),
+                },
+            )
+            .unwrap();
+        }
+        let mut review = f.h.observation(f.node, TaskStage::InReview);
+        review.attempt = 2;
+        review.attempt_id = "person-first".into();
+        f.h.run(
+            &service(),
+            Operation::ObserveTask {
+                node: f.node,
+                observation: review,
+            },
+        )
+        .unwrap();
+        f.h.observe(f.node, TaskStage::InProgress);
+        f.h.observe(f.node, TaskStage::InReview);
+        f.h.run(&person(), Operation::Accept { node: f.node }).unwrap();
+        let second = f.h.accept_decision(f.node);
+        assert!(second > first);
+        if !fact_first {
+            f.h.run(
+                &service(),
+                Operation::RecordIntegration {
+                    node: f.node,
+                    decision: first,
+                    commit: OLD.into(),
+                },
+            )
+            .unwrap();
+        }
+        let mut review = f.h.observation(f.node, TaskStage::InReview);
+        review.attempt = 4;
+        review.attempt_id = "person-second".into();
+        f.h.run(
+            &service(),
+            Operation::ObserveTask {
+                node: f.node,
+                observation: review,
+            },
+        )
+        .unwrap();
+        let items: Vec<_> = f
+            .h
+            .store
+            .inbox(TEAM, 200, None)
+            .unwrap()
+            .rows
+            .into_iter()
+            .filter(|item| item.kind == "accepted_superseded")
+            .collect();
+        let later = items.iter().max_by_key(|item| item.generation).unwrap();
+        assert_eq!(later.generation, 2, "fact_first={fact_first}");
+        assert!(!later.text.contains(OLD), "fact_first={fact_first}: {}", later.text);
+        assert!(!later.text.contains("already been merged"), "fact_first={fact_first}: {}", later.text);
     }
 }

@@ -150,7 +150,9 @@ pub(crate) fn agent_refusal() -> Option<Value> {
     }
     match super::dsh::host_check() {
         super::dsh::HostCheck::Outside => None,
-        super::dsh::HostCheck::Under => Some(json!({"ok": false, "error": "agent_refused"})),
+        super::dsh::HostCheck::Under | super::dsh::HostCheck::Unregistered => {
+            Some(json!({"ok": false, "error": "agent_refused"}))
+        }
         super::dsh::HostCheck::Unverified(message) => {
             Some(json!({"ok": false, "error": "host_unverified", "message": message}))
         }
@@ -189,6 +191,19 @@ pub(super) fn enrich(session: &mut Value, store: Option<&Store>) {
         Some(store) if session_id::canonical(&id) => view(store.entry(&id)),
         _ => Value::Null,
     };
+}
+
+/// Fill API-backed catalog rows from the same bounded preference read.
+/// Existing explicit unknown values remain unknown.
+pub(super) fn enrich_missing(sessions: &mut [Value], store: Option<&Store>) {
+    for session in sessions {
+        let agent = session["agent"]
+            .as_str()
+            .or_else(|| session["cmd"].as_str());
+        if session.get("question_routing").is_none() && matches!(agent, Some("dsh" | "opencode")) {
+            enrich(session, store);
+        }
+    }
 }
 
 /// The pure compare-and-swap of one session's switch: the exit code, the
@@ -361,6 +376,41 @@ mod tests {
             expected_revision: revision,
             send_to_parent: send,
         }
+    }
+
+    #[test]
+    fn native_rows_receive_the_shared_setting_without_replacing_known_or_unknown_values() {
+        let mut store = Store::default();
+        update(&mut store, &record(), &request(0, false));
+        let mut native = record();
+        native["agent"] = json!("dsh");
+        let mut rows = vec![
+            native.clone(),
+            json!({"cmd":"opencode","session_id":"22222222-2222-4222-8222-222222222222"}),
+            json!({"agent":"dsh","question_routing":null}),
+            json!({"cmd":"opencode","question_routing":{"send_to_parent":false,"revision":9}}),
+            json!({"agent":"dsh"}),
+            json!({"cmd":"claude"}),
+        ];
+        enrich_missing(&mut rows, Some(&store));
+        assert_eq!(
+            rows[0]["question_routing"],
+            json!({"send_to_parent":false,"revision":1,"person_off":false})
+        );
+        assert_eq!(
+            rows[1]["question_routing"],
+            json!({"send_to_parent":true,"revision":0,"person_off":false})
+        );
+        assert_eq!(rows[2]["question_routing"], Value::Null);
+        assert_eq!(
+            rows[3]["question_routing"],
+            json!({"send_to_parent":false,"revision":9})
+        );
+        assert_eq!(rows[4]["question_routing"], Value::Null);
+        assert!(rows[5].get("question_routing").is_none());
+        let mut unknown = vec![native];
+        enrich_missing(&mut unknown, None);
+        assert_eq!(unknown[0]["question_routing"], Value::Null);
     }
 
     #[test]

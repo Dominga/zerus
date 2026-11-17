@@ -8,6 +8,8 @@ use std::fs::{self, File};
 use std::io::{Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
+mod kimi_blocking;
+
 const MAX_WIRE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_PAYLOAD_BYTES: u64 = 128 * 1024;
 
@@ -237,12 +239,18 @@ fn wire_events(record: &Value) -> Result<Vec<Value>> {
             {
                 continue;
             }
-            if !line.windows(12).any(|part| part == b"interaction.") {
+            if !line.windows(12).any(|part| part == b"interaction.")
+                && !line
+                    .windows(25)
+                    .any(|part| part == b"context.append_loop_event")
+            {
                 continue;
             }
             if let Ok(event) = serde_json::from_slice::<Value>(line) {
                 if string(&event, "agentId") == "main"
-                    && string(&event, "type").starts_with("interaction.")
+                    && (string(&event, "type").starts_with("interaction.")
+                        || (event["type"] == "context.append_loop_event"
+                            && event["event"]["type"] == "tool.call"))
                 {
                     events.push(event);
                 }
@@ -254,7 +262,9 @@ fn wire_events(record: &Value) -> Result<Vec<Value>> {
 
 fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
     let mut pending = BTreeMap::new();
+    let mut calls = kimi_blocking::Calls::default();
     for event in events {
+        calls.observe(event);
         let id = string(event, "id");
         if id.is_empty() {
             continue;
@@ -268,7 +278,7 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
                 if !active {
                     continue;
                 }
-                if let Ok(card) = card(
+                if let Ok(mut card) = card(
                     record,
                     id,
                     tool,
@@ -276,7 +286,8 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
                     "kimi_wire",
                     event["time"].as_f64().unwrap_or(0.0) / 1000.0,
                 ) {
-                    pending.insert(id.into(), card);
+                    card["blocking"] = json!(calls.blocking(event, &card["questions"]));
+                    pending.insert(id.into(), (card, event));
                 }
             }
             "interaction.resolved" | "interaction.cancelled" | "interaction.dismissed" => {
@@ -286,6 +297,15 @@ fn recover_wire(record: &Value, events: &[Value]) -> BTreeMap<String, Value> {
         }
     }
     pending
+        .into_iter()
+        .map(|(id, (mut card, request))| {
+            // A later tool-ID reuse must retire an older question's proof.
+            // Rechecking only revokes authority; a future call cannot add it.
+            card["blocking"] =
+                json!(card["blocking"] == true && calls.blocking(request, &card["questions"]));
+            (id, card)
+        })
+        .collect()
 }
 
 /// Current normalized identities without availability checks (adapter guard API).
@@ -348,43 +368,69 @@ fn collect(
             None => return Ok(None),
         },
     }
-    // Only a listing may fit a clipped approval into its unviewed pane.
-    let approval=if listing {claude_approval::listed(record)} else {claude_approval::current(record)};
-    if let Some(approval)=approval{cards.push(approval);}
-    if let Some(mode) = claude_permission::current(record) {
-        cards.push(mode);
-    }
-    if let Some(resume) = claude_resume::current(record) { cards.push(resume); }
-    if let Some(limit) = claude_usage_limit::current(record) { cards.push(limit); }
-    if let Some(trust) = claude_trust::current(record) {
-        cards.push(trust);
-    }
-    // Task #466: Claude's bypass-permissions startup warning is the owner's card,
-    // never the generic read-only startup fallback.
-    if let Some(bypass) = claude_bypass::current(record) {
-        cards.push(bypass);
-    }
-    if let Some(trust) = codex_trust::current(record) {cards.push(trust);}
-    if let Some(approval) = codex_approval::current(record) {cards.push(approval);}
-    if let Some(setup) = codex_sandbox::current(record) {cards.push(setup);}
-    if let Some(trust) = codex_hooks_trust::current(record) {cards.push(trust);}
-    if let Some(update) = codex_update::current(record) {cards.push(update);}
-    if let Some(goal) = codex_goal_resume::current(record) {cards.push(goal);}
-    if let Some(limit) = codex_rate_limit::current(record) {cards.push(limit);}
-    if let Some(trust) = kimi_trust::current(record) {
-        cards.push(trust);
-    }
-    if let Some(hint) = kimi_cache_hint::current(record) {
-        cards.push(hint);
-    }
-    if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
-        cards.push(terminal);
-    }
-    if cards.is_empty() {
-        cards.extend(claude_approval::idle_choice(record));
-    }
-    if cards.is_empty() && complete {
-        cards.extend(startup_choice::current(record));
+    if !storage::listing_scope::public(record) {
+        // Only a listing may fit a clipped approval into its unviewed pane.
+        let approval = if listing {
+            claude_approval::listed(record)
+        } else {
+            claude_approval::current(record)
+        };
+        if let Some(approval) = approval {
+            cards.push(approval);
+        }
+        if let Some(mode) = claude_permission::current(record) {
+            cards.push(mode);
+        }
+        if let Some(resume) = claude_resume::current(record) {
+            cards.push(resume);
+        }
+        if let Some(limit) = claude_usage_limit::current(record) {
+            cards.push(limit);
+        }
+        if let Some(trust) = claude_trust::current(record) {
+            cards.push(trust);
+        }
+        // Task #466: Claude's bypass-permissions startup warning is the owner's card,
+        // never the generic read-only startup fallback.
+        if let Some(bypass) = claude_bypass::current(record) {
+            cards.push(bypass);
+        }
+        if let Some(trust) = codex_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(approval) = codex_approval::current(record) {
+            cards.push(approval);
+        }
+        if let Some(setup) = codex_sandbox::current(record) {
+            cards.push(setup);
+        }
+        if let Some(trust) = codex_hooks_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(update) = codex_update::current(record) {
+            cards.push(update);
+        }
+        if let Some(goal) = codex_goal_resume::current(record) {
+            cards.push(goal);
+        }
+        if let Some(limit) = codex_rate_limit::current(record) {
+            cards.push(limit);
+        }
+        if let Some(trust) = kimi_trust::current(record) {
+            cards.push(trust);
+        }
+        if let Some(hint) = kimi_cache_hint::current(record) {
+            cards.push(hint);
+        }
+        if let Some(terminal) = claude_approval::terminal_card(record, &cards) {
+            cards.push(terminal);
+        }
+        if cards.is_empty() {
+            cards.extend(claude_approval::idle_choice(record));
+        }
+        if cards.is_empty() && complete {
+            cards.extend(startup_choice::current(record));
+        }
     }
     cards.sort_by(|a, b| {
         a["created_at"]
@@ -937,7 +983,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     let _answer_guard = lock(Some(&answer_lock(&request.expected_run_id)?))?;
     // Nested canonical receipt checks share this one budget; a new connection
     // or terminal guard must not restart the person's SQLite wait.
-    let _receipt_wait = receipt_index::QuestionAdmission::new();
+    let mut receipt_wait = receipt_index::QuestionAdmission::new();
     // Only the preparation is locked. Awaiting the UI must not block provider
     // hooks which confirm the very answer that we are waiting for.
     let (record, question, answers, mut receipt) = {
@@ -958,6 +1004,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             }
             return Err("delivery uncertain: this answer request may already be in Terminal; do not resend automatically".into());
         }
+        receipt_wait.prioritize(&absolute_root()?)?;
         let record = matching_record(name, &request)?;
         let question = current(&record)?
             .into_iter()
@@ -1359,6 +1406,7 @@ mod tests {
         let recovered = recover_wire(&record, &[event()]);
         assert_eq!(recovered["question_test"]["question_id"], "question_test");
         assert_eq!(recovered["question_test"]["created_at"], 1.0);
+        assert_eq!(recovered["question_test"]["blocking"], false);
         assert_eq!(
             recovered["question_test"]["questions"][0]["allow_other"],
             true
@@ -1368,6 +1416,32 @@ mod tests {
             &json!({"hook_event_name":"PostToolUse","tool_call_id":"tool_test"}),
         );
         assert_eq!(record["pending_questions"], json!({}));
+    }
+    #[test]
+    fn a_later_native_tool_call_retires_the_pending_questions_blocking_proof() {
+        let original = json!({"type":"context.append_loop_event","agentId":"main",
+            "event":{"type":"tool.call","toolCallId":"tool_test","turnId":"0",
+                "name":"AskUserQuestion","args":{"questions":items()}}});
+        let mut request = event();
+        request["request"]["toolCallId"] = json!("tool_test");
+        request["request"]["turnId"] = json!(0);
+        let recover =
+            |events: &[Value]| recover_wire(&record(), events)["question_test"]["blocking"].clone();
+        assert_eq!(recover(&[original.clone(), request.clone()]), true);
+        for replacement in [
+            json!({"type":"context.append_loop_event","agentId":"main","event":{
+                "type":"tool.call","toolCallId":"tool_test","turnId":"1","name":"AskUserQuestion",
+                "args":{"questions":items(),"background":true}}}),
+            json!({"type":"context.append_loop_event","agentId":"main","event":{
+                "type":"tool.call","toolCallId":"tool_test","turnId":"0","name":"AnotherTool"}}),
+        ] {
+            assert_eq!(
+                recover(&[original.clone(), request.clone(), replacement]),
+                false
+            );
+        }
+        // A future foreground call cannot turn an unproven earlier request into proof.
+        assert_eq!(recover(&[request, original]), false);
     }
     #[test]
     fn a_new_prompt_resolves_the_previous_permission_request() {

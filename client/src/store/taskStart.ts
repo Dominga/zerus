@@ -86,7 +86,7 @@ export async function startTask(project: string, task: Task) {
     if (answer.outcome === "submitted") notify("info", tr("Task started."));
     else if (answer.outcome === "refused") notify("error", answer.error);
     // Nothing was reserved or sent; the executor's reason follows (A4).
-    else if (answer.outcome === "cutting_over") notify("error", answer.error, true, undefined, tr("Not started: this task is moving to execution records. Nothing was sent; try again later."));
+    else if (answer.outcome === "cutting_over") notify("error", answer.error || tr("Task was not started. For details, run hgs task cutover --project %1 --json", project), true);
     // It may have reached the executor: reviewed, never sent again.
     else if (answer.pending) notify("error", answer.error || START_PENDING, true, undefined, tr("Start unconfirmed: check the executor’s session. The task will not be sent again automatically."));
   } catch (e) { notify("error", String(e)); taskStarts.refresh(); }

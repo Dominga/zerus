@@ -38,6 +38,7 @@ fn create_roster(ctx: &Context<'_>) -> Result<()> {
         id: LEAD.into(),
         role: LEAD.into(),
         agent: ctx.team.bundle.template.lead.agent.clone(),
+        launch: None,
         account: String::new(),
         state: MemberState::NotCreated,
         session: None,
@@ -57,6 +58,7 @@ fn create_roster(ctx: &Context<'_>) -> Result<()> {
                 id: format!("m{}", roster.len()),
                 role: role.id.clone(),
                 agent: role.agent.clone(),
+                launch: None,
                 account: String::new(),
                 state: MemberState::NotCreated,
                 session: None,
@@ -76,6 +78,9 @@ fn create_roster(ctx: &Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn pause(ctx: &mut Context<'_>) -> Result<()> {
+    if ctx.team.status == TeamStatus::Planning {
+        return planning::pause(ctx, true);
+    }
     if ctx.team.status != TeamStatus::Running {
         return Err(invalid("Only a running team can be paused."));
     }
@@ -92,6 +97,9 @@ pub(super) fn pause(ctx: &mut Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn resume(ctx: &mut Context<'_>) -> Result<()> {
+    if ctx.team.status == TeamStatus::Planning {
+        return planning::pause(ctx, false);
+    }
     if ctx.team.status != TeamStatus::Paused {
         return Err(invalid("Only a paused team can be resumed."));
     }
@@ -115,7 +123,9 @@ pub(super) fn resume(ctx: &mut Context<'_>) -> Result<()> {
     Ok(())
 }
 pub(super) fn stop(ctx: &mut Context<'_>) -> Result<()> {
-    ctx.active()?;
+    if ctx.team.status != TeamStatus::Planning {
+        ctx.active()?;
+    }
     // A stop settles older decisions and records cancellation commands; the
     // existing task writer still owns their actual task-state transitions.
     // A hosted delivery whose actor outcome was never recorded is settled
@@ -202,8 +212,17 @@ pub(super) fn change_settings(ctx: &mut Context<'_>) -> Result<()> {
             |r| r.get(0),
         )
         .map_err(storage)?;
-    if settings.caps.max_open_tasks < ctx.count(true)? || settings.caps.max_members < members {
-        return Err(over("Caps are below the admitted live set."));
+    let field = if settings.caps.max_open_tasks < ctx.task_capacity_used()? {
+        Some("settings.caps.max_open_tasks")
+    } else if settings.caps.max_members < members {
+        Some("settings.caps.max_members")
+    } else {
+        None
+    };
+    if let Some(field) = field {
+        return Err(
+            over("Caps are below admitted tasks, saved drafts or live members.").with_field(field),
+        );
     }
     if settings == &ctx.team.settings || settings.queue != ctx.team.settings.queue {
         return Err(invalid(

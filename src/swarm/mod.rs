@@ -6,6 +6,8 @@
 mod adoption;
 mod bootstrap;
 mod catalog;
+mod diagnostics;
+pub(crate) use diagnostics::diagnostic_machine_label;
 pub(crate) mod drive_folders;
 pub(crate) mod fence;
 pub(crate) mod drive_footprint;
@@ -19,7 +21,6 @@ mod session_ids;
 mod session_memberships;
 mod session_membership_peers;
 pub(crate) mod session_labels;
-#[cfg(unix)]
 pub(crate) use session_project::validate_payload as validate_session_project;
 mod model;
 mod replica;
@@ -37,7 +38,6 @@ use serde_json::{json, Value};
 use std::io::Read;
 use store::LockedStore;
 
-#[cfg(unix)]
 pub(crate) use catalog::MOBILE_DELIVERY;
 pub(crate) use replica::{exchange_project as exchange_tasks, replicate};
 pub(crate) use replica_members::open_reason as cutover_open;
@@ -201,6 +201,15 @@ pub(crate) fn organization(config: &Config, first: bool) -> Result<Value> {
     Ok(snapshot)
 }
 
+#[cfg(all(test, unix))]
+pub(crate) fn fixture_project(config: &Config, machine: &str, project: &str) {
+    let mut store = LockedStore::load_bootstrap(config).unwrap();
+    store.data.node_id = machine.into();
+    store.data.import_missing(&json!({"projects":[{"id":project,"name":"example","color":"#123456","sessions":[],"folders":[]}]})).unwrap();
+    store.data.imported = true;
+    store.save().unwrap();
+}
+
 /// The files [`organization`] reads, for a reader that follows changes,
 /// with the worker's marker, which a restarted worker rewrites.
 pub(crate) fn organization_files(config: &Config) -> Vec<std::path::PathBuf> {
@@ -247,8 +256,42 @@ pub(crate) fn projects(config: &Config) -> Result<Vec<(String, String)>> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|p| Some((p["id"].as_str()?.to_owned(), p["name"].as_str().unwrap_or_default().to_owned())))
+        .filter_map(|p| {
+            Some((
+                p["id"].as_str()?.to_owned(),
+                p["name"].as_str().unwrap_or_default().to_owned(),
+            ))
+        })
         .collect())
+}
+
+/// One existing project name for native review, from bounded committed
+/// primary bytes. It takes no catalog writer lock, creates no catalog/lock
+/// file, and supplies no caller, membership or absence authority.
+pub(crate) fn existing_project_name(config: &Config, id: &str) -> Result<String> {
+    use anyhow::Context as _;
+    adoption::guard_load(config)?;
+    ensure!(
+        !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control),
+        "invalid project ID"
+    );
+    let bytes = read_regular(&config.dir.join("swarm/catalog.json"), 128 * 1024 * 1024).map_err(
+        |error| anyhow::anyhow!("The existing project catalog is unavailable ({error:?})."),
+    )?;
+    let data: store::Store =
+        serde_json::from_slice(&bytes).context("read the existing project catalog")?;
+    data.catalog.validate()?;
+    let values = data.catalog.values();
+    adoption::guard_load(config)?;
+    ensure!(
+        values.get(&catalog::Key::project(id, "alive")) == Some(&json!(true)),
+        "no project {id:?} in the catalog"
+    );
+    Ok(values
+        .get(&catalog::Key::project(id, "name"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned())
 }
 
 /// The catalog lock, held for a test until dropped.
@@ -515,3 +558,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
         _ => bail!("usage: hgs swarm get | initialize | apply | preview PEER | join PEER | sync | worker | resolve | disconnect PEER | preference get|set | replica-inventory | replica-exchange"),
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "../teams/cli/tests/provider_catalog.rs"]
+pub(crate) mod provider_fixture;

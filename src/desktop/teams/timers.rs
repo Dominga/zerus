@@ -76,7 +76,11 @@ impl Timers {
         now: i64,
     ) -> Result<()> {
         store.refresh()?;
-        let team = store.team(id)?.filter(|t| t.status == TeamStatus::Running);
+        let planning = store.planning(id)?;
+        let team = store.team(id)?.filter(|t| {
+            t.status == TeamStatus::Running
+                || (t.status == TeamStatus::Planning && planning.is_some_and(|p| !p.paused))
+        });
         let Some(team) = team else {
             // A pause or a stop restarts every count the service keeps.
             self.memory.forget(id);
@@ -97,7 +101,9 @@ impl Timers {
         }
         self.memory.members(&team.id, &seen, now);
         let quiet = self.memory.lead(&team.id, lead.as_ref(), now);
-        fire::step(store, &mut self.memory, &team, quiet, now)?;
+        if team.status == TeamStatus::Running {
+            fire::step(store, &mut self.memory, &team, quiet, now)?;
+        }
         let Some(member) = roster.iter().find(|m| m.id == team.lead) else {
             return Ok(());
         };

@@ -127,10 +127,16 @@ class Adapter extends LlmAdapter {
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
     if (text.includes('QUESTION') && last?.role !== 'tool') {
-      const args=JSON.stringify({ questions:[{id:'choice',question:'Which option?',options:[{label:'First'},{label:'Second'}]}] });
+      const questions=[{id:'choice',question:'Which option?',options:[{label:'First'},{label:'Second'}]}];
+      if(text.includes('QUESTION_MULTIPLE'))questions[0].multi_select=true;
+      if(text.includes('QUESTION_PARTS'))questions.push({id:'database',question:'Which database?',options:[{label:'Postgres'},{label:'SQLite'}]});
+      const mode=text.includes('QUESTION_TIMED')?'timed':text.includes('QUESTION_FOREVER')?'forever':
+        text.includes('QUESTION_INTENT_APPROVAL')?'approval':text.includes('QUESTION_INTENT_PLAN')?'plan':undefined;
+      const name=mode?'hgs_test_question_mode':'ask_user_question';
+      const args=JSON.stringify(mode?{mode}:{questions});
       yield {type:'block-start',index:0,blockType:'tool-call'};
-      yield {type:'tool-call-delta',index:0,id:'question-call',name:'ask_user_question',argumentsDelta:args};
-      yield {type:'block-end',index:0,block:{type:'tool-call',id:'question-call',name:'ask_user_question',arguments:args}};
+      yield {type:'tool-call-delta',index:0,id:'question-call',name,argumentsDelta:args};
+      yield {type:'block-end',index:0,block:{type:'tool-call',id:'question-call',name,arguments:args}};
       yield {type:'finish',reason:{kind:'tool-calls'}};return;
     }
     const reply=text.includes('ATTACHMENT_ORDER_FIXTURE')
@@ -146,7 +152,7 @@ class Adapter extends LlmAdapter {
     yield {type:'finish',reason:{kind:'stop'}};
   }
 }
-export const inject=['llm','goals','tools','approval','jobs','agents'];
+export const inject=['llm','goals','tools','approval','jobs','agents','userQuestions'];
 export function apply(ctx,config) {
   const adapter = new Adapter();
   adapter.holds = config?.holds;
@@ -256,6 +262,20 @@ export function apply(ctx,config) {
     async execute(args,exec){
       await ctx.agents.create({sessionId:args.sessionId,agentOptions:{provider:'hgs-test',model:'test-b'},meta:{cwd:exec.agent.session.header.cwd}});
       return args.sessionId;
+    }
+  }));
+  // Exercise the released service's wait and intent types without replacing
+  // the agent preset's ordinary ask_user_question tool or inventing its timers.
+  ctx.tools.register(defineTool({name:'hgs_test_question_mode',description:'Private native question modes',
+    parameters:{mode:{type:'string',required:true}},
+    output:{schema:{type:'object',additionalProperties:true},render:(_args,value)=>[{type:'text',text:JSON.stringify(value)}]},
+    async execute({mode},exec){
+      const intent=mode==='approval'?{kind:'approval',approve:'First',reject:'Second'}:
+        mode==='plan'?{kind:'plan-review',approve:'First'}:undefined;
+      const request={agent:exec.agent,signal:exec.signal,questions:[{id:'choice',question:'Which option?',
+        options:[{label:'First'},{label:'Second'}],...(intent?{intent,detail:'Private fixture review'}:{})}]};
+      if(mode==='timed')return ctx.userQuestions.askTimed(request,exec.callId,10000);
+      return ctx.userQuestions.ask({...request,...(mode==='forever'?{wait:{callId:exec.callId}}:{})});
     }
   }));
   ctx.tools.register(defineTool({name:'hgs_test_approval',description:'Keyless approval fixture',parameters:{},

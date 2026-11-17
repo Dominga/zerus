@@ -16,6 +16,12 @@ use zerus_relay::protocol::OPERATIONS;
 pub const REPROBE_SECONDS: f64 = 300.0;
 /// `hgs --help` budget (seconds).
 pub const PROBE_TIMEOUT: f64 = 3.0;
+pub const TASK_IDENTITY_HELP_MARKER: &str = "Mobile task identity ABI: task-session-identity-v2";
+pub const TASK_IDENTITY_FEATURE: &str = "task_session_identity_v2";
+pub const TASK_UPLOAD_HELP_MARKER: &str = "Mobile task media ABI: task-media-upload-v1";
+pub const TASK_UPLOAD_FEATURE: &str = "task_media_upload_v1";
+pub const TASK_EDIT_HELP_MARKER: &str = "Mobile task edit ABI: task-admitted-edit-v1";
+pub const TASK_EDIT_FEATURE: &str = "task_admitted_edit_v1";
 /// Windows v1 deliberately excludes POSIX paths, one-hop routing, native
 /// providers absent from the host, speech and voice. Same table drives
 /// advertisement and dispatch refusal, after durable duplicate handling.
@@ -53,6 +59,8 @@ pub fn external_operation_allowed(operation: &str) -> bool {
 }
 
 pub const WINDOWS_OPERATIONS: &[&str] = &[
+    "send_outcome",
+    "send_outcome_receipt",
     "send_receipt",
     "inspect",
     "history",
@@ -95,6 +103,8 @@ pub const CLEAR_CONTEXT_DISMISS_HELP_MARKER: &str = "Mobile clear-context ABI: d
 /// [`crate::launch::OPERATIONS`]. Every other known operation is refused
 /// as unsupported and never advertised.
 pub const IMPLEMENTED: &[&str] = &[
+    "send_outcome",
+    "send_outcome_receipt",
     "send_receipt",
     "analytics_read",
     "archive_list",
@@ -379,6 +389,7 @@ pub const SPEECH_CONFIG: &[&str] = &[
 /// What the native CLI offers, from its help text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Flags {
+    pub send_outcome: bool,
     pub send_receipt: bool,
     pub windows_gateway: bool,
     pub analytics: bool,
@@ -417,6 +428,12 @@ pub struct Flags {
     pub task_exchange: bool,
     /// The phone's Send now, Cancel and Done list, which it never offers either.
     pub task_actions: bool,
+    /// Exact native marker for identity-bound task Send and Done requests.
+    pub task_session_identity: bool,
+    /// Bounded upload frames inside task exchange, independently negotiated.
+    pub task_media_upload: bool,
+    /// Native admitted edits; advertised only on the qualified encrypted route.
+    pub task_admitted_edit: bool,
     /// `hgs watch --json` (watch-v1): the heartbeat follows the local listing
     /// as a stream instead of running `ls` (`watch_listing`). Not an operation.
     pub watch: bool,
@@ -438,6 +455,15 @@ impl Flags {
     pub fn from_help(help: &str) -> Flags {
         let has = |marker: &str| help.contains(marker);
         let flags = Flags {
+            send_outcome: [
+                zerus_relay::send_outcome::HELP_MARKER,
+                "mobile-peer-send-outcome-v2",
+                crate::send_receipt::HELP_MARKER,
+                crate::session_selector::SELECTOR_MARKER,
+                crate::session_selector::PEER_MARKER,
+            ]
+            .iter()
+            .all(|marker| help.lines().any(|line| line.trim() == *marker)),
             send_receipt: help
                 .lines()
                 .any(|line| line.trim() == crate::send_receipt::HELP_MARKER),
@@ -490,6 +516,16 @@ impl Flags {
             peers: has("mobile-peers --json") && has("mobile-peer --json"),
             task_exchange: has("hgs task exchange|digests --json"),
             task_actions: has("hgs task mobile-send|mobile-cancel|mobile-done --json"),
+            task_media_upload: help
+                .lines()
+                .any(|line| line.trim() == TASK_UPLOAD_HELP_MARKER),
+            task_admitted_edit: has("hgs task exchange|digests --json")
+                && help
+                    .lines()
+                    .any(|line| line.trim() == TASK_EDIT_HELP_MARKER),
+            task_session_identity: help
+                .lines()
+                .any(|line| line.trim() == TASK_IDENTITY_HELP_MARKER),
             watch: help
                 .lines()
                 .any(|line| line.trim() == zerus_watch_protocol::HELP_MARKER),
@@ -518,6 +554,7 @@ impl Flags {
     }
     pub fn windows_local(mut self) -> Self {
         self.windows_gateway = true;
+        self.task_admitted_edit = false;
         self.peers = false;
         self.voice = false;
         self.voice_video = false;
@@ -554,6 +591,7 @@ impl Flags {
                 removed.extend(operations.iter().copied());
             }
         };
+        remove(self.send_outcome, zerus_relay::send_outcome::OPERATIONS);
         remove(self.worktree, WORKTREES);
         remove(self.analytics, &["analytics_read"]);
         remove(self.archive, &["archive_list"]);
@@ -658,12 +696,21 @@ impl Flags {
             );
         }
         let mut features = features;
+        if self.task_session_identity
+            && operations.contains(&"task_send")
+            && operations.contains(&"task_done")
+        {
+            features.push(TASK_IDENTITY_FEATURE);
+        }
+        if self.task_media_upload && operations.contains(&"task_exchange") {
+            features.push(TASK_UPLOAD_FEATURE);
+        }
         // Connector-only: the Python connector never advertises it, so apps
         // do not send an OpenCode effort to it.
         if operations.contains(&"launch") && !self.windows_gateway {
             features.push("opencode_launch_effort");
-            features.sort_unstable();
         }
+        features.sort_unstable();
         if self.windows_gateway {
             features.retain(|feature| {
                 !["send_agent", "gateway_one_hop", "inspect_agent"].contains(feature)

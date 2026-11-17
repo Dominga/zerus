@@ -130,7 +130,7 @@ describe("desk wiring", () => {
     Object.assign(catalog.rows, { "peer\nrun:startup": { runId: "r", state: "running" } });
     openSession(target);
     expect(shown.setSelectedKey).toHaveBeenCalledExactlyOnceWith("peer\nrun:startup");
-    shown.setSelectedKey.mockClear();
+    vi.mocked(shown.setSelectedKey).mockClear();
     Object.assign(catalog.rows["peer\nrun:startup"], { conversationId: "bound" });
     openSession(target);
     vi.advanceTimersByTime(16_000);

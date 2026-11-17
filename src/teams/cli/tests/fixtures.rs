@@ -169,7 +169,7 @@ fn regenerate_fixtures() {
 /// the CLI read, so the clients see the shape the service writes, not a
 /// hand-written card.
 const REPORT_NOTES_CARD: &str =
-    include_str!("../../../../client/core/src/teams/fixtures/report-notes-card.json");
+    include_str!("../../../../client/core/src/upstream_teams/fixtures/report-notes-card.json");
 
 fn report_notes_card() -> Value {
     let h = Harness::new();
@@ -243,17 +243,17 @@ fn the_report_notes_card_fixture_is_the_waiting_row_the_cli_prints() {
     assert_eq!(
         report_notes_card(),
         expected,
-        "client/core/src/teams/fixtures/report-notes-card.json is not the waiting row hgs prints; regenerate it"
+        "client/core/src/upstream_teams/fixtures/report-notes-card.json is not the waiting row hgs prints; regenerate it"
     );
 }
 
 /// The core's and the UI's fixture, from the production writer. Run with:
 /// `cargo +1.99.1 test --bin hgs teams::cli::tests::fixtures::regenerate_report_notes_card -- --ignored`
 #[test]
-#[ignore = "writes client/core/src/teams/fixtures/report-notes-card.json"]
+#[ignore = "writes client/core/src/upstream_teams/fixtures/report-notes-card.json"]
 fn regenerate_report_notes_card() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("client/core/src/teams/fixtures/report-notes-card.json");
+        .join("client/core/src/upstream_teams/fixtures/report-notes-card.json");
     let mut text = serde_json::to_string_pretty(&report_notes_card()).unwrap();
     text.push('\n');
     std::fs::write(&path, text).unwrap();

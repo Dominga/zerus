@@ -52,14 +52,14 @@ fn create_from_a_template_records_the_team_and_launches_nothing() {
             "base_commit": COMMIT,
         }),
     );
-    let (reply, exit) = harness.cli(&person_caller(), "create --template bugfix", &input);
+    let (reply, exit) = harness.native_command("create --template bugfix", &input);
     assert_eq!(exit, 0, "{reply}");
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["revision"], 1);
     assert_eq!(reply["team"], TEAM);
     assert_eq!(reply["actor"]["kind"], "person");
-    assert_eq!(reply["actor"]["origin"], "cli_interim");
-    assert_eq!(reply["actor"]["interim"], true);
+    assert_eq!(reply["actor"]["origin"], "desktop_ui");
+    assert_eq!(reply["actor"]["interim"], false);
 
     let team = harness.store().team(TEAM).unwrap().expect("the team");
     assert_eq!((team.name.as_str(), team.revision), ("Fixes", 1));
@@ -71,7 +71,7 @@ fn create_from_a_template_records_the_team_and_launches_nothing() {
     // Nothing was launched: no member has a session, and the store wrote no
     // effect row.
     assert!(members.iter().all(|member| member.session.is_none()));
-    let (reply, exit) = harness.cli(&person_caller(), "create --template bugfix", &input);
+    let (reply, exit) = harness.native_command("create --template bugfix", &input);
     assert_eq!(
         (exit, reply["revision"].as_u64()),
         (0, Some(1)),
@@ -285,11 +285,7 @@ fn settings_pause_resume_stop_and_archive_follow_the_authority_table() {
         &ask(&harness, 1, changed.clone()),
     );
     assert_eq!((code(&reply), exit), ("not_allowed", 1), "{reply}");
-    let (reply, exit) = harness.cli(
-        &person_caller(),
-        "settings",
-        &ask(&harness, 2, changed.clone()),
-    );
+    let (reply, exit) = harness.native_command("settings", &ask(&harness, 2, changed.clone()));
     assert_eq!(exit, 0, "{reply}");
     assert_eq!(
         harness
@@ -310,9 +306,9 @@ fn settings_pause_resume_stop_and_archive_follow_the_authority_table() {
 
     let (reply, exit) = harness.cli(&lead_caller(), "stop", &ask(&harness, 5, json!({})));
     assert_eq!((code(&reply), exit), ("not_allowed", 1), "{reply}");
-    let (reply, exit) = harness.cli(&person_caller(), "stop", &ask(&harness, 6, json!({})));
+    let (reply, exit) = harness.native_command("stop", &ask(&harness, 6, json!({})));
     assert_eq!(exit, 0, "{reply}");
-    let (reply, exit) = harness.cli(&person_caller(), "archive", &ask(&harness, 7, json!({})));
+    let (reply, exit) = harness.native_command("archive", &ask(&harness, 7, json!({})));
     assert_eq!(exit, 0, "{reply}");
     assert_eq!(
         harness.store().team(TEAM).unwrap().unwrap().status,
@@ -372,7 +368,7 @@ fn a_member_reads_its_own_work_and_asks_and_the_lead_replies() {
 }
 
 #[test]
-fn the_person_decides_a_card() {
+fn a_cli_person_cannot_decide_an_owner_card() {
     let harness = Harness::new();
     bind_lead_and_m1(&harness);
     let card = harness
@@ -407,10 +403,14 @@ fn the_person_decides_a_card() {
             json!({"card": card, "decision": "acknowledged"}),
         ),
     );
-    assert_eq!(exit, 0, "{reply}");
+    assert_eq!(
+        (code(&reply), exit),
+        ("person_gesture_required", 1),
+        "{reply}"
+    );
     assert_eq!(
         harness.store().cards(TEAM, 10, None).unwrap().rows[0].state,
-        "closed"
+        "open"
     );
 }
 
@@ -523,7 +523,7 @@ fn pause_and_resume_accept_the_persons_and_the_leads_word() {
     lead = harness.store().team(TEAM).unwrap().unwrap();
     assert_eq!(lead.status, zerus_team_plan::model::TeamStatus::Paused);
     // A team the person paused is not resumed by the lead.
-    let (reply, exit) = harness.cli(&person_caller(), "resume", &ask(&harness, 2, json!({})));
+    let (reply, exit) = harness.native_command("resume", &ask(&harness, 2, json!({})));
     assert_eq!(exit, 0, "{reply}");
     let (reply, exit) = harness.cli(&lead_caller(), "pause", &ask(&harness, 3, json!({})));
     assert_eq!(exit, 0, "{reply}");
@@ -567,7 +567,12 @@ fn the_person_pauses_resumes_stops_and_archives_a_member() {
     let harness = Harness::new();
     bind_lead_and_m1(&harness);
     let run = |line: &str, caller: &Caller, step: u32| {
-        harness.cli(caller, line, &ask(&harness, step, json!({"member": "m1"})))
+        let input = ask(&harness, step, json!({"member": "m1"}));
+        if matches!(caller, Caller::Person) {
+            harness.native_command(line, &input)
+        } else {
+            harness.cli(caller, line, &input)
+        }
     };
     let state = |harness: &Harness| harness.store().member(TEAM, "m1").unwrap().unwrap().state;
     let (reply, exit) = run("pause-member", &person_caller(), 1);
@@ -593,4 +598,19 @@ fn the_person_pauses_resumes_stops_and_archives_a_member() {
     let (reply, exit) = run("archive-member", &person_caller(), 8);
     assert_eq!(exit, 0, "{reply}");
     assert_eq!(state(&harness), MemberState::Removed);
+}
+
+#[test]
+fn advance_base_and_its_form_read_refuse_sessions_before_their_input_or_git() {
+    let h = seeded();
+    for session in [LEAD_SESSION, M1_SESSION, OTHER_SESSION] {
+        for words in [
+            "advance-base",
+            "base --team 00000000-0000-4000-8000-00000000beef",
+        ] {
+            let (reply, exit) = h.cli(&Caller::Session(key(session)), words, "not JSON");
+            assert_eq!(exit, 1);
+            assert_eq!(reply["error"]["code"], "not_allowed", "{reply}");
+        }
+    }
 }

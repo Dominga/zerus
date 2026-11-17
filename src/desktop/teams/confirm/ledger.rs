@@ -26,6 +26,7 @@ impl Ledger {
             key TEXT PRIMARY KEY, team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL,
             run TEXT NOT NULL, kind TEXT NOT NULL, at INTEGER NOT NULL, pending INTEGER NOT NULL, body TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS standing_pending ON standing_effects(team,member,launch,pending,key);
+          CREATE INDEX IF NOT EXISTS standing_unresolved ON standing_effects(team,member,launch) WHERE pending=1 OR json_extract(body,'$.state')='unknown';
           CREATE INDEX IF NOT EXISTS standing_quota ON standing_effects(team,member,kind,at DESC);
           CREATE TABLE IF NOT EXISTS standing_bindings (
             team TEXT NOT NULL, member TEXT NOT NULL, launch TEXT NOT NULL, parent TEXT NOT NULL,
@@ -182,6 +183,47 @@ impl Ledger {
         } else {
             None
         })
+    }
+    /// A completed or uncertain brief needs no further native observation.
+    pub fn lead_brief_needed(&self, b: &Binding) -> Result<bool> {
+        Ok(self.pending_brief(b)?.is_some()
+            || (self.binding(b)?.is_none()
+                && matches!(b.agent.as_str(), "claude" | "codex" | "kimi")
+                && self.get(&engine::lead_brief_key(b, &b.run))?.is_none()))
+    }
+    /// Reuse resumed-member keys; an initial lead run gets a distinct stable
+    /// key. Every claimed state, including Unknown, suppresses another send.
+    pub fn pending_lead_brief(
+        &self,
+        b: &Binding,
+        s: &Snapshot,
+        team: &zerus_team_plan::model::Team,
+        planning: Option<&crate::teams::store::planning::Planning>,
+    ) -> Result<Option<Plan>> {
+        if !matches!(
+            team.status,
+            zerus_team_plan::model::TeamStatus::Running
+                | zerus_team_plan::model::TeamStatus::Planning
+        ) || b.member != team.lead
+        {
+            return Ok(None);
+        }
+        if team.status == zerus_team_plan::model::TeamStatus::Planning
+            && planning.is_none_or(|state| state.paused)
+        {
+            return Ok(None);
+        }
+        if let Some(mut plan) = self.pending_brief(b)? {
+            let lead = engine::lead_brief(&plan.binding, &plan.snapshot, team);
+            plan.text = lead.text;
+            plan.question = lead.question;
+            return Ok(Some(plan));
+        }
+        if self.binding(b)?.is_some() || !matches!(b.agent.as_str(), "claude" | "codex" | "kimi") {
+            return Ok(None);
+        }
+        let plan = engine::lead_brief(b, s, team);
+        Ok(self.get(&plan.key)?.is_none().then_some(plan))
     }
     pub fn card_request(&self, key: &str) -> Result<Option<crate::teams::ops::Request>> {
         let raw:Option<Option<String>>=self.0.query_row(

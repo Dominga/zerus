@@ -7,6 +7,8 @@ pub enum ErrorKind {
     Refused,
     /// Storage, encoding or a damaged document.
     Failed,
+    /// Temporary resource exhaustion: proof is incomplete; retry without replay.
+    Busy,
 }
 
 /// A refusal or failure, with a message fit to show the person.
@@ -28,6 +30,13 @@ impl Error {
     pub fn failed(message: impl Into<String>) -> Self {
         Self {
             kind: ErrorKind::Failed,
+            message: message.into(),
+        }
+    }
+
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self {
+            kind: ErrorKind::Busy,
             message: message.into(),
         }
     }

@@ -1,7 +1,11 @@
+// Historical cache fixtures use the literal pre-upgrade writer. Native
+// schema-8 custody/stamp behavior is exercised explicitly below.
 use super::*;
 use std::cell::Cell;
 use std::time::Instant;
 use zerus_replica::{Inventory, NewTask, SessionKey, Target, TaskAttachment};
+
+mod search;
 
 /// What `f` decoded and stamped.
 fn counted<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
@@ -37,7 +41,7 @@ fn agent() -> SessionKey {
 /// tests count reads without waiting for `SETTLE_MS`.
 fn age(store: &ProjectStore, uuid: &str) {
     let past = std::time::SystemTime::now() - Duration::from_secs(3600);
-    for ext in ["loro", "updates", "managed"] {
+    for ext in ["loro", "updates", "managed", "cutover", "prepare"] {
         let path = store.dir().join("tasks").join(format!("{uuid}.{ext}"));
         if let Ok(file) = fs::File::options().write(true).open(path) {
             file.set_modified(past).unwrap();
@@ -47,7 +51,7 @@ fn age(store: &ProjectStore, uuid: &str) {
 
 /// Saves `task` through the store, then dates its files back.
 fn aged_save(store: &ProjectStore, task: &mut TaskDoc) {
-    store.save(task).unwrap();
+    store.save_legacy_for_test(task).unwrap();
     age(store, task.uuid());
 }
 
@@ -87,7 +91,7 @@ fn project(temp: &Path) -> ProjectStore {
             };
             task.set_attachments(&[file], &Actor::Person, 2).unwrap();
         }
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
     }
     for (n, end) in [(10, Stage::Active), (11, Stage::Review), (12, Stage::Done), (13, Stage::Done)] {
         let mut task = new_task(&store, &format!("T-aaaa{n}"), Stage::Todo, "V", "Sent");
@@ -99,7 +103,7 @@ fn project(temp: &Path) -> ProjectStore {
         if end == Stage::Done {
             task.set_stage(Stage::Done, &Actor::Person, now()).unwrap();
         }
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
     }
     let damaged = store.dir().join("tasks").join(format!("{}.loro", ids::new_uuid()));
     fs::write(damaged, b"not a task").unwrap();
@@ -187,7 +191,7 @@ fn pages_go_back_and_a_cursor_holds_its_place_as_tasks_arrive() {
     drop(index);
     // A task added at the top does not shift the page after a cursor.
     let mut top = new_task(&store, "T-bbbbbb", Stage::Todo, "1", "New");
-    store.save(&mut top).unwrap();
+    store.save_legacy_for_test(&mut top).unwrap();
     let mut index = Index::open(&store).unwrap();
     let again = index.page(Stage::Todo, 2, &Anchor::After(rank, uuid)).unwrap();
     assert_eq!(again.rows, second.rows);
@@ -246,15 +250,15 @@ fn reads_decode_only_what_changed() {
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
     assert_eq!((decoded, stamped), (0, 1), "only the task folder is stamped");
     // The index started the journal: a saved change is found through it,
-    // stamping only the folder and that task's three files (snapshot,
-    // updates and mark).
+    // stamping only the folder and that task's five files (snapshot,
+    // updates, mark, cutover and prepare).
     aged_save(&store, &mut tasks[7]);
     let (_, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-    assert_eq!((decoded, stamped), (1, 4));
+    assert_eq!((decoded, stamped), (1, 6));
     tasks[7].comment("note", &Actor::Person, 5).unwrap();
     aged_save(&store, &mut tasks[7]);
     let (index, decoded, stamped) = counted(|| Index::open(&store).unwrap());
-    assert_eq!((decoded, stamped), (1, 4), "the folder and the changed task's three files");
+    assert_eq!((decoded, stamped), (1, 6), "the folder and the changed task's five files");
     let revision = index.revision().unwrap();
     drop(index);
     // A writer without the journal, in place: a page's rows are checked
@@ -416,7 +420,7 @@ fn an_unsettled_row_is_read_again() {
     let temp = crate::host::staging::private_tempdir();
     let store = ProjectStore::open(temp.path(), "example").unwrap();
     let mut task = new_task(&store, "T-aaaaaa", Stage::Todo, "V", "Plain");
-    store.save(&mut task).unwrap();
+    store.save_legacy_for_test(&mut task).unwrap();
     let (_, settled) = stamped(store.dir(), task.uuid(), now());
     assert!(!settled);
     assert!(stamped(store.dir(), task.uuid(), now() + SETTLE_MS + 1000).1);
@@ -916,7 +920,7 @@ fn a_large_project_pages_and_polls_with_bounded_work() {
     // A page reads its rows and checks only their files.
     let mut index = Index::open(&store).unwrap();
     let (page, decoded, stamped) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
-    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 150));
+    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 250));
     assert_eq!(index.revision().unwrap(), revision);
     let deep = page.next.unwrap();
     let (rank, uuid) = parse_cursor(store.project_id(), Stage::Todo, &deep).unwrap();
@@ -959,13 +963,13 @@ fn twenty_thousand_tasks_scale_smoke() {
         });
         polls.push(started.elapsed());
         assert_eq!(answer["unchanged"], json!(true));
-        assert_eq!((decoded, stamped), (0, 151), "the poll stamps the folder and its page");
+        assert_eq!((decoded, stamped), (0, 251), "the poll stamps the folder and its page");
     }
     let started = Instant::now();
     let mut index = Index::open(&store).unwrap();
     let (page, decoded, stamped) = counted(|| index.page(Stage::Todo, 50, &Anchor::Start).unwrap());
     let first_page = started.elapsed();
-    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 150));
+    assert_eq!((page.rows.len(), decoded, stamped), (50, 0, 250));
     let counts = index.counts().unwrap();
     assert_eq!(counts["todo"], 20_000);
     drop(index);
@@ -999,7 +1003,7 @@ fn a_mark_only_change_reaches_the_warm_listing() {
     let updates = store.dir().join("tasks").join(format!("{uuid}.updates"));
     fs::set_permissions(&updates, fs::Permissions::from_mode(0o400)).unwrap();
     task.set_title("Never appended", &Actor::Person, 5).unwrap();
-    let failed = store.save(&mut task).is_err();
+    let failed = store.save_legacy_for_test(&mut task).is_err();
     fs::set_permissions(&updates, fs::Permissions::from_mode(0o600)).unwrap();
     // A writer that ignores permissions cannot show this case.
     if !failed {
@@ -1266,12 +1270,16 @@ fn an_older_hgs_index_is_never_touched() {
     // two never rebuild each other's while both binaries are in use.
     let temp = crate::host::staging::private_tempdir();
     let store = project(temp.path());
-    let old = store.dir().join("task-index-v1.sqlite3");
-    fs::write(&old, b"an older hgs's index").unwrap();
+    let old = ["task-index-v1.sqlite3", "task-index-v2.sqlite3"].map(|name| store.dir().join(name));
+    for path in &old {
+        fs::write(path, b"an older hgs's index").unwrap();
+    }
     let mut index = Index::open(&store).unwrap();
     index.page(Stage::Todo, 2, &Anchor::Start).unwrap();
     drop(index);
-    assert_eq!(fs::read(&old).unwrap(), b"an older hgs's index");
+    for path in &old {
+        assert_eq!(fs::read(path).unwrap(), b"an older hgs's index");
+    }
     assert!(store.dir().join(FILE).exists());
     assert_ne!(FILE, "task-index-v1.sqlite3");
 }
@@ -1327,7 +1335,7 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
     let uuids: Vec<String> = store.uuids().unwrap().into_iter().filter(|uuid| store.load(uuid).is_ok()).collect();
     let mut noted = store.load(&uuids[0]).unwrap();
     noted.comment("More detail", &Actor::Person, 5).unwrap();
-    store.save(&mut noted).unwrap();
+    store.save_legacy_for_test(&mut noted).unwrap();
     let mut finished = uuids
         .iter()
         .map(|uuid| store.load(uuid))
@@ -1335,7 +1343,7 @@ fn the_index_holds_the_inventory_of_every_loaded_task_and_the_project() {
         .find(|task| task.stage().unwrap() == Stage::Review)
         .unwrap();
     finished.set_stage(Stage::Done, &Actor::Person, now()).unwrap();
-    store.save(&mut finished).unwrap();
+    store.save_legacy_for_test(&mut finished).unwrap();
     let mut doc = store.project().unwrap();
     doc.set_settings(&zerus_replica::Settings { agent_limit: 3, ..doc.settings() }).unwrap();
     store.save_project(&doc).unwrap();
@@ -1403,7 +1411,7 @@ fn unrepaired_ranked(store: &ProjectStore, id: &str, rank: &str) -> TaskDoc {
     assert!(task.floor().unwrap());
     task.lower_stored_schema_for_test(5);
     assert!(task.needs_schema_repair());
-    store.save(&mut task).unwrap();
+    store.save_legacy_for_test(&mut task).unwrap();
     assert!(store.load(task.uuid()).unwrap().needs_schema_repair());
     task
 }
@@ -1656,7 +1664,7 @@ fn add_placed(store: &ProjectStore, position: &Position) -> TaskDoc {
         .new_task_placed(Some(&placement), "Placed", Stage::Todo, Target::Any, Actor::Person, position, "example", 1)
         .unwrap();
     drop(index);
-    store.save(&mut task).unwrap();
+    store.save_legacy_for_test(&mut task).unwrap();
     task
 }
 
@@ -1698,7 +1706,7 @@ fn a_short_id_an_older_build_took_without_the_journal_is_never_reused() {
     // save by this build in the same window, so the journal is not quiet.
     write_plain(&store, &new_task(&store, "T-taken1", Stage::Todo, "W", "Older"));
     let mut busy = new_task(&store, "T-busy01", Stage::Todo, "Y", "Saved here");
-    store.save(&mut busy).unwrap();
+    store.save_legacy_for_test(&mut busy).unwrap();
     zerus_replica::ids::force_short_ids_for_test(&["T-taken1", "T-fresh1"]);
     assert_eq!(add_placed(&store, &Position::End).id(), "T-fresh1");
     // The same when that build also stored its row in the index: the index
@@ -1756,7 +1764,7 @@ fn an_older_journalless_move_never_places_from_a_stale_stage() {
     write_plain(&store, &b);
     let mut a = store.load(a.uuid()).unwrap();
     a.comment("Saved here", &Actor::Person, 2).unwrap();
-    store.save(&mut a).unwrap();
+    store.save_legacy_for_test(&mut a).unwrap();
     let mut index = Index::open(&store).unwrap();
     index.check_files().unwrap();
     let expected = store.rank_for(Stage::Todo, &Position::End, None).unwrap();
@@ -1904,7 +1912,7 @@ fn a_full_stamp_check_looks_up_only_listed_files_and_still_finds_journalless_cha
     let mut updated = store.load(tasks[0].uuid()).unwrap();
     let snapshot = stamp(&dir.join(format!("{}.loro", updated.uuid())));
     updated.set_title("Updated outside the index", &Actor::Person, 2).unwrap();
-    store.save(&mut updated).unwrap();
+    store.save_legacy_for_test(&mut updated).unwrap();
     assert!(dir.join(format!("{}.updates", updated.uuid())).exists());
     assert_eq!(stamp(&dir.join(format!("{}.loro", updated.uuid()))), snapshot);
     // A removed task, a new task and a mark alone.
@@ -1938,7 +1946,7 @@ fn listed_stamps_are_the_stamps_of_a_lookup() {
     assert!(floored.floor().unwrap());
     aged_save(&store, &mut floored);
     floored.comment("Appended", &Actor::Person, 3).unwrap();
-    store.save(&mut floored).unwrap();
+    store.save_legacy_for_test(&mut floored).unwrap();
     let tasks = store.dir().join("tasks");
     fs::write(tasks.join(format!("{}.managed", ids::new_uuid())), b"{}").unwrap();
     #[cfg(unix)]
@@ -1951,8 +1959,101 @@ fn listed_stamps_are_the_stamps_of_a_lookup() {
     }
     let listed = super::listed(store.dir()).unwrap();
     assert_eq!(listed.keys().cloned().collect::<Vec<_>>(), store.uuids().unwrap());
-    assert!(listed.values().any(|s| !s.ends_with(MISSING)), "no mark in the fixture");
+    assert!(listed.values().any(|s| s.split('|').nth(2) != Some(MISSING)), "no mark in the fixture");
     for (uuid, stamps) in &listed {
         assert_eq!(stamps, &files(store.dir(), uuid), "{uuid}");
     }
+}
+
+#[test]
+fn native_cutover_custody_is_settled_cached_and_rechecked_without_a_journal_entry() {
+    let temp=tempfile::tempdir().unwrap();
+    let store=ProjectStore::open(temp.path(),"example").unwrap();
+    let mut task=new_task(&store,"T-a1b2c3",Stage::Todo,"V","Current native task");
+    store.save(&mut task).unwrap();
+    age(&store,task.uuid());
+    let mut index=Index::open(&store).unwrap();
+    assert_eq!(index.page(Stage::Todo,10,&Anchor::Start).unwrap().rows.len(),1);
+    let (_,decoded,_)=counted(||index.live_inventory().unwrap());
+    assert_eq!(decoded,0,"a settled admitted row stays cached");
+    let stored_files = |index:&Index| index.db.query_row("SELECT files FROM tasks WHERE uuid=?1",[task.uuid()],|row|row.get::<_,String>(0)).unwrap();
+    let before=stored_files(&index);
+    store.prepare_cutover(task.uuid(),"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa").unwrap();
+    age(&store,task.uuid());
+    index.check_files().unwrap();
+    assert_ne!(stored_files(&index),before,"the prepare-only file change is observed without inventing a semantic task change");
+    let pin=store.dir().join("tasks").join(format!("{}.cutover",task.uuid()));
+    let mut changed:Value=serde_json::from_slice(&fs::read(&pin).unwrap()).unwrap();
+    changed["store"]=json!(ids::new_uuid());
+    fs::write(&pin,serde_json::to_vec(&changed).unwrap()).unwrap();
+    age(&store,task.uuid());
+    index.check_files().unwrap();
+    assert!(index.page(Stage::Todo,10,&Anchor::Start).unwrap().rows.is_empty());
+    assert_eq!(index.damaged().unwrap().1,1,"a changed pin is explicit damage, never a stale healthy row");
+}
+
+#[test]
+fn the_cutover_cursor_is_bounded_and_passes_held_rows_before_wrapping() {
+    let temp=tempfile::tempdir().unwrap();
+    let store=ProjectStore::open(temp.path(),"example").unwrap();
+    for n in 0..35 {
+        let mut task=new_task(&store,&format!("T-aa{n:04}"),Stage::Todo,"V","Historical writer");
+        task.floor().unwrap();
+        aged_save(&store,&mut task);
+    }
+    let mut index=Index::open(&store).unwrap();
+    let ids:Vec<String>=index.db.prepare("SELECT uuid FROM tasks ORDER BY uuid").unwrap()
+        .query_map([],|row|row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+    index.db.execute("UPDATE tasks SET error='held fixture',row=NULL WHERE uuid<>?1",[&ids[34]]).unwrap();
+    let (_,decoded,stamped)=counted(||assert!(index.cutover_candidate().unwrap().is_none()));
+    assert_eq!((decoded,stamped),(0,0),"a derived cursor does no document or file scan");
+    assert_eq!(index.meta("cutover_cursor").unwrap().as_deref(),Some(ids[31].as_str()));
+    assert_eq!(index.cutover_candidate().unwrap().as_deref(),Some(ids[34].as_str()));
+    assert!(index.cutover_candidate().unwrap().is_none());
+    assert!(index.meta("cutover_cursor").unwrap().is_none(),"the end wraps rather than starving earlier tasks");
+    // Pending native custody stays eligible even if the ordinary row is
+    // damaged after a pin-before-canonical crash. It remains only a hint.
+    index.db.execute("UPDATE tasks SET files='-|-|-|-|pending' WHERE uuid=?1",[&ids[0]]).unwrap();
+    assert_eq!(index.cutover_candidate().unwrap().as_deref(),Some(ids[0].as_str()));
+}
+
+mod legacy_candidates;
+
+#[test]
+fn temporary_cutover_proof_exhaustion_is_never_cached_as_damaged() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-a1b2c3", Stage::Todo, "V", "A rooted task");
+    store.save(&mut task).unwrap();
+    age(&store, task.uuid());
+    let (derived, _) = zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+        derive(&store, task.uuid(), || ("fixture-stamp".into(), true))
+    });
+    assert!(matches!(derived, Derived::Busy), "temporary proof must stay busy, never data or damage");
+    let (restored, _) = derive(&store, task.uuid(), || ("fixture-stamp".into(), true));
+    assert!(matches!(restored, Derived::Row { .. }));
+    let mut index = Index::open(&store).unwrap();
+    let old: (Option<String>, Option<String>) = index.db.query_row("SELECT row,error FROM tasks WHERE uuid=?1", [task.uuid()], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    let forced = BTreeSet::from([task.uuid().to_owned()]);
+    let busy = zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+        index.refresh(&[task.uuid().to_owned()], None, Some(&forced))
+    });
+    assert!(matches!(busy, Err(Failure::Other)));
+    let kept: (Option<String>, Option<String>) = index.db.query_row("SELECT row,error FROM tasks WHERE uuid=?1", [task.uuid()], |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
+    assert_eq!(old, kept, "an incomplete read cannot replace the current cache row");
+}
+
+
+#[test]
+fn a_prior_proof_policy_negative_row_is_read_again_without_a_task_write() {
+    let temp = tempfile::tempdir().unwrap();let store = ProjectStore::open(temp.path(), "example").unwrap();
+    let mut task = new_task(&store, "T-a1b2c3", Stage::Todo, "V", "Still valid");store.save(&mut task).unwrap();age(&store, task.uuid());
+    let index = Index::open(&store).unwrap();
+    index.db.execute("UPDATE tasks SET row=NULL,error='old proof timeout' WHERE uuid=?1",[task.uuid()]).unwrap();
+    index.db.execute("UPDATE meta SET value='repaired-1' WHERE key='derived'",[]).unwrap();
+    index.db.execute("UPDATE meta SET value=(SELECT value FROM meta WHERE key='revision') WHERE key='derived_revision'",[]).unwrap();
+    drop(index);
+    let (mut index, decoded, _) = counted(|| Index::open(&store).unwrap());
+    assert!(decoded > 0);assert_eq!(index.page(Stage::Todo, 10, &Anchor::Start).unwrap().rows.len(), 1);
+    assert_eq!(index.damaged().unwrap().1, 0);
 }

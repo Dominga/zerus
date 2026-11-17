@@ -24,6 +24,8 @@ use zerus_relay::protocol::{OPERATIONS, READS};
 
 #[path = "encrypted_journal.rs"]
 mod encrypted;
+#[path = "mobile_edit_journal.rs"]
+mod mobile_edit;
 
 pub const JOURNAL: &str = "journal.sqlite3";
 pub const LOCK: &str = "connector.lock";
@@ -60,7 +62,7 @@ pub const INDEXES: [(&str, &str); 10] = [
 ];
 
 // The Python connector's frozen predicates (operations.json `sql`).
-pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','history_projection','hooks_status','inspect','mark_read','process_output','project_assignment','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
+pub const READ_CLASS_SQL: &str = "('analytics_read','archive_list','attachment_read','catalog','dirs','file_read','history','history_projection','hooks_status','inspect','mark_read','process_output','project_assignment','send_outcome_receipt','speech_config','speech_config_status','speech_profiles','speech_stats','speech_status','terminal_snapshot','voice_profiles','voice_status','worktrees')";
 pub const READ_SQL: &str = "('inspect','process_output','terminal_snapshot','catalog','dirs','worktrees','history','mark_read')";
 pub const SPEECH_READ_SQL: &str = "('speech_profiles','speech_stats','speech_status')";
 pub const SPEECH_CONFIG_READ_SQL: &str = "('speech_config','speech_config_status')";
@@ -73,7 +75,7 @@ pub const TASK_READ_PRUNE: &str = "DELETE FROM requests INDEXED BY journal_opera
 /// Git status, repository checks, and the phone's task exchange and Done list.
 pub const GIT_STATUS_COUNT_SQL: &str =
     "SELECT count(*) FROM requests WHERE operation IN ('git_status','repository_check','repository_status','task_exchange','task_done','send_receipt','session_question_route_person_status')";
-pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation IN ('git_status','repository_check','repository_status','send_receipt','session_question_route_person_status') AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
+pub const GIT_STATUS_PRUNE_SQL: &str = "DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation IN ('git_status','repository_check','repository_status','send_receipt','send_outcome_receipt','session_question_route_person_status') AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)";
 
 /// Delivered short-lived reads go after two minutes, other reads after an
 /// hour; a delivered mutation becomes a tombstone after seven days.
@@ -226,12 +228,17 @@ impl Journal {
                 "UPDATE requests SET delivered_at=? WHERE delivered=1 AND delivered_at IS NULL",
                 [now],
             )?;
-            let running: Vec<(String, String)> = tx
-                .prepare("SELECT request_id, operation FROM requests WHERE state='running'")?
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            let qualified_column = if mobile_edit::has_table(&tx)? {
+                "EXISTS (SELECT 1 FROM qualified_task_edits q WHERE q.request_id=requests.request_id)"
+            } else {
+                "0"
+            };
+            let running: Vec<(String, String, bool)> = tx
+                .prepare(&format!("SELECT request_id, operation, {qualified_column} FROM requests WHERE state='running'"))?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?,row.get(2)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            for (request_id, operation) in running {
-                let state = if is_mutation(&operation) {
+            for (request_id, operation, qualified) in running {
+                let state = if is_mutation(&operation) || qualified {
                     "uncertain"
                 } else {
                     "failed"
@@ -288,7 +295,14 @@ impl Journal {
             &format!("DELETE FROM requests WHERE operation='attachment_read' AND {delivered}"),
             [short],
         )?;
-        tx.execute(TASK_READ_PRUNE, [short])?;
+        if mobile_edit::has_table(&tx)? {
+            tx.execute(
+                &format!("{TASK_READ_PRUNE} AND {}", mobile_edit::ABSENT),
+                [short],
+            )?;
+        } else {
+            tx.execute(TASK_READ_PRUNE, [short])?;
+        }
         tx.execute(
             &format!("DELETE FROM requests WHERE operation='archive_list' AND {delivered}"),
             [now - 3600.0],
@@ -348,7 +362,17 @@ impl Journal {
             }
             return Ok(false);
         }
-        let reads = READS.contains(&operation);
+        let has_qualified = mobile_edit::has_table(&tx)?;
+        let qualified: bool = has_qualified
+            && tx.query_row(
+                "SELECT EXISTS (SELECT 1 FROM qualified_task_edits WHERE request_id=?)",
+                [request_id],
+                |row| row.get(0),
+            )?;
+        if qualified && operation != "task_exchange" {
+            return Err(refused(CONFLICT));
+        }
+        let reads = READS.contains(&operation) && !qualified;
         let count: i64 = tx.query_row(
             &format!("SELECT count(*) FROM requests WHERE (operation IN {READ_CLASS_SQL})=?"),
             [reads as i64],
@@ -357,10 +381,15 @@ impl Journal {
         // The legacy NOT-IN count includes new Rust-only reads. Correct only
         // this additive class, in the same transaction as admission.
         let git_reads: i64 = tx.query_row(GIT_STATUS_COUNT_SQL, [], |row| row.get(0))?;
-        let count = if reads {
-            count + git_reads
+        let qualified_count: i64 = if has_qualified {
+            tx.query_row(mobile_edit::COUNT, [], |row| row.get(0))?
         } else {
-            count - git_reads
+            0
+        };
+        let count = if reads {
+            count + git_reads - qualified_count
+        } else {
+            count - git_reads + qualified_count
         };
         if count >= if reads { READ_CAP } else { MUTATION_CAP } {
             return Err(refused(RETAINED_LIMIT));

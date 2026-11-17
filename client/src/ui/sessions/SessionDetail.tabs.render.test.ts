@@ -14,6 +14,7 @@ const STUBS: Record<string, string> = {
     export const selected = () => globalThis.__detail?.session; export const setDetailTab = () => {}; export const setMenu = () => {};
     export const subagentOpen = () => undefined;`,
   "src/store/visibility": `export const pageHidden = () => false;`,
+  "src/ui/sessions/ShowInList": `export const ShowInListButton = () => "";`,
   "src/store/teams": `export const selectedTeam = () => globalThis.__detail?.team;`,
   "src/store/drops": `export const drops = { hint: () => undefined };`,
   "src/store/processes": `export const processes = { view: () => ({ count: 0 }) };

@@ -13,6 +13,7 @@ use zerus_team_plan::{
 };
 const MACHINE: &str = "00000000-0000-4000-8000-0000000000aa";
 const EPOCH: &str = "00000000-0000-4000-8000-000000000001";
+mod planning;
 
 struct FakeEffects {
     events: Vec<String>,
@@ -20,6 +21,7 @@ struct FakeEffects {
     sessions: BTreeMap<String, ObservedSession>,
     accounts: Vec<AccountUsage>,
     exists: bool,
+    empty_conversation: bool,
     unknown: bool,
     not_started: bool,
     mismatch: bool,
@@ -44,6 +46,7 @@ impl Default for FakeEffects {
             sessions: BTreeMap::new(),
             accounts: vec![account("a"), account("b")],
             exists: false,
+            empty_conversation: false,
             unknown: false,
             not_started: false,
             mismatch: false,
@@ -162,7 +165,11 @@ impl Effects for FakeEffects {
             name: format!("claude/example/{}", plan.member),
             session_id: uuid::Uuid::new_v4().to_string(),
             run_id: uuid::Uuid::new_v4().to_string(),
-            conversation_id: uuid::Uuid::new_v4().to_string(),
+            conversation_id: if self.empty_conversation {
+                String::new()
+            } else {
+                uuid::Uuid::new_v4().to_string()
+            },
         };
         self.sessions.insert(plan.launch_id.clone(), s);
         Effect::Submitted(())
@@ -3099,4 +3106,76 @@ pub(super) fn named_plans_with_integration(
         }
     }
     (h, effects.plans)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound151_fixture() -> Harness {
+    let mut h = Harness::new();
+    let mut e = FakeEffects {
+        exists: true,
+        empty_conversation: true,
+        worktree_unverified: true,
+        ..Default::default()
+    };
+    advance(&mut runtime(&h), &mut h, &mut e, 60);
+    assert!(matches!(
+        row(&h, "lead").state,
+        State::Bound | State::ParentIntent | State::Done
+    ));
+    h
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound161_fixture() -> Harness {
+    planning::bound()
+}
+
+#[path = "edit_tests.rs"]
+mod edits159;
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn bound159_fixture() -> Harness {
+    edits159::started().0
+}
+
+#[test]
+fn launch_card_writers_establish_list_stuck_for_blocked_and_uncertain_launches() {
+    let stuck = |h: &Harness| {
+        let rows = h.store.teams(1, None).unwrap().rows;
+        h.store.team_progress(&rows).unwrap()[ops::tests::TEAM].stuck
+    };
+    let open = |h: &Harness| {
+        cards(h)
+            .into_iter()
+            .filter(|c| c.state == "open")
+            .map(|c| c.kind)
+            .collect::<Vec<_>>()
+    };
+    let mut h = Harness::new();
+    assert!(!stuck(&h));
+    let mut e = FakeEffects {
+        unknown: true,
+        ..Default::default()
+    };
+    let mut r = runtime(&h);
+    advance(&mut r, &mut h, &mut e, 20);
+    for _ in 0..5 {
+        r.tick(&mut h.store, &mut e, ops::tests::TEAM, 301_234)
+            .unwrap();
+    }
+    assert_eq!(open(&h), ["launch_uncertain"]);
+    assert!(stuck(&h));
+    let mut h = Harness::new();
+    let mut e = FakeEffects {
+        exists: true,
+        ..Default::default()
+    };
+    let mut r = runtime(&h);
+    until(&mut r, &mut h, &mut e, |_, e| !e.plans.is_empty());
+    e.read_error = true;
+    for now in [1234, 61_234, 181_234] {
+        r.tick(&mut h.store, &mut e, ops::tests::TEAM, now).unwrap();
+    }
+    assert_eq!(open(&h), ["launch_blocked"]);
+    assert!(stuck(&h));
 }

@@ -1,0 +1,117 @@
+{
+  "actor": {
+    "interim": true,
+    "kind": "person",
+    "note": "This interim rule does not detect commands whose ancestry does not pass through readable processes of the same user to their agent, for example after reparenting or credential-changing helpers, nor a caller that replaces or instruments hgs itself or writes the team store directly. Agents started without session markers are also not detected. A command in a sandbox with its own user namespace is refused, so team commands must run outside such a sandbox. A DeepSeek session's command is proven by its host's per-call token instead of by ancestry, and only under a host that advertises those tokens; a host started before them is never restarted for it. A DeepSeek child agent's command is proven as its top-level session and acts with that session's standing, as an in-process Claude or Codex subagent does; a DeepSeek fork is its own session. One DeepSeek host process serves every session of its agent home: process ancestry proves only that this command runs under the host that serves the session, and the host's per-call token proves which conversation's tool call started it. The host socket's peer credentials prove that the answering socket is the recorded host's, which never hands its listener to a child, and everything that socket serves hides a live token printed whole; a call can always disclose its own token, split or encoded. A same-user process that reads another tool call's environment can copy that call's token; that is deliberate instrumentation and outside this proof.",
+    "origin": "cli_interim",
+    "person": "local"
+  },
+  "draft": {
+    "accept_available": false,
+    "complete": true,
+    "controls": {
+      "acceptance": {
+        "allowed": true,
+        "reason": null
+      },
+      "barrier": {
+        "allowed": true,
+        "reason": null
+      },
+      "earlier": {
+        "availability": {
+          "allowed": false,
+          "reason": "There is no neighboring planned phase in that direction."
+        },
+        "target": null
+      },
+      "later": {
+        "availability": {
+          "allowed": false,
+          "reason": "There is no neighboring planned phase in that direction."
+        },
+        "target": null
+      },
+      "pause": {
+        "state": "running"
+      },
+      "pause_change": {
+        "allowed": true,
+        "reason": null
+      },
+      "resume": {
+        "allowed": false,
+        "reason": "The phase is not paused."
+      },
+      "scope": {
+        "generation": 1,
+        "kind": "draft",
+        "phase": 1
+      },
+      "unstarted": {
+        "allowed": true,
+        "reason": null
+      },
+      "version": 1
+    },
+    "editable": true,
+    "generation": 1,
+    "live": null,
+    "next_node": 3,
+    "nodes": [
+      {
+        "assignee": null,
+        "criteria": [
+          "The foundation tests pass"
+        ],
+        "deps": [],
+        "estimate_minutes": 0,
+        "id": 1,
+        "kind": "task",
+        "pipeline": "reviewed",
+        "role": "developer",
+        "text": "Implement the shared part.",
+        "title": "Build the foundation",
+        "writes": [
+          "src/base.rs"
+        ]
+      },
+      {
+        "assignee": null,
+        "criteria": [
+          "The feature tests pass"
+        ],
+        "deps": [
+          {
+            "node": 1
+          }
+        ],
+        "estimate_minutes": 0,
+        "id": 2,
+        "kind": "task",
+        "pipeline": "reviewed",
+        "role": "developer",
+        "text": "Use the new contract.",
+        "title": "Use the foundation",
+        "writes": [
+          "src/feature.rs"
+        ]
+      }
+    ],
+    "phase": {
+      "barrier": true,
+      "kind": "plan",
+      "n": 1,
+      "order": 1,
+      "state": "draft",
+      "title": "Foundation"
+    },
+    "previous": null,
+    "publication": null,
+    "rejection": null,
+    "revision": 2,
+    "rework_available": true
+  },
+  "ok": true,
+  "team": "00000000-0000-4000-8000-00000000beef"
+}

@@ -81,6 +81,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        Desktop deferred send ABI: desktop-deferred-send-v1
        Desktop question route: route-questions-v1
        Desktop deferred answer ABI: desktop-deferred-answer-v1
+       Desktop Teams Person ABI: desktop-team-person-v1
+       Desktop Teams Person actions ABI: desktop-team-person-actions-v2
        Desktop deferred answer update phase: desktop-deferred-answer-update-phase-v1
        Desktop deferred compact to send ABI: desktop-deferred-compact-to-send-v1
        Desktop deferred session resume ABI: desktop-deferred-session-resume-v1
@@ -108,6 +110,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
         Desktop catalog changes ABI: desktop-catalog-changes-v1
         Desktop catalog relay ABI: desktop-catalog-relay-v1
        hgs mobile-peer --json         guarded direct-peer native request from JSON stdin
+       mobile-peer-send-outcome-v2
        mobile-peer-session-id-v1
        hgs [@host] voice <session> --json  send and inspect persistent voice messages (JSON stdin; voice-video-v1)
        hgs [@host] speech --json      host speech providers and durable jobs (JSON stdin)
@@ -135,6 +138,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] processes <session> --output ID | --stop ID --run RUN --conversation ID [--generation ID]
        hgs [@host] send <session> --json   submit message/attachments from JSON stdin
        hgs [@host] send-cancel <session> --json   cancel a message hgs still holds ({"request_id"})
+       hgs [@host] send <session> --delivery-outcome-v2 --json   opt in to an exact terminal not-offered outcome
        hgs send <codex session> --observe --json   read whether a send to this computer's Codex session would be taken now, changing nothing
        hgs [@host] recovery action --scoped-json exact waiting-job control
        hgs [@host] recovery team-override   a team's reset wait for one session (JSON stdin)
@@ -260,6 +264,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        session-notifications-v1
        session-keep-warm-v1
        delivery-receipt-v1
+       native-send-outcome-v2
        session-question-routing-v1
        session-question-routing-v2
        question-route-person-v1
@@ -274,6 +279,8 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] rename <session> <new-full-name> [--archive <id>]
        hgs [@host] archives --json [--bounded]   date-filtered archive pages (JSON stdin); --bounded caps counts at 10,000 and each scan at 25,000 rows
        archive-bounded-pages-v1
+       hgs acknowledge-input <session> --json   person-only keyless release (exact review on stdin)
+       input-acknowledgment-v1
        hgs [@host] archive <session> [--with-children]   move a stopped conversation to Archive
        hgs [@host] terminate <session> [--expected-run-id ID] [--with-children]   stop and keep the conversation in Archive
        hgs [@host] pause <session>|--all       save and gracefully close idle agents
@@ -290,6 +297,9 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs task begin-attempt REF --attempt UUID [--json]   inactive task-scoped acknowledgement
        hgs task control plan|execute|status --json   inactive task controls (JSON stdin)
        hgs task mobile-send|mobile-cancel|mobile-done --json   the phone's task actions (mobile)
+       Mobile task identity ABI: task-session-identity-v2
+       Mobile task media ABI: task-media-upload-v1
+       Mobile task edit ABI: task-admitted-edit-v1
        hgs [@host] team preview on|off|status | catalog | template | create | list | waiting | status | inbox | queue | cards | journal | current | admit | route | accept | return | reassign | hold | release | cancel | reply | ask | pause-member | resume-member | stop-member | archive-member   Agent Teams (preview; JSON on stdin)
        hgs clip                       PNG from this box's clipboard to stdout (rc 1: no image)
        hgs paste <session> <pane> [client]   the tmux C-v binding; not for hand use
@@ -355,7 +365,12 @@ fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
     crate::mobile_peers::dispatch(config, args)
 }
 #[cfg(not(unix))]
-fn mobile_peers(_: &Config, _: &[String]) -> Result<i32> {
+fn mobile_peers(config: &Config, args: &[String]) -> Result<i32> {
+    #[cfg(windows)]
+    if args.first().is_some_and(|op| matches!(op.as_str(), "__mobile-peer-identity" | "__mobile-peer-local")) {
+        return crate::mobile_peers::dispatch(config, args);
+    }
+    let _ = (config, args);
     Err(Error::new(
         2,
         "One-hop mobile peer routing is unavailable on a Windows gateway; local Windows sessions are supported.",
@@ -641,6 +656,8 @@ fn unix_only_usage(line: &str) -> bool {
         zerus_client_core::desktop::deferred_send::HELP_MARKER,
         zerus_client_core::desktop::question_route::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::HELP_MARKER,
+        zerus_client_core::desktop::team_person::HELP_MARKER,
+        zerus_client_core::desktop::team_person_actions::HELP_MARKER,
         zerus_client_core::desktop::deferred_answer::UPDATE_PHASE_MARKER,
         zerus_client_core::desktop::compact_to_send::HELP_MARKER,
         zerus_client_core::desktop::session_resume::HELP_MARKER,
@@ -683,6 +700,11 @@ fn unix_only(command: &str, unix: bool) -> Result<()> {
 /// only Linux advertises those ABIs.
 fn help_text() -> Cow<'static, str> {
     let usage = advertised(usage_text(cfg!(unix)), cfg!(target_os = "linux"));
+    let usage = if cfg!(target_os = "linux") {
+        Cow::Owned(format!("{usage}\n{}\n", state::LISTING_METADATA_MARKER))
+    } else {
+        usage
+    };
     match crate::tasks::controls::help_marker() {
         Some(marker) => format!("{usage}\n{marker}\n").into(),
         None => usage,
@@ -1272,6 +1294,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     if command == "desktop" {
         return crate::desktop::dispatch(&config, &target, args, dry);
     }
+    if command == "acknowledge-input" {
+        return crate::desktop::input_acknowledgment::dispatch(&config, &target, args, dry);
+    }
     // Windows only, before local sessions are enabled, and never forwarded: it
     // enables them on this computer (spec D2). On Unix the word stays a program.
     #[cfg(windows)]
@@ -1327,6 +1352,15 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
             println!("{result}"); Ok(0)
         }
         "ls" => list(&config, args, dry),
+        "listing-index" => {
+            if dry {
+                println!("hgs listing-index (display metadata only)");
+                return Ok(0);
+            }
+            let value = state::listing_index(args).map_err(|e| Error::new(1, e))?;
+            println!("{value}");
+            Ok(0)
+        }
         "watch" => crate::watch::run(&config, args, dry),
         "archives" => {
             let mobile = cfg!(windows) && args.last().map(String::as_str)==Some("--windows-mobile");
@@ -2083,6 +2117,9 @@ fn check_send_caller() -> Result<()> {
             .iter()
             .all(|name| env::var(name).is_ok_and(|value| !value.is_empty()));
     let check = crate::state::dsh::host_check();
+    if check == crate::state::dsh::HostCheck::Unregistered {
+        return Err(Error::new(1, crate::state::dsh::UNREGISTERED_HOST));
+    }
     if check == crate::state::dsh::HostCheck::Under
         && state::session_graph::send_origin().is_none()
         && !proven_hosted
@@ -2177,6 +2214,9 @@ fn person_only_forwarding(command: &str, args: &[String]) -> Result<()> {
     else {
         return Ok(());
     };
+    if state::dsh::host_check() == state::dsh::HostCheck::Unregistered {
+        return Err(Error::new(1, state::dsh::UNREGISTERED_HOST));
+    }
     if !agent_caller() {
         // A peer loses readable local ancestry as well as session markers.
         // Apply the same refusal as a local person action before any SSH,
@@ -2360,14 +2400,15 @@ fn remote_via(
         "--expect-machine" => {
             let expected=require(&args,0,"Missing expected machine identity")?;
             let actual=require(&args,1,"Missing guarded command")?;
-            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"path-info"|"worktrees"|"repository"|"session-action-status"|"delivery"|"--help"|"dsh"|"opencode");
+            let terminal=!has(&args,"-d")&&!matches!(actual,"dirs"|"path-info"|"worktrees"|"repository"|"session-action-status"|"delivery"|"--help"|"dsh"|"opencode"|"listing-index")
+                && !(actual == "ls" && has(&args, "--paged"));
             flags=vec!["-o".into(),"BatchMode=yes".into(),"-o".into(),crate::windows_peer::connect_timeout(config, target, 3)];
             if terminal { flags.insert(0,"-t".into()); }
             let mut all=vec!["--expect-machine".into(),expected.into(),"--client".into(),config.host().into()];
             all.extend_from_slice(&args[1..]);all
         }
         "session-action-status" if machine.is_none() => return Err(Error::new(2,"A remote lifecycle receipt read requires --expect-machine ID before session-action-status")),
-        "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "project" | "archive" | "rename"
+        "archives" | "session-action-status" | "kill" | "terminate" | "pause" | "inspect" | "reference" | "processes" | "worktrees" | "git-status" | "git-diff" | "repository" | "dirs" | "listing-index" | "project" | "archive" | "rename"
         | "send" | "send-now" | "send-cancel" | "session-action" | "terminal" | "history" | "history-projection" | "interrupt" | "clear-context" | "compact-context" | "answer" | "effort" | "settings" | "search" | "schedules" | "graph" | "wait" | "team" | "rules" | "guide" | "dsh" | "opencode" | "attachment" | "file-read" | "recovery" | "swarm" | "read" | "notifications" | "keep-warm" | "question-routing" | "speech" | "analytics" | "voice" | "hooks" | "parent" | "delivery" | "path-info" | "test" | "--help" => {
             flags = vec![
                 "-o".into(),
@@ -2430,10 +2471,40 @@ fn remote_via(
         // too (zerus-3skhm). A path's ~ reaches the peer's hgs as written:
         // hgs expands ~/ itself and refuses ~user, which the peer's shell
         // would expand (zerus-ie12o).
-        let words = remote_args.iter().map(|word| if word.starts_with('~') { format!("'{}'", word.replace('\'', "'\\''")) } else { platform::join(&[word]) }).collect::<Vec<_>>().join(" ");
-        let guarded = if wrapped_path_info || machine.is_some() { "~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && " } else { "" };
-        platform::remote_sh(&format!("if {guarded}~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] path-info --path'; then exec ~/.local/bin/hgs {words}; else echo 'hgs: update the selected computer to check file paths' >&2; exit 1; fi"))
-    } else if command == "--expect-machine" && args.get(1).is_some_and(|actual| actual=="session-action-status") {
+        let words = remote_args
+            .iter()
+            .map(|word| {
+                if word.starts_with('~') {
+                    format!("'{}'", word.replace('\'', "'\\''"))
+                } else {
+                    platform::join(&[word])
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let guarded = if wrapped_path_info || machine.is_some() {
+            "~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && "
+        } else {
+            ""
+        };
+        platform::remote_sh(&format!(
+            "if {guarded}~/.local/bin/hgs --help 2>/dev/null | grep -qF 'hgs [@host] path-info --path'; then exec ~/.local/bin/hgs {words}; else echo 'hgs: update the selected computer to check file paths' >&2; exit 1; fi"
+        ))
+    } else if command == "--expect-machine"
+        && args
+            .get(1)
+            .is_some_and(|verb| verb == "listing-index" || verb == "ls" && has(&args, "--paged"))
+    {
+        platform::remote_sh(&format!(
+            "if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer for indexed session listing' >&2; exit 1; fi",
+            state::LISTING_METADATA_MARKER,
+            platform::join(&remote_args)
+        ))
+    } else if command == "--expect-machine"
+        && args
+            .get(1)
+            .is_some_and(|actual| actual == "session-action-status")
+    {
         // Probe the same executable, without reading the JSON stream. An old
         // peer must never interpret this reader's name as a program to launch.
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'guarded-create-v1' && ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*lifecycle-receipt-status-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to read lifecycle receipts' >&2; exit 1; fi",platform::join(&remote_args)))
@@ -2445,7 +2516,16 @@ fn remote_via(
     } else if command == "subagent" {
         platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'Subagent retirement ABI: subagent-retire-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to retire stale subagent records' >&2; exit 1; fi",platform::join(&remote_args)))
     } else if command == "repository" {
-        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",platform::join(&remote_args)))
+        platform::remote_sh(&format!(
+            "if ~/.local/bin/hgs --help 2>/dev/null | grep -qF 'repository-clone-v1'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer to clone repositories' >&2; exit 1; fi",
+            platform::join(&remote_args)
+        ))
+    } else if command == "listing-index" || command == "ls" && has(&args, "--paged") {
+        platform::remote_sh(&format!(
+            "if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*{}[[:space:]]*'; then exec ~/.local/bin/hgs {}; else echo 'hgs: update the selected computer for indexed session listing' >&2; exit 1; fi",
+            state::LISTING_METADATA_MARKER,
+            platform::join(&remote_args)
+        ))
     } else if command == "wait" {
         // Old peers otherwise interpret an unknown command as an agent launch.
         // Probe the same installed executable without consuming JSON stdin.
@@ -2498,10 +2578,24 @@ fn remote_via(
         let mut with = remote_args.clone();
         let at = with.iter().position(|arg| arg == "--").unwrap_or(with.len());
         with.splice(at..at, ["--parent-link".to_owned(), link]);
-        platform::remote_sh(&format!("if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*launch-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi", platform::join(&with), platform::join(&remote_args)))
-    } else { format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args)) };
-    if !global_dry && !has(&args, "--dry-run") && command == "ls" && has(&args, "--json") {
-        println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
+        platform::remote_sh(&format!(
+            "if ~/.local/bin/hgs --help 2>/dev/null | grep -qEx '[[:space:]]*launch-parent-v1[[:space:]]*'; then exec ~/.local/bin/hgs {}; else exec ~/.local/bin/hgs {}; fi",
+            platform::join(&with),
+            platform::join(&remote_args)
+        ))
+    } else {
+        format!("~/.local/bin/hgs {}", platform::remote_join(&remote_args))
+    };
+    if !global_dry
+        && !has(&args, "--dry-run")
+        && command == "ls"
+        && has(&args, "--json")
+        && !has(&args, "--paged")
+    {
+        println!(
+            "{}",
+            peer_json_archives(config, target, !has(&args, "--no-archives"))
+        );
         return Ok(0);
     }
     let remote = if global_dry || has(&args, "--dry-run") { remote } else {
@@ -2532,6 +2626,15 @@ fn remote_via(
                 Marker::Line(value) => (*value, true), Marker::Text(value) => (*value, false),
             }).collect();
         }
+        if command == "listing-index"
+            || command == "ls" && has(&args, "--paged")
+            || command == "--expect-machine"
+                && args.get(1).is_some_and(|verb| {
+                    verb == "listing-index" || verb == "ls" && has(&args, "--paged")
+                })
+        {
+            markers.push((state::LISTING_METADATA_MARKER, true));
+        }
         if machine.is_some() { markers.push(("guarded-create-v1", false)); }
         let mut words = remote_args.clone();
         // A non-POSIX peer runs the words without a shell probe: send --bounded only to one that lists it.
@@ -2556,11 +2659,14 @@ fn remote_via(
         println!("{}", dry_run_line(&flags, target, &remote));
         return Ok(0);
     }
-    if command == "ls" && has(&args, "--json") {
-        println!("{}", peer_json_archives(config, target, !has(&args,"--no-archives")));
+    if command == "ls" && has(&args, "--json") && !has(&args, "--paged") {
+        println!(
+            "{}",
+            peer_json_archives(config, target, !has(&args, "--no-archives"))
+        );
         return Ok(0);
     }
-    if command == "ls" {
+    if command == "ls" && !has(&args, "--json") {
         println!("{target}:");
     }
     let _tab = tab
@@ -2676,6 +2782,13 @@ fn private_stores(raw: &mut Value) {
 /// `ls --json --local --no-archives`, which `hgs watch` streams.
 pub(crate) fn local_listing(config: &Config) -> Result<Value> { local_json_archives(config, false) }
 fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
+    local_json_archives_with(config, archives, None)
+}
+fn local_json_archives_with(
+    config: &Config,
+    archives: bool,
+    ordinary: Option<&state::ListingQuery>,
+) -> Result<Value> {
     if !platform::local_sessions() {
         // A control console: no tmux, session state or local projects. Absent
         // `local_sessions` means true, so Unix listings stay as they were.
@@ -2727,7 +2840,11 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
     phases.mark("local_host");
     // A session renamed before merge_listing reads the panes keeps its ID.
     let ids = state::listed_ids(&listing);
-    let mut merged = state::merge_listing_archives(raw, &ids, archives).map_err(|e| Error::new(1, e))?;
+    let mut merged = match ordinary {
+        Some(query) => state::merge_ordinary_listing(raw, &ids, archives, query),
+        None => state::merge_listing_archives(raw, &ids, archives),
+    }
+    .map_err(|e| Error::new(1, e))?;
     phases.mark("merge");
     merged["archive_paging"] = json!(true);
     merged["archive_revision"] = json!(state::archive_catalog::revision().map_err(|e|Error::new(1,e))?);
@@ -2744,6 +2861,34 @@ fn local_json_archives(config: &Config, archives: bool) -> Result<Value> {
 fn local_list(config: &Config) -> Result<()> {
     if !platform::local_sessions() {
         println!("  (control console: sessions run on remote machines)");
+        return Ok(());
+    }
+    if cfg!(target_os = "linux") {
+        let value = local_json_archives_with(config, false, Some(&state::ListingQuery::default()))?;
+        let native = terminal()
+            .attached_counts()
+            .map_err(|error| Error::new(1, error))?;
+        let mut live = std::collections::BTreeSet::new();
+        if let Some(native) = native {
+            for (name, count) in native {
+                println!("  {name:<40} {count} client(s)");
+                live.insert(name);
+            }
+        } else {
+            println!("  (no sessions)");
+        }
+        for row in value["sessions"]
+            .as_array()
+            .ok_or_else(|| Error::new(1, "Invalid session listing"))?
+        {
+            if !live.contains(state::display_name(row)) && row["state"] != "archived" {
+                println!(
+                    "  {:40} {} (hgs resume)",
+                    state::display_name(row),
+                    row["state"].as_str().unwrap_or("stopped")
+                );
+            }
+        }
         return Ok(());
     }
     match terminal().attached_counts().map_err(|e| Error::new(1, e))? {
@@ -2769,8 +2914,50 @@ fn list(config: &Config, args: &[String], global_dry: bool) -> Result<i32> {
             println!("{}", terminal().describe(&DryRun::ListJson));
             return Ok(0);
         }
-        let archives = !has(args,"--no-archives");
-        let local = local_json_archives(config, archives)?;
+        let archives = !has(args, "--no-archives");
+        let paged = has(args, "--paged");
+        let cursor = args
+            .iter()
+            .position(|arg| arg == "--cursor")
+            .map(|n| require(args, n + 1, "--cursor needs a token").map(str::to_owned))
+            .transpose()?;
+        let page_size = args
+            .iter()
+            .position(|arg| arg == "--page-size")
+            .map(|n| {
+                require(args, n + 1, "--page-size needs 1..128").and_then(|value| {
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| Error::new(1, "Invalid --page-size"))
+                })
+            })
+            .transpose()?
+            .unwrap_or(64);
+        if !(1..=128).contains(&page_size)
+            || (cursor.is_some() && !paged)
+            || (paged && !has(args, "--local"))
+        {
+            return Err(Error::new(
+                1,
+                "Paged ls requires --json --local, --page-size 1..128 and an optional --cursor",
+            ));
+        }
+        let query = state::ListingQuery {
+            paged,
+            cursor,
+            page_size,
+        };
+        let local = if cfg!(target_os = "linux") {
+            local_json_archives_with(config, archives, Some(&query))?
+        } else {
+            if paged {
+                return Err(Error::new(
+                    1,
+                    "Indexed session listing is not qualified on this platform",
+                ));
+            }
+            local_json_archives(config, archives)?
+        };
         if has(args, "--local") {
             println!("{local}");
         } else {
@@ -3548,6 +3735,9 @@ impl LaunchOptions {
                     "new session name cannot contain '/', ':', '.', control characters or surrounding whitespace",
                 ));
             }
+            if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+                return Err(Error::new(1, problem));
+            }
         }
         Ok(options)
     }
@@ -3819,6 +4009,11 @@ fn launch(
         )
     });
     let existing = session_exists(&session);
+    if !options.tag.is_empty() && !existing && !binding_exists(config, &session)? {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(&options.tag) {
+            return Err(Error::new(1, problem));
+        }
+    }
     if state::parent_link::claimed_launch() && (existing || binding_exists(config, &session)?) {
         return Err(Error::new(1, "--parent applies only to new sessions; use hgs parent adopt for an existing session"));
     }
@@ -4279,6 +4474,15 @@ mod parent_scan_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            let args = ["project", "--new", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&args, true).is_err(), "{tag:?}");
+            let old = ["project", "-n", tag, "-d"].map(str::to_owned);
+            assert!(LaunchOptions::parse(&old, true).is_ok(), "old names are selectors");
+        }
+    }
     /// zerus-sa9qn.39: a pasted peer dry-run line reads the alias back as one
     /// word and runs nothing, in sh (run) and fish (`fish_words`, modelled).
     #[cfg(unix)]
@@ -4482,20 +4686,37 @@ mod tests {
     use super::*;
 
     /// #1355 review: every command whose usage takes a session first accepts
-    /// `--session-id`; only the tray's and tmux's own entry points do not.
+    /// `--session-id`; internal entry points and the local person-only
+    /// acknowledgement keep their own exact session-name contracts.
     #[test]
     fn every_command_that_takes_a_session_first_accepts_a_session_id() {
-        let pattern = regex::Regex::new(r"hgs (?:\[@host\] |@host )?(?:--expect-machine ID )?([a-z_-]+) <session>").unwrap();
-        let mut usage: Vec<&str> = pattern.captures_iter(USAGE).map(|c| c.get(1).unwrap().as_str()).collect();
+        let pattern = regex::Regex::new(
+            r"hgs (?:\[@host\] |@host )?(?:--expect-machine ID )?([a-z_-]+) <session>",
+        )
+        .unwrap();
+        let mut usage: Vec<&str> = pattern
+            .captures_iter(USAGE)
+            .map(|c| c.get(1).unwrap().as_str())
+            .collect();
         usage.sort_unstable();
         usage.dedup();
         assert!(usage.len() >= 25, "{usage:?}");
-        let internal = ["notify", "paste"];
+        let internal = ["notify", "paste", "acknowledge-input"];
         for command in usage.iter().filter(|command| !internal.contains(command)) {
             assert!(SESSION_COMMANDS.contains(command), "{command}");
         }
         // Forms the usage writes without `<session>` first.
-        for command in ["kill", "rename", "archive", "terminate", "pause", "resume", "send-now", "native-ui", "__dsh-ui-url"] {
+        for command in [
+            "kill",
+            "rename",
+            "archive",
+            "terminate",
+            "pause",
+            "resume",
+            "send-now",
+            "native-ui",
+            "__dsh-ui-url",
+        ] {
             assert!(SESSION_COMMANDS.contains(&command), "{command}");
         }
         for command in internal.iter().chain(&["task", "subagent", "ls", "search"]) {

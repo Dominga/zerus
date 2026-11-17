@@ -11,6 +11,7 @@ import type { ComposerView } from "../../types";
 const fixture = vi.hoisted(() => ({
   read: vi.fn(async () => ({ binding: "b".repeat(64), state: "text", text: "stale residue", clearable: true, reason: "" })),
   clear: vi.fn(async () => ({ status: "cleared", error: "", composer: null })),
+  acknowledge: vi.fn(async () => ({ status: "person-acknowledged-unknown", error: "" })),
   toast: vi.fn(),
   view: undefined as unknown,
   session: {
@@ -19,7 +20,7 @@ const fixture = vi.hoisted(() => ({
   },
 }));
 vi.mock("../../bridge", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../bridge")>()),
-  composerState: fixture.read, clearInput: fixture.clear }));
+  composerState: fixture.read, clearInput: fixture.clear, acknowledgeInput: fixture.acknowledge }));
 vi.mock("../../store/composer", () => ({ composer: { canAttach: () => true, pasteImage: async () => {}, send: () => {}, view: () => fixture.view,
   // store/session opens the selected session's composer.
   open: () => undefined, receive: () => {} } }));
@@ -95,4 +96,40 @@ it("clears exactly the confirmed text when nothing is being sent", async () => {
   expect(fixture.clear).toHaveBeenCalledExactlyOnceWith(
     { computer: "", name: "claude/p/a", run_id: "run-a", conversation_id: "conversation-a" }, "b".repeat(64), "stale residue");
   expect(fixture.toast).toHaveBeenCalledWith("Terminal", "Input cleared.");
+});
+
+it("offers an explicit person acknowledgment for an empty unconfirmed input and never clears or sends it", async () => {
+  dispose?.();
+  fixture.read.mockImplementationOnce(async () => ({ binding: "b".repeat(64), state: "empty", text: "", clearable: false,
+    reason: "The input is empty", recovery: { original_request_id: "11111111-1111-4111-8111-111111111111", pending_at: 100 } }));
+  dispose = render(() => createComponent(TerminalTab, {}), host);
+  await settle();
+  const button = host.querySelector<HTMLButtonElement>('[aria-label="Release unconfirmed input"]');
+  expect(button).not.toBeNull();
+  button!.click();
+  await settle();
+  expect(document.querySelector("dialog")?.textContent).toContain("may or may not have reached");
+  expect(document.querySelector("dialog")?.textContent).toContain("A later identical message can also remain unconfirmed");
+  const confirm = [...document.querySelectorAll<HTMLButtonElement>("dialog button")]
+    .find((item) => item.textContent === "I checked Terminal: mark the previous input as handled");
+  expect(confirm).toBeDefined();
+  confirm!.click();
+  await settle();
+  expect(fixture.acknowledge).toHaveBeenCalledOnce();
+  expect(fixture.clear).not.toHaveBeenCalled();
+});
+
+it("withdraws a person acknowledgment when sending starts during confirmation", async () => {
+  dispose?.();
+  fixture.read.mockImplementationOnce(async () => ({ binding: "b".repeat(64), state: "empty", text: "", clearable: false,
+    reason: "The input is empty", recovery: { original_request_id: "11111111-1111-4111-8111-111111111111", pending_at: 100 } }));
+  dispose = render(() => createComponent(TerminalTab, {}), host);
+  await settle();
+  host.querySelector<HTMLButtonElement>('[aria-label="Release unconfirmed input"]')!.click();
+  await settle();
+  fixture.view = sending();
+  document.querySelector<HTMLButtonElement>("dialog .solid-danger")!.click();
+  await settle();
+  expect(fixture.acknowledge).not.toHaveBeenCalled();
+  expect(fixture.clear).not.toHaveBeenCalled();
 });

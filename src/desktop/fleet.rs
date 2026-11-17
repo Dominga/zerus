@@ -643,6 +643,13 @@ impl Runtime {
             "source":self.retry_source,"diagnostic":self.retry_diagnostic})
     }
 
+    pub(super) fn transport_ready(&self) -> bool {
+        !self.stopping
+            && self.computers.values().any(|c| {
+                c.accepting && matches!(c.status, ComputerStatus::Live | ComputerStatus::Polled)
+            })
+    }
+
     pub fn status(&self) -> Value {
         let u = self.sender.usage();
         let drained = self.stopping
@@ -656,10 +663,7 @@ impl Runtime {
         // Fleet availability is per computer. One unavailable peer must not
         // degrade a healthy stream; complete coverage remains separate data.
         // Neither value supplies source identity or permission for a write.
-        let ready = !self.stopping
-            && self.computers.values().any(|c| {
-                c.accepting && matches!(c.status, ComputerStatus::Live | ComputerStatus::Polled)
-            });
+        let ready = self.transport_ready();
         let all_sources_ready = !self.stopping
             && self.error.is_none()
             && self.computers.len() == self.desired.len() + 1

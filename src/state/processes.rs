@@ -12,6 +12,10 @@ use commands::{compact_job, set_command};
 pub(super) use commands::compact;
 mod history;
 mod native;
+// Unconnected support resource; no installed caller or signal authority.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+pub(in crate::state) mod custody;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod termination;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -130,6 +134,11 @@ fn result(job: &mut Value, response: &Value, failed: bool, at: f64) {
     } else {
         response
     };
+    let carries_output = response.is_string()
+        || response.is_array()
+        || ["stdout", "stderr", "output", "content"]
+            .iter()
+            .any(|key| response[key].is_string() || response[key].is_array());
     let raw = if response.is_string() || response.is_array() {
         text(response)
     } else {
@@ -154,7 +163,9 @@ fn result(job: &mut Value, response: &Value, failed: bool, at: f64) {
     };
     job["output_truncated"] =
         json!(job["output_truncated"] == true || combined.len() > OUTPUT_BYTES);
-    job["output"] = json!(tail(&combined, OUTPUT_BYTES));
+    if carries_output || job["output"].is_string() {
+        job["output"] = json!(tail(&combined, OUTPUT_BYTES));
+    }
     if !raw.is_empty() {
         job["output_at"] = json!(at);
     }
@@ -678,7 +689,7 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
             read_tail(&path)?
         } else {
             (
-                string(job, "output").into(),
+                job["output"].as_str().ok_or("Process output is unavailable")?.into(),
                 job["output_truncated"] == true,
             )
         };

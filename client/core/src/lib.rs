@@ -42,6 +42,7 @@ pub mod git_changes;
 pub mod held_input;
 pub mod hgs_settings;
 pub mod image;
+pub mod input_acknowledgment;
 pub mod input_queue;
 pub mod iron_rules;
 pub mod keep_warm;
@@ -109,6 +110,10 @@ pub mod tasks_write;
 pub mod team_mutes;
 pub mod team_notices;
 pub mod teams;
+/// WhiteWh fork: upstream's Agent Teams client types, beside the fork's own
+/// teams, for upstream's team engine (compiled, not wired to `hgs team`).
+#[allow(dead_code, unused_imports)]
+pub mod upstream_teams;
 pub mod terminal;
 pub mod terminal_launch;
 pub mod termination_cleanup;

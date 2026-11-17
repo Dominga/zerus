@@ -470,7 +470,7 @@ fn cancellation_holds_the_team_transaction_through_the_task_save() {
     let writer = std::thread::spawn(move || {
         let mut store = Store::open(&state).unwrap();
         started.send(()).unwrap();
-        let result = ops::apply(
+        let result = ops::tests::apply_fixture(
             &mut store,
             &person(),
             &ops::tests::request(revision, ops::Operation::Stop),

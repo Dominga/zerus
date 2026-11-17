@@ -1,6 +1,6 @@
 //! Saved session records can contain large private shell-job histories. Keep
-//! their raw I/O charged, but retain only the fields used by history search.
-//! Public snapshot text shares that raw bound, not the smaller metadata bound.
+//! raw I/O separately bounded, but retain only fields used by history search.
+//! A native-version-checked compact cache avoids rereading private job payloads.
 use super::*;
 use crate::platform::FileIdentity;
 use serde::de::{IgnoredAny, MapAccess, Visitor};
@@ -14,6 +14,7 @@ struct Entry {
     stamp: FileIdentity,
     len: u64,
     record: Value,
+    version: String,
 }
 
 #[derive(Debug, PartialEq)]
@@ -45,9 +46,102 @@ impl Entry {
 /// One bounded call owns this cache. Every reuse reopens and verifies the path;
 /// Unix also pins the original inode with a held handle.
 #[derive(Default)]
-pub(super) struct Reader(BTreeMap<PathBuf, Entry>);
+pub(super) struct Reader {
+    entries: BTreeMap<PathBuf, Entry>,
+    cache: Option<Connection>,
+    cache_root: Option<PathBuf>,
+    cache_attempts: u8,
+    raw: usize,
+    foreground: bool,
+}
+const RAW_BYTES: usize = 64 << 20;
+const BATCH_BYTES: usize = 256 << 20;
+
+struct TimedRead<'a> {
+    file: &'a mut fs::File,
+    read: &'a mut usize,
+    until: Instant,
+}
+impl Read for TimedRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if Instant::now() >= self.until {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Search metadata slice expired",
+            ));
+        }
+        let length = buf.len().min(64 << 10);
+        let n = self.file.read(&mut buf[..length])?;
+        *self.read += n;
+        Ok(n)
+    }
+}
 
 impl Reader {
+    pub fn cached(state: &Path) -> Self {
+        Self {
+            cache: metadata_cache::open(state),
+            cache_root: Some(state.to_owned()),
+            ..Self::default()
+        }
+    }
+    pub fn foreground(state: &Path) -> Self {
+        Self {
+            foreground: true,
+            ..Self::cached(state)
+        }
+    }
+    fn ensure_cache(&mut self) {
+        if self.cache.is_none() && self.cache_attempts < 3 {
+            if let Some(state) = &self.cache_root {
+                self.cache_attempts += 1;
+                self.cache = metadata_cache::open(state);
+            }
+        }
+    }
+    pub fn id_path(&mut self, state: &Path, identity: &Identity) -> Option<PathBuf> {
+        self.ensure_cache();
+        let namespace = crate::platform::canonical(state).ok()?.join("sessions");
+        let valid = |path: &Path, record: &Value| {
+            path.parent() == Some(namespace.as_path())
+                && path
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .is_some_and(|id| storage::is_id_layout_record(record, id))
+                && record["name"] == identity.name
+                && record["run_id"] == identity.run_id
+                && record["conversation_id"] == identity.conversation_id
+        };
+        for (path, entry) in &self.entries {
+            if valid(path, &entry.record) {
+                return Some(path.clone());
+            }
+        }
+        let db = self.cache.as_ref()?;
+        let source = identity.target().key().ok()?;
+        let paths:Vec<String>=db.prepare("SELECT path FROM catalog_queue WHERE source=? AND kind='binding' ORDER BY id LIMIT 2").ok()?
+            .query_map([source],|r|r.get(0)).ok()?.collect::<rusqlite::Result<_>>().ok()?;
+        paths.into_iter().map(PathBuf::from).find(|path| {
+            path.parent() == Some(namespace.as_path())
+                && path
+                    .file_stem()
+                    .and_then(|v| v.to_str())
+                    .is_some_and(session_id::canonical)
+        })
+    }
+    pub fn cache_into(&self, db: &Connection, path: &Path) -> Result<()> {
+        let Some(path) = metadata_cache::path(path) else {
+            return Ok(());
+        };
+        if let Some(entry) = self.entries.get(&path) {
+            #[cfg(not(windows))]
+            if metadata_cache::stamp(&entry.file)? != entry.version {
+                return Ok(());
+            }
+            metadata_cache::put(db, &path, &entry.version, &entry.record)?;
+        }
+        Ok(())
+    }
     pub fn read(
         &mut self,
         path: &Path,
@@ -63,45 +157,95 @@ impl Reader {
             .open(path)
             .map_err(|_| "Session metadata unavailable")?;
         let (stamp, metadata) = FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
-        if !metadata.is_file() || metadata.len() > session_graph::MAX_RECORD {
+        if !metadata.is_file() || metadata.len() > RAW_BYTES as u64 {
             return Err("Session metadata exceeds the saved-record limit".into());
         }
-        if let Some(entry) = self.0.get(path) {
-            if entry.current(stamp, &metadata) {
+        let path = metadata_cache::path(path).ok_or("Search metadata parent is unavailable")?;
+        let path = path.as_path();
+        if let Some(entry) = self.entries.get(path) {
+            if entry.current(stamp, &metadata) && metadata_cache::stamp(&file)? == entry.version {
+                let charge = serde_json::to_vec(&entry.record)
+                    .map_err(|e| e.to_string())?
+                    .len()
+                    + 1;
+                if charge.saturating_add(reserve) > budget.bytes {
+                    return Ok(Record::OverBudget);
+                }
+                if reserve > budget.bytes.saturating_sub(progress.bytes) {
+                    return Ok(Record::Deferred);
+                }
                 return Ok(Record::Ready(entry.record.clone()));
             }
         }
-        let remaining = budget.bytes.saturating_sub(progress.bytes);
-        let required = metadata.len() as usize + 1;
-        if required.saturating_add(reserve) > budget.bytes {
-            // This caller cannot prove it even on a fresh page. Publication
-            // must advance past it with incomplete coverage, not loop forever.
-            return Ok(Record::OverBudget);
-        }
-        if required.saturating_add(reserve) > remaining {
-            // A short slice is not proof that this source has disappeared.
-            return Ok(Record::Deferred);
-        }
-        let mut bytes = Vec::new();
-        let read = file.by_ref().take(required as u64).read_to_end(&mut bytes);
-        progress.bytes += bytes.len();
-        read.map_err(|e| e.to_string())?;
-        let (after, after_metadata) =
-            FileIdentity::with_metadata(&file).map_err(|e| e.to_string())?;
-        if after != stamp
-            || after_metadata.len() != metadata.len()
-            || bytes.len() != metadata.len() as usize
-        {
+        let version = metadata_cache::stamp(&file)?;
+        // A helper can briefly own SQLite's commit/schema lock when this
+        // reader is created. Retry after that cut instead of remaining blind
+        // for every subsequent source in the request. Attempts and the whole
+        // call's existing deadline bound these short waits.
+        self.ensure_cache();
+        let cached = self
+            .cache
+            .as_ref()
+            .and_then(|db| metadata_cache::get(db, path, &version));
+        let record = if let Some(record) = cached {
+            record
+        } else {
+            let raw_limit = if self.foreground {
+                4 << 20
+            } else {
+                BATCH_BYTES
+            };
+            if metadata.len() as usize > raw_limit {
+                return Ok(Record::OverBudget);
+            }
+            if metadata.len() as usize > raw_limit.saturating_sub(self.raw) {
+                return Ok(Record::Deferred);
+            }
+            let before = self.raw;
+            // Cold preparation reads one bounded canonical body transiently.
+            // Only its small projection survives; foreground reads have their
+            // original 4 MiB raw limit and use prepared metadata thereafter.
+            let input = TimedRead {
+                file: &mut file,
+                read: &mut self.raw,
+                until: budget.deadline,
+            };
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            let read = input.take(metadata.len() + 1).read_to_end(&mut bytes);
+            progress.metadata_io += self.raw - before;
+            match read {
+                Ok(_) if bytes.len() == metadata.len() as usize => (),
+                Err(error) if error.kind() == io::ErrorKind::TimedOut => {
+                    return Ok(Record::Deferred)
+                }
+                _ => return Err("Session metadata changed during read".into()),
+            }
+            let Metadata(record) = serde_json::from_slice(&bytes)
+                .map_err(|_| "Session metadata is incomplete or invalid")?;
+            record
+        };
+        if metadata_cache::stamp(&file)? != version {
             return Err("Session metadata changed during read".into());
         }
-        let Metadata(record) = serde_json::from_slice(&bytes)
-            .map_err(|_| "Session metadata is incomplete or invalid")?;
+        let required = serde_json::to_vec(&record)
+            .map_err(|e| e.to_string())?
+            .len()
+            + 1;
+        if required.saturating_add(reserve) > budget.bytes {
+            return Ok(Record::OverBudget);
+        }
+        if required.saturating_add(reserve) > budget.bytes.saturating_sub(progress.bytes) {
+            return Ok(Record::Deferred);
+        }
+        progress.bytes += required;
         let bounded_fields: BTreeMap<_, _> = record
             .as_object()
             .expect("Metadata deserializes an object")
             .iter()
-            .filter(|(key, value)| {
-                !(matches!(key.as_str(), "prompt" | "last_message") && value.is_string())
+            .filter(|(key, value)| match key.as_str() {
+                "prompt" | "last_message" => !value.is_string(),
+                "keep_warm_quiet" => false, // Only public snapshot strings survive decoding.
+                _ => true,
             })
             .collect();
         if serde_json::to_vec(&bounded_fields)
@@ -111,7 +255,10 @@ impl Reader {
         {
             return Err("Session search metadata exceeds its budget".into());
         }
-        self.0.insert(
+        if self.entries.len() >= 32 {
+            self.entries.pop_first();
+        }
+        self.entries.insert(
             path.to_owned(),
             Entry {
                 #[cfg(not(windows))]
@@ -121,6 +268,7 @@ impl Reader {
                 stamp,
                 len: metadata.len(),
                 record: record.clone(),
+                version,
             },
         );
         if Instant::now() >= budget.deadline {
@@ -150,6 +298,15 @@ impl<'de> Deserialize<'de> for Metadata {
                     if needed(&key) {
                         let mut value = map.next_value::<Value>()?;
                         match key.as_str() {
+                            "keep_warm_quiet" => {
+                                let Some(fields) = value.as_object_mut() else {
+                                    continue;
+                                };
+                                fields.retain(|key, value| {
+                                    matches!(key.as_str(), "prompt" | "last_message")
+                                        && value.is_string()
+                                });
+                            }
                             "legacy_shadow" => retain(&mut value, &["name", "run_id"]),
                             "session_clear" => {
                                 retain(&mut value, &["conversation_id", "previous_conversation_id"])
@@ -179,6 +336,8 @@ fn needed(key: &str) -> bool {
     matches!(
         key,
         "version"
+            | "session_id"
+            | "layout"
             | "name"
             | "run_id"
             | "conversation_id"
@@ -191,6 +350,7 @@ fn needed(key: &str) -> bool {
             | "journal_name"
             | "prompt"
             | "last_message"
+            | "keep_warm_quiet"
             | "turn_started"
             | "last_event_at"
             | "updated"
@@ -237,6 +397,28 @@ mod tests {
     }
 
     #[test]
+    fn quiet_public_snapshots_keep_their_projection_and_raw_byte_charge() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("binding.json");
+        let prompt = "p".repeat(RECORD_BYTES + 1);
+        let record = json!({"prompt":"internal prompt","last_message":"internal reply",
+            "keep_warm_quiet":{"prompt":prompt,"last_message":"Earlier public answer",
+                "private_debug":"not public"},"shell_jobs":{"private":"ignored"}})
+        .to_string();
+        fs::write(&path, &record).unwrap();
+        let mut progress = Progress::default();
+        let value = Reader::default()
+            .read(&path, &mut progress, &budget(), 0)
+            .unwrap()
+            .expect_ready();
+        assert_eq!(journal::user_prompt(&value).as_str(), Some(prompt.as_str()));
+        assert_eq!(journal::last_message(&value), "Earlier public answer");
+        assert_eq!(progress.metadata_io, record.len());
+        assert!(value["keep_warm_quiet"].get("private_debug").is_none());
+        assert!(value.get("shell_jobs").is_none());
+    }
+
+    #[test]
     fn shared_reads_skip_jobs_but_recheck_rewrites_and_replacements() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("binding.json");
@@ -249,12 +431,12 @@ mod tests {
             .unwrap()
             .expect_ready();
         assert_eq!(first, json!({"version":1,"run_id":"first"}));
-        assert_eq!(progress.bytes, record.len());
+        assert_eq!(progress.metadata_io, record.len());
         assert_eq!(
             reader.read(&path, &mut progress, &budget(), 0).unwrap(),
             Record::Ready(first)
         );
-        assert_eq!(progress.bytes, record.len());
+        assert_eq!(progress.metadata_io, record.len());
         assert_eq!(progress.files, 2);
 
         // Same inode and length, with a distinct modification stamp.
@@ -271,7 +453,7 @@ mod tests {
             .unwrap()
             .expect_ready();
         assert_eq!(second["run_id"], "other");
-        assert_eq!(progress.bytes, record.len() * 2);
+        assert_eq!(progress.metadata_io, record.len() * 2);
 
         // Atomic replacement is distinct even with the same length and stamp.
         let replacement = temp.path().join("replacement.json");
@@ -303,7 +485,7 @@ mod tests {
         let mut reader = Reader::default();
         fs::File::create(&path)
             .unwrap()
-            .set_len(session_graph::MAX_RECORD + 1)
+            .set_len(RAW_BYTES as u64 + 1)
             .unwrap();
         let mut progress = Progress::default();
         assert!(reader.read(&path, &mut progress, &budget(), 0).is_err());
@@ -347,7 +529,7 @@ mod tests {
                 reader.read(&path, &mut progress, &budget(), 512).unwrap(),
                 Record::Ready(record.clone())
             );
-            assert_eq!(progress.bytes, bytes.len());
+            assert_eq!(progress.metadata_io, bytes.len());
             assert_eq!(progress.files, 1);
 
             let mut short = budget();
@@ -400,7 +582,7 @@ mod tests {
                 .unwrap(),
             Record::Ready(expected)
         );
-        assert_eq!(progress.bytes, bytes.len());
+        assert_eq!(progress.metadata_io, bytes.len());
     }
 
     #[test]
@@ -422,7 +604,7 @@ mod tests {
                     .read(&path, &mut progress, &budget(), 0)
                     .unwrap_err();
                 assert_eq!(error, "Session search metadata exceeds its budget", "{key}");
-                assert_eq!(progress.bytes, bytes.len());
+                assert_eq!(progress.metadata_io, bytes.len());
             }
         }
     }
@@ -449,5 +631,63 @@ mod tests {
                 .expect_ready()["version"],
             2
         );
+    }
+    #[test]
+    fn one_reader_does_not_retain_a_file_handle_for_every_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = Reader::default();
+        let mut progress = Progress::default();
+        let budget = Budget {
+            files: 256,
+            directory_entries: 2000,
+            records: 512,
+            bytes: 4 << 20,
+            deadline: Instant::now() + Duration::from_secs(2),
+        };
+        for n in 0..200 {
+            let path = temp.path().join(format!("{n}.json"));
+            fs::write(
+                &path,
+                json!({"version":1,"name":format!("session-{n}")}).to_string(),
+            )
+            .unwrap();
+            let record = reader
+                .read(&path, &mut progress, &budget, 0)
+                .unwrap()
+                .expect_ready();
+            assert_eq!(record["name"], format!("session-{n}"));
+        }
+        assert!(
+            reader.entries.len() <= 32,
+            "a foreground scan exhausts small descriptor limits"
+        );
+    }
+    #[test]
+    fn bounded_preparation_can_use_more_than_one_record_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut reader = Reader::default();
+        let mut progress = Progress::default();
+        let body =
+            json!({"version":1,"shell_jobs":{"job":{"output":"x".repeat(9<<20)}}}).to_string();
+        for n in 0..8 {
+            let path = temp.path().join(format!("large-{n}.json"));
+            fs::write(&path, &body).unwrap();
+            // Isolate the aggregate raw ceiling from scheduler delays.
+            let budget = Budget {
+                files: 32,
+                directory_entries: 2000,
+                records: 512,
+                bytes: 4 << 20,
+                deadline: Instant::now() + Duration::from_secs(2),
+            };
+            assert_eq!(
+                reader
+                    .read(&path, &mut progress, &budget, 0)
+                    .unwrap()
+                    .expect_ready()["version"],
+                1
+            );
+        }
+        assert_eq!(progress.metadata_io, body.len() * 8);
     }
 }

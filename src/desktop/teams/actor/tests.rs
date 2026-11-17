@@ -74,8 +74,11 @@ use crate::teams::{ops::tests::*, store::Store};
 use zerus_team_plan::model::*;
 mod cancel;
 mod core;
+#[cfg(unix)]
+mod fresh_members;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
+mod publication;
 #[test]
 fn disabled_actor_does_not_create_any_store() {
     let temp = tempfile::tempdir().unwrap();
@@ -220,3 +223,6 @@ mod closed_keys;
 // WhiteWh fork: upstream's Agent Teams run on Linux and macOS only.
 #[cfg(not(windows))]
 mod seats102;
+
+#[cfg(unix)]
+mod legacy_cancel;

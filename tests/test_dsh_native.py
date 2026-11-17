@@ -471,6 +471,7 @@ class NativeHarness(unittest.TestCase):
             data=self.wait(lambda: d if (d:=self.cli('inspect',b))['pending_questions'] else None)
             question=data['pending_questions'][0]
             self.assertFalse(question['questions'][0]['allow_other'])
+            self.assertIs(question.get('blocking'), False)
             self.assertEqual(data['phase'],'input')
             raw=self.rpc('inspect',{'sessionId':b['conversation_id']})
             self.assertFalse(any(r.get('event',{}).get('type')=='approval/decided' for r in raw['page']['records']))
@@ -1132,6 +1133,16 @@ class NativeHarness(unittest.TestCase):
         self.cli('send', b, self.payload(b, text='QUESTION', attachments=[]))
         data = self.wait(lambda: d if (d := self.cli('inspect', b))['pending_questions'] else None)
         question = data['pending_questions'][0]
+        self.assertIsInstance(data.get('question_routing'),dict)
+        self.assertIs(data['question_routing']['send_to_parent'],True)
+        listed=self.hgs('ls','--local','--json')
+        self.assertEqual(listed.returncode,0,listed.stderr)
+        row=next(row for row in json.loads(listed.stdout)['sessions'] if row['name']==b['name'])
+        self.assertEqual(row.get('question_routing'),data['question_routing'])
+        self.assertIs(question.get('blocking'), True)
+        bounded=self.hgs('inspect',b['name'],'--after',str(2**63-1),'--skip-processes')
+        self.assertEqual(bounded.returncode,0,bounded.stderr)
+        self.assertEqual(json.loads(bounded.stdout)['pending_questions'],data['pending_questions'])
         answer = self.payload(b, question_id=question['question_id'], expected_question_hash=question['question_hash'],
                               answers=[{'question_id':'choice','selected_option_ids':['1'],'text':''}])
         self.assertEqual(self.cli('answer', b, answer)['status'], 'answered')
@@ -1139,6 +1150,39 @@ class NativeHarness(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.rpc('answer', {'sessionId':b['conversation_id'],'id':question['question_id'],
                                 'generation':data['host_generation'],'answers':[]})
+
+    def test_question_route_answers_keep_exact_identity_and_durable_no_replay(self):
+        for mode in ('MULTIPLE','PARTS','OTHER'):
+            with self.subTest(mode=mode):
+                b = self.create()
+                self.cli('send',b,self.payload(b,text='QUESTION_'+mode,attachments=[]))
+                data = self.wait(lambda: d if (d:=self.cli('inspect',b))['pending_questions'] else None)
+                [card] = data['pending_questions']
+                self.assertEqual((card['source'],card['answer_transport']),('dsh_native','native_dsh'))
+                self.assertIs(card.get('blocking'),True)
+                items = card['questions']
+                answers = [{'question_id':items[0]['id'],'selected_option_ids':['0'],'text':''}]
+                if mode == 'MULTIPLE':
+                    self.assertIs(items[0]['multi_select'],True)
+                    answers[0]['selected_option_ids']=['0','1']
+                elif mode == 'PARTS':
+                    self.assertEqual(len(items),2)
+                    answers.append({'question_id':items[1]['id'],'selected_option_ids':['1'],'text':''})
+                else:
+                    answers[0].update(selected_option_ids=[],text='A private custom choice')
+                answer=self.payload(b,question_id=card['question_id'],expected_question_hash=card['question_hash'],answers=answers)
+                for key,value in [('expected_run_id','replacement'),('expected_conversation_id','session-replacement'),
+                                  ('question_id','replacement'),('expected_question_hash','changed')]:
+                    refused=self.hgs('answer',b['name'],'--json',request={**answer,key:value})
+                    self.assertNotEqual(refused.returncode,0,refused.stdout)
+                    self.assertEqual(self.cli('inspect',b)['pending_questions'][0]['question_hash'],card['question_hash'])
+                first=self.cli('answer',b,answer)
+                self.assertEqual(first['status'],'answered')
+                self.wait(lambda:not self.cli('inspect',b)['pending_questions'])
+                self.assertEqual(self.cli('answer',b,answer),first)
+                refused=self.hgs('answer',b['name'],'--json',request={**answer,'answers':[]})
+                self.assertNotEqual(refused.returncode,0,refused.stdout)
+                self.assertIn('different content',refused.stderr)
 
     def test_inspect_refuses_an_archive_instead_of_the_live_session(self):
         """zerus-a4mub.33: DeepSeek has no archive inspection, with or without --current-read."""
@@ -1639,6 +1683,49 @@ class NativeInputWitness(unittest.TestCase):
         self.restart()
         found = [e for e in self.searched(sid, token) if e['type'] == 'user/message']
         self.assertEqual([e['seq'] for e in found], [message['seq']], found)
+
+
+@unittest.skipUnless(fixture.required() or DSH and HGS.exists(), 'official dsh and built hgs required')
+class NativeQuestionRouteModes(unittest.TestCase):
+    """Official user-question service modes through a private keyless fixture tool."""
+    setUpClass = NativeHarness.__dict__['setUpClass']
+    tearDownClass = NativeHarness.__dict__['tearDownClass']
+    rpc = NativeHarness.__dict__['rpc']
+    create = NativeHarness.create
+    cli = NativeHarness.cli
+    payload = NativeHarness.payload
+    wait = NativeHarness.wait
+    hgs = NativeHarness.hgs
+
+    def test_timed_question_never_grants_parent_route_authority(self):
+        b=self.create()
+        self.cli('send',b,self.payload(b,text='QUESTION_TIMED',attachments=[]))
+        data=self.wait(lambda:d if (d:=self.cli('inspect',b))['pending_questions'] else None)
+        [card]=data['pending_questions']
+        self.assertIs(card.get('blocking'),False)
+        self.assertTrue(card['can_answer'])
+        self.assertFalse(card['approval'])
+
+    def test_typed_approval_and_plan_questions_stay_person_only(self):
+        for mode in ('APPROVAL','PLAN'):
+            b=self.create()
+            self.cli('send',b,self.payload(b,text='QUESTION_INTENT_'+mode,attachments=[]))
+            data=self.wait(lambda:d if (d:=self.cli('inspect',b))['pending_questions'] else None)
+            [card]=data['pending_questions']
+            self.assertIs(card.get('blocking'),False)
+            # The existing manual card is independent from route authority.
+            self.assertTrue(card['can_answer'])
+
+    def test_explicit_forever_question_keeps_the_qualified_native_answer_path(self):
+        b=self.create()
+        self.cli('send',b,self.payload(b,text='QUESTION_FOREVER',attachments=[]))
+        data=self.wait(lambda:d if (d:=self.cli('inspect',b))['pending_questions'] else None)
+        [card]=data['pending_questions']
+        self.assertIs(card.get('blocking'),True)
+        answer=self.payload(b,question_id=card['question_id'],expected_question_hash=card['question_hash'],
+                            answers=[{'question_id':'choice','selected_option_ids':['0'],'text':''}])
+        self.assertEqual(self.cli('answer',b,answer)['status'],'answered')
+        self.wait(lambda:not self.cli('inspect',b)['pending_questions'])
 
 
 if __name__ == '__main__':

@@ -16,11 +16,37 @@ from unittest.mock import patch
 REPO = Path(__file__).resolve().parents[1]
 HGS = Path(os.environ.get('HGS_TEST_BIN', REPO / 'target/debug/hgs')).resolve()
 SSH = r'''#!/usr/bin/env python3
-import json, os, pathlib, shlex, stat, subprocess, sys, time
-if sys.argv[-1].startswith('echo "hgs-remote-v2|'): print('hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
+import base64, json, os, pathlib, re, shlex, stat, struct, subprocess, sys, tempfile, time
 root = pathlib.Path(os.environ['MOBILE_PEERS_TEST_ROOT'])
 alias = sys.argv[-2]
-args = shlex.split(sys.argv[-1])[1:]
+windows = (root / ('windows-' + alias)).exists()
+if sys.argv[-1].startswith('echo "hgs-remote-v2|'):
+    print(r'hgs-remote-v2|%OS%|%SystemRoot%|Windows_NT|C:\Windows' if windows else 'hgs-remote-v2|%OS%|%SystemRoot%|:OS|:SystemRoot'); sys.exit(0)
+if windows:
+    # Exercise the real Linux gateway's Windows argv encoding and stdin frames.
+    # Actual Windows target execution is covered by mobile_target_contract.rs.
+    encoded = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", sys.argv[-1]).group(1)
+    script = base64.b64decode(encoded).decode('utf-8')
+    arguments = re.search(r"FromBase64String\('([A-Za-z0-9+/=]+)'\)", script).group(1)
+    args = json.loads(base64.b64decode(arguments))
+    def exact(count):
+        data = bytearray()
+        while len(data) < count:
+            chunk = sys.stdin.buffer.read(count - len(data))
+            if not chunk: raise RuntimeError('private framed input ended early')
+            data.extend(chunk)
+        return data
+    payload = bytearray()
+    while True:
+        size = struct.unpack('<I', exact(4))[0]
+        if size == 0xffffffff: continue
+        if size == 0: break
+        if size > 65536 or len(payload) + size > 33 * 1024 * 1024: raise RuntimeError('private frame bound')
+        payload.extend(exact(size))
+    native_input = tempfile.TemporaryFile()
+    native_input.write(payload); native_input.seek(0); os.dup2(native_input.fileno(), 0)
+else:
+    args = shlex.split(sys.argv[-1])[1:]
 with (root / 'calls').open('a') as file:
     file.write(json.dumps([alias, args]) + '\n')
 if (root / ('offline-' + alias)).exists():
@@ -125,6 +151,27 @@ class MobilePeers(unittest.TestCase):
     def calls(self):
         path = self.root / 'calls'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def test_windows_target_is_projected_with_another_direct_peer_and_keeps_its_own_identity(self):
+        (self.root / 'windows-b').touch()
+        path = self.root / 'a/machines.local.json'
+        machines = json.loads(path.read_text())
+        machines['machines']['d']['enabled'] = True
+        path.write_text(json.dumps(machines))
+        result = self.call('a', 'mobile-peers', '--json').json()
+        self.assertEqual([(p['via'], p['machine_id'], p['online'], p['identity']) for p in result['peers']],
+                         [('b', self.ids['b'], True, 'verified'), ('d', self.ids['d'], True, 'verified')])
+        self.assertNotEqual(result['local']['machine_id'], self.ids['b'])
+        page = self.call('a', 'mobile-peer', '--json',
+                         data=self.request(['archives', '--json'], payload={'query': 'Windows-shaped direct route', 'limit': 1})).json()
+        self.assertEqual(page['query'], 'Windows-shaped direct route')
+        refused = self.call('a', 'mobile-peer', '--json',
+                            data=self.request(['--help'], target=self.ids['d']), ok=False)
+        self.assertIn('identity changed', refused.stderr)
+        self.assertFalse(any(peer == 'c' for peer, _ in self.calls()), 'discovery stays one-hop')
+        machines['machines']['b']['enabled'] = False
+        path.write_text(json.dumps(machines))
+        self.assertEqual([p['via'] for p in self.call('a', 'mobile-peers', '--json').json()['peers']], ['d'])
 
     @staticmethod
     def running(pid):

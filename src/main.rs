@@ -12,8 +12,12 @@ mod host;
 mod machines;
 mod macos_session;
 mod metrics;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod mobile_peers;
+// The target-side ABI must be compiled on Windows too. Native integration
+// tests exercise its identity, closed dispatch and private payload input.
+#[cfg(all(test, windows))]
+const _: fn(&config::Config, &[String]) -> cli::Result<i32> = mobile_peers::dispatch;
 mod native_ui;
 mod path_info;
 mod phones;

@@ -313,3 +313,82 @@ fn a_busy_store_code_is_never_a_refusal() {
     assert!(refusal(&Error::new(RULE, "rule")));
     assert!(refusal(&Error::new(PROJECT_LIMIT_CODE, "limit")));
 }
+
+#[test]
+fn proof_busy_before_reservation_retains_its_retryable_cause() {
+    let error = super::replica(zerus_replica::Error::busy("proof busy; try again"));
+    let error = super::not_started(error);
+    assert_eq!(error.code, super::STORE_BUSY_CODE);
+    assert!(!super::refusal(&error));
+}
+
+#[test]
+fn final_reservation_rechecks_hold_under_project_and_teams_custody() {
+    use std::time::Duration;
+    use zerus_replica::{Position, ProjectStore, Stage, Target};
+    let mut h = Harness::new();
+    let lead = h.bind("lead");
+    h.bind("m1");
+    let home = h.store.team(TEAM).unwrap().unwrap().home;
+    let ops::Actor::Session { session, .. } = lead else {
+        unreachable!()
+    };
+    let actor = Actor::Agent(zerus_replica::SessionKey {
+        machine: session.machine,
+        session_id: session.session_id,
+        session: "codex/private-final-reservation".into(),
+    });
+    let tasks = ProjectStore::open(&h.temp.path().join("replica"), "example-project").unwrap();
+    let mut task = tasks
+        .new_task(
+            "A held reservation control",
+            Stage::Todo,
+            Target::Any,
+            Actor::Person,
+            &Position::End,
+            "example",
+            1234,
+        )
+        .unwrap();
+    let reference = zerus_team_plan::model::TaskRef {
+        project: "example-project".into(),
+        uuid: task.uuid().into(),
+    };
+    tasks.save(&mut task).unwrap();
+    drop(tasks);
+    // The independently bound lead uses the unchanged Session intake writer.
+    let intake = crate::teams::tasks::send(
+        &crate::teams::tasks::Caller {
+            state: h.temp.path(),
+            machine: &home,
+            actor,
+        },
+        &reference,
+        TEAM,
+        None,
+        None,
+    )
+    .unwrap();
+    let node = intake.node.unwrap();
+    let body = Input {
+        schema: 1,
+        id: h.intent(node, "m1"),
+        team: TEAM.into(),
+        node,
+        member: "m1".into(),
+    };
+    let tasks = ProjectStore::open(&h.temp.path().join("replica"), "example-project").unwrap();
+    let mut project = tasks
+        .admit_until(Instant::now() + Duration::from_secs(30))
+        .unwrap();
+    let task = project.load(&reference.uuid).unwrap();
+    let bound = task.view().unwrap();
+    let old = permit(&h.store, &body, &home).unwrap();
+    let admitted = Store::open(h.temp.path()).unwrap().admission().unwrap();
+    assert!(permit_for_reservation(&admitted, &body, &home, &old, &bound, &task).is_ok());
+    drop(admitted);
+    h.run(&person(), ops::Operation::Hold { node }).unwrap();
+    let admitted = Store::open(h.temp.path()).unwrap().admission().unwrap();
+    assert!(permit_for_reservation(&admitted, &body, &home, &old, &bound, &task).is_err());
+    assert!(task.attempt(&body.id).unwrap().is_none());
+}

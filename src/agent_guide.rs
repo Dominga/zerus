@@ -36,6 +36,11 @@ const TOPICS: &[(&str, &str)] = &[
     ("tasks", include_str!("agent_guide/tasks.md")),
     ("team", include_str!("agent_guide/team.md")),
     ("team-lead", include_str!("agent_guide/team-lead.md")),
+    ("team-rework", include_str!("agent_guide/team-rework.md")),
+    (
+        "team-planning",
+        include_str!("agent_guide/team-planning.md"),
+    ),
 ];
 /// Task 166: the lead's page is one readable page of plain prose with worked
 /// examples, 4 to 6 KB (also in a CRLF checkout); every other page keeps 2400.

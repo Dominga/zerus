@@ -13,15 +13,21 @@
 pub mod accounts;
 pub mod builtin;
 pub mod catalog;
+pub mod draft;
 pub mod graph;
+pub mod member;
 pub mod model;
+pub mod observed_timing;
 pub mod overlap;
+pub mod phase_control;
 pub mod pipeline;
 pub mod problem;
 pub mod ready;
+pub mod settings;
 #[cfg(test)]
 mod testkit;
 pub mod validate;
+pub mod validation;
 
 pub use builtin::builtin;
 pub use catalog::{

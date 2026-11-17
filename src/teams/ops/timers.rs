@@ -8,7 +8,7 @@ mod attempts;
 mod cancel;
 mod terminal;
 pub(super) use answers::{drop_marks, mark_answer};
-pub(super) use attempts::{conflict, person_attempt, remember, take_over};
+pub(super) use attempts::{conflict, person_attempt, remember, supersedes_accepted, take_over};
 pub(super) use cancel::record_cancel;
 pub(super) use terminal::{key_clear, late_session};
 
@@ -47,7 +47,7 @@ pub(super) fn fire(ctx: &mut Context<'_>) -> Result<()> {
     let (target, seq) = match made {
         Made::Item(kind, text) => ("inbox", ctx.inbox(node, kind, &text)?),
         // Nothing reads the decision of a timer's card: acknowledged alone.
-        Made::Card(kind, text) => ("card", talk::card(ctx, kind, &text, Some(node), None, &[], &[])?),
+        Made::Card(kind, text) => ("card", talk::card(ctx, kind, &text, (node != 0).then_some(node), None, &[], &[])?),
     };
     ctx.db.execute("UPDATE timer_firings SET target=?6,seq=?7 WHERE team=?1 AND kind=?2 AND node=?3 AND generation=?4 AND item=?5",params![ctx.team.id,kind,node,generation,subject,target,seq]).map_err(storage)?;
     ctx.reply.node = Some(node);
@@ -171,9 +171,10 @@ fn silent(ctx: &Context<'_>, node: u32, generation: u32, item: u64, since: i64) 
     let wait = i64::from(minutes) * 60_000;
     elapsed(ctx, created, wait, "The item has not waited long enough.")?;
     elapsed(ctx, since, wait, "The lead was not seen idle long enough.")?;
+    let subject = if node == 0 { "the team queue".to_owned() } else { format!("task {node}") };
     Ok(Made::Card(
         "silent_lead",
-        format!("The lead has not worked for {minutes} minutes while its inbox waits, oldest about task {node}."),
+        format!("The lead has not worked for {minutes} minutes while its inbox waits, oldest about {subject}."),
     ))
 }
 

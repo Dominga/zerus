@@ -1,0 +1,101 @@
+diff --git a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+index 8a72e7d75..e8b0878be 100644
+--- a/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
++++ b/mobile/android/app/src/main/java/app/zerus/mobile/ZerusViewModel.kt
+@@ -3364,26 +3364,41 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         if (intent != null) continuationEnqueuing = intent.requestId
+         val id = UUID.randomUUID().toString(); val at = System.currentTimeMillis() / 1000.0
+         preparingTargets += target.key; deliveryFlights += id
+-        val frozen=if(original.attachments.isEmpty()) captureSendIntent(target,id,original.text,expectedCompactionId.takeIf { it.isNotBlank() }) else null
+-        val written = try { durable({ state -> state.enqueue(original, id, at, frozen) }, { state, committed -> MessageChanges.enqueueAcknowledged(state, original, committed, id) }) }
++        var preparedPayload:JSONObject?=null
++        var nativeIntent:NativeSendIntent?=null
++        if(nativeOutcomeSupported(target) && target.agentId.isEmpty() && target.archiveId.isEmpty() && sessions.singleOrNull { it.target==target }?.agent in setOf("claude","codex","kimi")) {
++            try {
++                val payload=target.json().put("request_id",id).put("text",original.text).put("attachments",attachmentStore.payload(original.attachments))
++                if(expectedCompactionId.isNotEmpty()) payload.put("expected_compaction_id",expectedCompactionId)
++                val row=OutgoingMessage(id,target,original.text,original.attachments,at)
++                nativeIntent=captureNativeSendIntent(row,payload)
++                if(nativeIntent!=null) preparedPayload=payload
++            } catch(e:Exception) {
++                error=SendSettlement.localReason(e) ?: "The saved message was not sent. Review it before trying again."
++                deliveryFlights-=id;preparingTargets-=target.key;continuationEnqueuing="";cancelCompactContinuation();return@launch
++            }
++        }
++        val frozen=if(nativeIntent==null && original.attachments.isEmpty()) captureSendIntent(target,id,original.text,expectedCompactionId.takeIf { it.isNotBlank() }) else null
++        val written = try { durable({ state -> state.enqueue(original, id, at, frozen, nativeIntent) }, { state, committed -> MessageChanges.enqueueAcknowledged(state, original, committed, id) }) }
+         catch (e: Exception) { error = "Could not save the outgoing message. It was not sent. Your composition is preserved."; deliveryFlights -= id; syncOutgoing(); preparingTargets -= target.key; continuationEnqueuing = ""; cancelCompactContinuation(); return@launch }
+         preparingTargets -= target.key
+         val message = written.outgoing.first { it.requestId == id }
+         lastOwnSend = target to id
+         val send = OutgoingSend(SendAttempt(),
+             submit = { evidence ->
+-                val files = attachmentStore.payload(message.attachments)
++                val files = if(preparedPayload==null) attachmentStore.payload(message.attachments) else JSONArray()
+                 check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
+                 if (intent != null) {
+                     val cleared = written.drafts.first { it.key == original.key }
+                     check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
+                         ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
+                 }
+-                val payload = message.sendIntent?.let { saved -> saved.value()?.getJSONObject("payload") ?: throw IllegalStateException("The saved message details are unavailable. Review this message.") }
++                val payload = preparedPayload ?: message.sendIntent?.let { saved -> saved.value()?.getJSONObject("payload") ?: throw IllegalStateException("The saved message details are unavailable. Review this message.") }
+                     ?: target.json().put("request_id", id).put("text", message.text).put("attachments", files).also {
+                         if (expectedCompactionId.isNotBlank()) it.put("expected_compaction_id", expectedCompactionId)
+                     }
+-                submitOutgoing(api, connection, target, payload, id, evidence)
++                check(message.nativeSendIntent==null || message.nativeSendIntent.matches(message)) { "The saved message details are unavailable. Review this message." }
++                submitOutgoing(api, connection, target, payload, id, evidence, message.nativeSendIntent)
+             },
+             await = { initial -> api.await(connection, initial) },
+             settle = { receipt -> settleOutgoing(message, receipt) },
+@@ -3394,6 +3409,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+             release = { api.releaseReservedOutgoing(connection, id) })
+         try { send.run() } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
+     }
++    private fun nativeOutcomeSupported(target:Target)=NativeSendOutcome.supported(relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
++    private fun captureNativeSendIntent(row:OutgoingMessage,payload:JSONObject):NativeSendIntent? {
++        val target=row.target
++        if(!fresh(target)) return null
++        val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
++        val machine=SendReceiptRecovery.machine(machines,target) ?: return null
++        val source=sessions.singleOrNull { it.target==target } ?: return null
++        val encoding=SendReceiptRecovery.encoding(connection.protocolVersion,machine.route) ?: return null
++        return NativeSendOutcome.freeze(row,payload,source.agent,machine.machineId,source.raw.string("session_id"),encoding)
++    }
+     private fun captureSendIntent(target:Target,id:String,text:String,compactionId:String?=null):SendIntent? {
+         val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
+         val machine=SendReceiptRecovery.machine(machines,target) ?: return null
+@@ -3402,6 +3427,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         return SendReceiptRecovery.freeze(target,id,text,source.agent,machine.machineId,source.raw.string("session_id"),encoding,compactionId)
+     }
+     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject, deadlineMs:Long?=null) {
++        if(message.nativeSendIntent!=null) {
++            try { durable({ NativeSendOutcome.settleReceipt(it,message,receipt,deadlineMs ?: Long.MAX_VALUE,SendReceiptRecovery.nowMs()) }) }
++            catch(_:Exception) { error="Could not save the delivery result. Check its receipt; the outgoing message remains recoverable." }
++            if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
++            return
++        }
+         val result = receipt.optJSONObject("result"); val state = receipt.string("state")
+         val proof=if(result!=null) message.originalSendIntent()?.let { SendReceiptRecovery.acknowledgement(it,result) } else null
+         val strict=message.hasOriginalSendIdentity && SendReceiptRecovery.supported(relayOperations[message.target.connectionId],machineOperations[MachineKey(message.target.connectionId,message.target.computerId)])
+@@ -3422,13 +3453,17 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
+         receiptFlights += flight
+         try {
+             val supported=SendReceiptRecovery.supported(relayOperations[message.target.connectionId],machineOperations[MachineKey(message.target.connectionId,message.target.computerId)])
+-            val intent=if(!supported) null else if(message.hasOriginalSendIdentity) message.originalSendIntent() else captureSendIntent(message.target,message.requestId,message.text)
+-            when(val checked=api.checkDelivery(connection,message,intent)) {
++            val intent=if(message.nativeSendIntent!=null || !supported) null else if(message.hasOriginalSendIdentity) message.originalSendIntent() else captureSendIntent(message.target,message.requestId,message.text)
++            when(val checked=api.checkDelivery(connection,message,intent,nativeOutcomeSupported=nativeOutcomeSupported(message.target))) {
+                 is SendReceiptCheck.Original -> settleOutgoing(message,checked.receipt,checked.deadlineMs)
+                 is SendReceiptCheck.Native -> {
+                     durable({ current -> SendReceiptRecovery.settle(current,message,checked.intent,checked.proof,checked.deadlineMs,SendReceiptRecovery.nowMs()) })
+                     if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
+                 }
++                is SendReceiptCheck.Outcome -> {
++                    durable({ NativeSendOutcome.settle(it,message,checked.proof,checked.deadlineMs,SendReceiptRecovery.nowMs()) })
++                    if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
++                }
+                 SendReceiptCheck.Unconfirmed -> if(!automatic) error="Delivery is still unconfirmed. The original message remains saved."
+             }
+         }

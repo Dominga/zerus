@@ -10,6 +10,9 @@ mod catalog_cmd;
 mod commands;
 mod create;
 mod input;
+mod observed_timing;
+mod phases;
+mod provider_settings;
 mod reads;
 #[cfg(test)]
 mod tests;
@@ -19,13 +22,46 @@ use serde_json::{json, Value};
 use zerus_team_plan::problem::code;
 use zerus_team_plan::Problem;
 
-pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|import|export | template list|show|save|import|export|remove | create --template ID | list|waiting|status|inbox|queue|cards|journal [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | current | settings|pause|resume|stop|archive|decide|admit|route|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member (JSON on stdin)";
+pub(super) const USAGE: &str = "usage: hgs team preview on|off|status | catalog show|snapshot|receipt|import|export | template list|show|save|import|export|remove | create|start-planning --template ID | list|waiting|status|base|inbox|queue|cards|journal|phases [--team ID] [--limit 1..200] [--after CURSOR] [--bundle] | phase --team ID --phase N | observed --team ID --phase N [--node N] [--window-ms N] [--limit 1..200] [--after CURSOR] | journal --recorded-timings [same page flags] [--timing-seqs IDS] | current | validation-config (JSON read) | advance-base|validation-settings|settings|pause|resume|stop|archive|decide|admit|route|set-deps|set-phase-barrier|pause-phase|resume-phase|move-phase|set-phase-acceptance|submit-draft-phase|edit-draft-phase|approve-phase|reject-phase|undo-reject-phase|accept-phase|send-back-phase|submit-phase-corrections|edit-phase-corrections|approve-phase-corrections|reject-phase-corrections|undo-phase-correction-rejection|accept|return|reassign|hold|release|cancel|reply|ask|verdict|pause-member|resume-member|stop-member|archive-member|add-member|swap-member|rename-team|set-goal (JSON on stdin)";
 
 /// The running command. `args` are the words after `team`; `provided` is a
 /// test's stdin, and `None` reads this command's own stdin when it needs one.
 pub(super) fn dispatch(config: &Config, args: &[String]) -> (Value, i32) {
+    let words = input::words(args);
+    // None of these commands has an independent Session alternative. Refuse
+    // before caller inspection; neither detachment nor a different state root
+    // can supply a window gesture. The writer repeats this boundary too.
+    if words.first().is_some_and(|word| {
+        matches!(
+            word.as_str(),
+            "create"
+                | "start-planning"
+                | "advance-base"
+                | "validation-settings"
+                | "decide"
+                | "settings"
+                | "add-member"
+                | "swap-member"
+                | "rename-team"
+                | "set-goal"
+                | "set-deps"
+                | "set-phase-acceptance"
+                | "stop"
+                | "archive"
+                | "stop-member"
+                | "archive-member"
+        )
+    }) {
+        return refusal(crate::desktop::teams::person_actions::required());
+    }
     let caller = crate::teams::caller::caller(config);
-    run(config, &caller, &input::words(args), None)
+    let mutation = words
+        .first()
+        .is_some_and(|word| commands::variant(word).is_some());
+    if mutation && matches!(caller, actor::Caller::Person) {
+        return refusal(crate::desktop::teams::person_actions::required());
+    }
+    run(config, &caller, &words, None)
 }
 
 fn run(
@@ -53,7 +89,12 @@ fn execute(
     match command.as_str() {
         "catalog" | "template" => catalog_cmd::run(config, caller, command, rest, provided),
         "create" => commands::create(config, caller, rest, provided),
+        "start-planning" => create::run_kind(config, caller, rest, provided, true),
+        "validation-config" => provider_settings::read(config, caller, rest, provided),
         "status" => reads::status(config, caller, rest),
+        "observed" => observed_timing::read(config, caller, rest),
+        "base" => reads::base(config, caller, rest),
+        "phases" | "phase" => phases::read(config, caller, command, rest),
         "list" => reads::list_teams(config, caller, rest),
         "waiting" => reads::waiting(config, caller, rest),
         "inbox" | "queue" | "cards" | "journal" => reads::list(config, caller, command, rest),
@@ -120,11 +161,12 @@ fn problem_reply(mut problem: Problem, read: bool) -> (Value, i32) {
 fn is_read(args: &[String]) -> bool {
     match args.first().map(String::as_str) {
         Some(
-            "status" | "list" | "waiting" | "inbox" | "queue" | "cards" | "journal" | "current",
+            "validation-config" | "status" | "base" | "list" | "waiting" | "inbox" | "queue"
+            | "cards" | "journal" | "current" | "phases" | "phase" | "observed",
         ) => true,
         Some("catalog" | "template") => matches!(
             args.get(1).map(String::as_str),
-            Some("show" | "list" | "export")
+            Some("show" | "list" | "export" | "snapshot" | "receipt")
         ),
         _ => false,
     }

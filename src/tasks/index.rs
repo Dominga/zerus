@@ -22,12 +22,12 @@ use std::path::Path;
 use std::time::Duration;
 use zerus_replica::{ids, Inventory, TaskFile};
 
-/// v2 (ROWS 5): rows carry their owner session for session-filtered pages
-/// (zerus-cg5h.26). A new file, not a new version of v1: an older hgs keeps
+/// v3 (ROWS 6): full search text alongside the bounded task preview.
+/// A new file, not a new version of v2: an older hgs keeps
 /// rebuilding any index not of its own schema, so sharing one file would make
 /// an old and a new binary rebuild it in turn. Each keeps its own; this code
-/// never opens, migrates or removes task-index-v1.sqlite3.
-const FILE: &str = "task-index-v2.sqlite3";
+/// never opens, migrates or removes the older index files.
+const FILE: &str = "task-index-v3.sqlite3";
 /// 2: the histories of recently read tasks as well (slice B). 3: rows and
 /// history headers carry the task's execution (zerus-cg5h.4), so rows cached
 /// without it are built again rather than mixed with rows that have it.
@@ -35,7 +35,8 @@ const FILE: &str = "task-index-v2.sqlite3";
 /// 5: rows carry their owner session and whether they are unassigned, and
 /// each loaded task's inventory version and whether it is Done; the meta
 /// holds the project document's version (zerus-cg5h.26, zerus-cg5h.21).
-const ROWS: i64 = 5;
+/// 6: normalized full task text, title and short reference for search.
+const ROWS: i64 = 6;
 /// The index's version: its rows' shape and the replica's mark format, since
 /// a row remembers whether its task loaded, which the mark decides. An index
 /// made under another mark rule (before the seal, for one) is built again.
@@ -44,7 +45,7 @@ const SCHEMA: i64 = ROWS * 1000 + zerus_replica::MARK_FORMAT;
 /// the store's inventory does, repairing a lowered execution schema first
 /// (zerus-cg5h.21). Rows of an index without it are read again once; the
 /// row shape is unchanged, so this needs no other index file.
-const DERIVED: &str = "repaired-1";
+const DERIVED: &str = "repaired-2-proof-budget";
 /// The histories kept: the most recently read tasks.
 const HISTORIES: i64 = 16;
 /// The one-task history cache this index replaces.
@@ -189,7 +190,9 @@ fn stamped(dir: &Path, uuid: &str, now: i64) -> (String, bool) {
     let (snapshot, a) = stamp_at(&tasks.join(format!("{uuid}.loro")), now);
     let (updates, b) = stamp_at(&tasks.join(format!("{uuid}.updates")), now);
     let (mark, c) = link_stamp_at(&tasks.join(format!("{uuid}.managed")), now);
-    (format!("{snapshot}|{updates}|{mark}"), a && b && c)
+    let (cutover, d) = link_stamp_at(&tasks.join(format!("{uuid}.cutover")), now);
+    let (prepare, e) = link_stamp_at(&tasks.join(format!("{uuid}.prepare")), now);
+    (format!("{snapshot}|{updates}|{mark}|{cutover}|{prepare}"), a && b && c && d && e)
 }
 
 fn files(dir: &Path, uuid: &str) -> String {
@@ -201,7 +204,7 @@ fn files(dir: &Path, uuid: &str) -> String {
 /// missing without a lookup. A file written after the listing is found by a
 /// later check.
 fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
-    let mut parts: BTreeMap<String, [String; 3]> = BTreeMap::new();
+    let mut parts: BTreeMap<String, [String; 5]> = BTreeMap::new();
     for entry in fs::read_dir(dir.join("tasks"))? {
         let entry = entry?;
         let name = entry.file_name();
@@ -213,10 +216,12 @@ fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
             TaskFile::Snapshot => 0,
             TaskFile::Updates => 1,
             TaskFile::Mark => 2,
+            TaskFile::Cutover => 3,
+            TaskFile::Prepare => 4,
         };
-        parts.entry(uuid.to_owned()).or_insert_with(|| [MISSING.into(), MISSING.into(), MISSING.into()])[slot] = stamp;
+        parts.entry(uuid.to_owned()).or_insert_with(|| std::array::from_fn(|_|MISSING.into()))[slot] = stamp;
     }
-    Ok(parts.into_iter().map(|(uuid, [snapshot, updates, mark])| (uuid, format!("{snapshot}|{updates}|{mark}"))).collect())
+    Ok(parts.into_iter().map(|(uuid, [snapshot, updates, mark, cutover, prepare])| (uuid, format!("{snapshot}|{updates}|{mark}|{cutover}|{prepare}"))).collect())
 }
 
 /// A listed task file's metadata as `stamped` reads it: the mark's own
@@ -225,11 +230,11 @@ fn listed(dir: &Path) -> Outcome<BTreeMap<String, String>> {
 /// elsewhere the listing's own metadata may lag a write, so it is not used.
 fn listed_metadata(entry: &fs::DirEntry, file: TaskFile) -> std::io::Result<fs::Metadata> {
     #[cfg(unix)]
-    if file == TaskFile::Mark || entry.file_type().is_ok_and(|t| !t.is_symlink()) {
+    if matches!(file,TaskFile::Mark|TaskFile::Cutover|TaskFile::Prepare) || entry.file_type().is_ok_and(|t| !t.is_symlink()) {
         return entry.metadata();
     }
     match file {
-        TaskFile::Mark => fs::symlink_metadata(entry.path()),
+        TaskFile::Mark|TaskFile::Cutover|TaskFile::Prepare => fs::symlink_metadata(entry.path()),
         _ => fs::metadata(entry.path()),
     }
 }
@@ -298,11 +303,14 @@ fn cached_row(raw: &str, listed: &Listed, stage: Stage) -> Outcome<Value> {
 
 /// What the index keeps of one task.
 enum Derived {
+    /// A retryable read, never a cache row or an absent/damaged task.
+    Busy,
     Row {
         stage: &'static str,
         rank: String,
         id: String,
         row: String,
+        search: String,
         sends: Vec<i64>,
         held: Option<Held>,
     },
@@ -364,6 +372,7 @@ fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
     let damaged = |error: String, held| Derived::Damaged(cut(&error, ERROR_BYTES).to_owned(), held);
     let task = match loaded {
         Ok(task) => task,
+        Err(error) if error.kind() == zerus_replica::ErrorKind::Busy => return Derived::Busy,
         Err(error) => return damaged(error.to_string(), None),
     };
     let held = held(&task);
@@ -384,6 +393,7 @@ fn derive_from(loaded: zerus_replica::Result<TaskDoc>) -> Derived {
             stage,
             rank,
             id,
+            search: search_text(&row),
             row: capped(row).to_string(),
             sends,
             held,
@@ -447,18 +457,57 @@ pub(super) struct Page {
 #[derive(Clone, Debug)]
 pub(super) struct Scope {
     owner: String,
+    query: Option<String>,
 }
 
 impl Scope {
     pub(super) fn new(machine: &str, session_id: &str) -> Self {
-        Self { owner: owner_key(machine, session_id) }
+        Self {
+            owner: owner_key(machine, session_id),
+            query: None,
+        }
+    }
+
+    /// A literal, Unicode case-insensitive query, optionally within a session.
+    /// A qualified task reference uses this project's catalog name.
+    pub(super) fn searched(owner: Option<Self>, query: &str, project_name: &str) -> Self {
+        let query = query.trim().to_lowercase();
+        let prefix = format!("{}/", project_name.to_lowercase());
+        let query = query
+            .strip_prefix(&prefix)
+            .filter(|q| q.starts_with("t-"))
+            .unwrap_or(&query)
+            .to_owned();
+        Self {
+            owner: owner.map_or_else(String::new, |s| s.owner),
+            query: Some(query),
+        }
+    }
+
+    /// Search cursors cannot be reused for another query or session scope.
+    pub(super) fn cursor_project(&self, project: &str) -> String {
+        match &self.query {
+            Some(query) => format!("{project}\nsearch\n{}\n{query}", self.owner),
+            None => project.to_owned(),
+        }
     }
 
     /// Whether `row` (a listed task) belongs to this session's view.
     pub(super) fn includes(&self, row: &Value) -> bool {
         let (owner, unassigned) = owner_of_value(row);
-        unassigned || owner.as_deref() == Some(self.owner.as_str())
+        (self.owner.is_empty() || unassigned || owner.as_deref() == Some(self.owner.as_str()))
+            && self
+                .query
+                .as_ref()
+                .is_none_or(|query| search_text(row).contains(query))
     }
+}
+
+fn search_text(row: &Value) -> String {
+    ["id", "title", "text"]
+        .map(|key| row[key].as_str().unwrap_or(""))
+        .join("\n")
+        .to_lowercase()
 }
 
 fn owner_key(machine: &str, session_id: &str) -> String {
@@ -633,7 +682,7 @@ fn connect(dir: &Path) -> Outcome<Connection> {
             CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE tasks(uuid TEXT NOT NULL UNIQUE, files TEXT NOT NULL, stage TEXT, rank TEXT,
                 short_id TEXT, row TEXT, error TEXT, checked INTEGER NOT NULL, trusted INTEGER NOT NULL,
-                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER, repaired INTEGER);
+                owner TEXT, unassigned INTEGER NOT NULL DEFAULT 0, version TEXT, done INTEGER, repaired INTEGER, search TEXT);
             CREATE INDEX tasks_order ON tasks(stage, rank, uuid);
             CREATE INDEX tasks_owner ON tasks(owner, stage, rank, uuid);
             CREATE INDEX tasks_unassigned ON tasks(stage, rank, uuid) WHERE unassigned = 1;
@@ -712,6 +761,60 @@ impl<'a> Index<'a> {
             .db
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// A disposable round-robin hint. The SQL range reads at most 32 rows,
+    /// including damaged rows, and advances even when none is a candidate.
+    /// The native worker must re-read and prove the actual document/root.
+    pub(super) fn cutover_candidate(&mut self) -> Outcome<Option<String>> {
+        let after = self
+            .meta("cutover_cursor")?
+            .filter(|id| ids::is_uuid(id))
+            .unwrap_or_default();
+        let rows: Vec<(String, Option<String>, Option<String>, String)> = {
+            let mut query = self.db.prepare(
+                "SELECT uuid,row,error,files FROM tasks WHERE uuid>?1 ORDER BY uuid LIMIT 32",
+            )?;
+            let rows = query.query_map([after], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let candidate = rows.iter().find_map(|(uuid, row, error, files)| {
+            if !ids::is_uuid(uuid) {
+                return None;
+            }
+            // A pin-before-save or confirmed-save-before-cleanup cut can
+            // leave a damaged/ready row with an exact pending original.
+            if files
+                .split('|')
+                .nth(4)
+                .is_some_and(|stamp| stamp != MISSING)
+            {
+                return Some(uuid.clone());
+            }
+            if error.is_some() {
+                return None;
+            }
+            let value: Value = serde_json::from_str(row.as_deref()?).ok()?;
+            value["schema"]
+                .as_i64()
+                .is_some_and(|schema| (1..zerus_replica::TASK_SCHEMA).contains(&schema))
+                .then(|| uuid.clone())
+        });
+        let next = candidate
+            .as_ref()
+            .or_else(|| rows.last().map(|(uuid, _, _, _)| uuid));
+        if let Some(next) = next {
+            self.db.execute(
+                "INSERT OR REPLACE INTO meta VALUES('cutover_cursor',?1)",
+                [next],
+            )?;
+        } else {
+            self.db
+                .execute("DELETE FROM meta WHERE key='cutover_cursor'", [])?;
+        }
+        Ok(candidate)
     }
 
     /// The index's place in the journal, the task folder's stamp and the
@@ -941,7 +1044,7 @@ impl<'a> Index<'a> {
                     let (stamps, now) = match known {
                         Some(known) => (
                             known.stamps.get(uuid).cloned(),
-                            known.listed.get(uuid).cloned().unwrap_or_else(|| format!("{MISSING}|{MISSING}|{MISSING}")),
+                            known.listed.get(uuid).cloned().unwrap_or_else(|| [MISSING;5].join("|")),
                         ),
                         None => (self.stored(uuid)?.map(|s| s.0), stamped(&dir, uuid, read_at).0),
                     };
@@ -954,6 +1057,7 @@ impl<'a> Index<'a> {
                 // A repair saves the task: its row keeps the stamps taken
                 // with that read, and a task whose files are gone has none.
                 let (derived, (now, trusted)) = derive(self.store, uuid, || stamped(&dir, uuid, read_at));
+                if matches!(derived, Derived::Busy) { return Err(Failure::Other); }
                 let derived = (!gone(&now)).then_some(derived);
                 // Read again to the same row: only its stamps and time change.
                 let same = match (&derived, &stored) {
@@ -990,6 +1094,7 @@ impl<'a> Index<'a> {
                 tx.execute("DELETE FROM entries WHERE uuid=?1", [uuid])?;
                 match derived {
                     None => (),
+                    Some(Derived::Busy) => return Err(Failure::Other),
                     Some(Derived::Damaged(error, held)) => {
                         let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
@@ -998,14 +1103,22 @@ impl<'a> Index<'a> {
                             params![uuid, files, error, checked, trusted, version, done, epoch],
                         )?;
                     }
-                    Some(Derived::Row { stage, rank, id, row, sends, held }) => {
+                    Some(Derived::Row {
+                        stage,
+                        rank,
+                        id,
+                        row,
+                        search,
+                        sends,
+                        held,
+                    }) => {
                         let (owner, unassigned) = owner_of(&row);
                         let (version, done) = held.map(|h| (h.version, h.done)).unzip();
                         tx.execute(
                             "INSERT INTO tasks(uuid, files, stage, rank, short_id, row, checked, trusted, owner, unassigned,
-                                version, done, repaired)
-                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done, epoch],
+                                version, done, repaired, search)
+                             VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                            params![uuid, files, stage, rank, id, row, checked, trusted, owner, unassigned, version, done, epoch, search],
                         )?;
                         for at in sends {
                             tx.execute("INSERT INTO sends VALUES(?1, ?2)", params![uuid, at])?;
@@ -1263,7 +1376,10 @@ impl<'a> Index<'a> {
     fn parts(filter: Option<&Scope>) -> Vec<Part<'_>> {
         match filter {
             None => vec![Part::All],
-            Some(scope) => vec![Part::Owner(&scope.owner), Part::Unassigned],
+            Some(scope) if !scope.owner.is_empty() => {
+                vec![Part::Owner(&scope.owner), Part::Unassigned]
+            }
+            Some(_) => vec![Part::All],
         }
     }
 
@@ -1271,7 +1387,13 @@ impl<'a> Index<'a> {
         let Some(_) = filter else { return self.rows(stage, limit, from) };
         let mut rows = Vec::new();
         for part in Self::parts(filter) {
-            rows.extend(self.rows_of(stage, limit, from, &part)?);
+            rows.extend(self.rows_of(
+                stage,
+                limit,
+                from,
+                &part,
+                filter.and_then(|s| s.query.as_deref()),
+            )?);
         }
         rows.sort_by(|a, b| (a.1.as_str(), a.0.as_str()).cmp(&(b.1.as_str(), b.0.as_str())));
         rows.dedup_by(|a, b| a.0 == b.0);
@@ -1286,8 +1408,23 @@ impl<'a> Index<'a> {
         Ok(rows)
     }
 
-    fn rows_of(&self, stage: Stage, limit: usize, from: &Anchor, part: &Part) -> Outcome<Vec<Listed>> {
-        let predicate = part.predicate();
+    fn rows_of(
+        &self,
+        stage: Stage,
+        limit: usize,
+        from: &Anchor,
+        part: &Part,
+        search: Option<&str>,
+    ) -> Outcome<Vec<Listed>> {
+        let predicate = format!(
+            "{}{}",
+            part.predicate(),
+            if search.is_some() {
+                "instr(search, ?6)>0 AND "
+            } else {
+                ""
+            }
+        );
         let columns = "SELECT uuid, rank, files, row, checked, trusted, short_id FROM tasks";
         let (sql, rank, uuid) = match from {
             Anchor::Start => (format!("{columns} WHERE {predicate}stage=?1 AND (rank, uuid) > (?2, ?3) ORDER BY rank, uuid LIMIT ?4"), "", ""),
@@ -1297,8 +1434,25 @@ impl<'a> Index<'a> {
         };
         let mut query = self.db.prepare_cached(&sql)?;
         let map = |r: &rusqlite::Row| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?));
-        let mut rows = match part {
-            Part::Owner(owner) => query.query_map(params![stage.as_str(), rank, uuid, limit as i64, owner], map)?,
+        let mut rows = match (part, search) {
+            (_, Some(search)) => query.query_map(
+                params![
+                    stage.as_str(),
+                    rank,
+                    uuid,
+                    limit as i64,
+                    match part {
+                        Part::Owner(owner) => owner,
+                        _ => "",
+                    },
+                    search
+                ],
+                map,
+            )?,
+            (Part::Owner(owner), None) => query.query_map(
+                params![stage.as_str(), rank, uuid, limit as i64, owner],
+                map,
+            )?,
             _ => query.query_map(params![stage.as_str(), rank, uuid, limit as i64], map)?,
         }
         .collect::<rusqlite::Result<Vec<Listed>>>()?;
@@ -1336,10 +1490,42 @@ impl<'a> Index<'a> {
         }
         let side = if after { ">" } else { "<" };
         for part in Self::parts(filter) {
-            let sql = format!("SELECT EXISTS(SELECT 1 FROM tasks WHERE {}stage=?1 AND (rank, uuid) {side} (?2, ?3))", part.predicate());
-            let found: bool = match part {
-                Part::Owner(owner) => self.db.query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| r.get(0))?,
-                _ => self.db.query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
+            let search = filter.and_then(|s| s.query.as_deref());
+            let predicate = format!(
+                "{}{}",
+                part.predicate(),
+                if search.is_some() {
+                    "instr(search, ?6)>0 AND "
+                } else {
+                    ""
+                }
+            );
+            let sql = format!("SELECT EXISTS(SELECT 1 FROM tasks WHERE {predicate}stage=?1 AND (rank, uuid) {side} (?2, ?3))");
+            let found: bool = match (&part, search) {
+                (_, Some(search)) => self.db.query_row(
+                    &sql,
+                    params![
+                        stage.as_str(),
+                        rank,
+                        uuid,
+                        0,
+                        match &part {
+                            Part::Owner(owner) => owner,
+                            _ => "",
+                        },
+                        search
+                    ],
+                    |r| r.get(0),
+                )?,
+                (Part::Owner(owner), None) => {
+                    self.db
+                        .query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| {
+                            r.get(0)
+                        })?
+                }
+                _ => self
+                    .db
+                    .query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
             };
             if found {
                 return Ok(true);
@@ -1354,10 +1540,44 @@ impl<'a> Index<'a> {
         }
         let mut total = 0;
         for part in Self::parts(filter) {
-            let sql = format!("SELECT count(*) FROM tasks WHERE {}stage=?1 AND (rank, uuid) < (?2, ?3)", part.predicate());
-            let count: i64 = match part {
-                Part::Owner(owner) => self.db.query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| r.get(0))?,
-                _ => self.db.query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
+            let search = filter.and_then(|s| s.query.as_deref());
+            let predicate = format!(
+                "{}{}",
+                part.predicate(),
+                if search.is_some() {
+                    "instr(search, ?6)>0 AND "
+                } else {
+                    ""
+                }
+            );
+            let sql = format!(
+                "SELECT count(*) FROM tasks WHERE {predicate}stage=?1 AND (rank, uuid) < (?2, ?3)"
+            );
+            let count: i64 = match (&part, search) {
+                (_, Some(search)) => self.db.query_row(
+                    &sql,
+                    params![
+                        stage.as_str(),
+                        rank,
+                        uuid,
+                        0,
+                        match &part {
+                            Part::Owner(owner) => owner,
+                            _ => "",
+                        },
+                        search
+                    ],
+                    |r| r.get(0),
+                )?,
+                (Part::Owner(owner), None) => {
+                    self.db
+                        .query_row(&sql, params![stage.as_str(), rank, uuid, 0, owner], |r| {
+                            r.get(0)
+                        })?
+                }
+                _ => self
+                    .db
+                    .query_row(&sql, params![stage.as_str(), rank, uuid], |r| r.get(0))?,
             };
             total += count as usize;
         }
@@ -1383,14 +1603,17 @@ impl<'a> Index<'a> {
     }
 
     fn finish(&self, stage: Stage, rows: Vec<Listed>, filter: Option<&Scope>) -> Outcome<Page> {
-        let project = self.store.project_id();
+        let project = filter.map_or_else(
+            || self.store.project_id().to_owned(),
+            |s| s.cursor_project(self.store.project_id()),
+        );
         let (mut next, mut previous, mut position) = (None, None, 0);
         if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
             if self.exists_in(stage, &last.1, &last.0, true, filter)? {
-                next = Some(cursor(project, stage, &last.1, &last.0));
+                next = Some(cursor(&project, stage, &last.1, &last.0));
             }
             if self.exists_in(stage, &first.1, &first.0, false, filter)? {
-                previous = Some(cursor(project, stage, &first.1, &first.0));
+                previous = Some(cursor(&project, stage, &first.1, &first.0));
             }
             position = self.before_in(stage, &first.1, &first.0, filter)?;
         }
@@ -1404,6 +1627,16 @@ impl<'a> Index<'a> {
     /// `counts`, of one session's view when `filter` is set.
     pub(super) fn counts_in(&self, filter: Option<&Scope>) -> Outcome<BTreeMap<String, usize>> {
         let Some(scope) = filter else { return self.counts() };
+        if let Some(search) = &scope.query {
+            let mut query = self.db.prepare_cached(
+                "SELECT stage, count(*) FROM tasks WHERE stage IS NOT NULL
+                AND instr(search, ?1)>0 AND (?2='' OR owner=?2 OR unassigned=1) GROUP BY stage",
+            )?;
+            let rows = query.query_map(params![search, scope.owner], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?))
+            })?;
+            return Ok(rows.collect::<rusqlite::Result<_>>()?);
+        }
         let mut counts = BTreeMap::new();
         for (sql, owner) in [
             ("SELECT stage, count(*) FROM tasks WHERE owner=?1 AND stage IS NOT NULL GROUP BY stage", Some(scope.owner.as_str())),

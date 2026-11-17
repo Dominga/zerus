@@ -249,6 +249,7 @@ fn consume(delivery: Delivery, available: bool) -> crate::desk::Outcome {
         focused: false,
         optional_questions: &mut optional,
         marks: &mut marks,
+        drafts: &mut || panic!("no draft input"),
         notice_id: &mut notice,
     };
     desk.round(

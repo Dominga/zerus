@@ -84,7 +84,7 @@ pub(super) fn want_stage(
     kind: zerus_team_plan::catalog::StageKind,
     role: &str,
 ) -> Result<()> {
-    if ctx.count(true)? >= ctx.team.settings.caps.max_open_tasks {
+    if ctx.task_capacity_used()? >= ctx.team.settings.caps.max_open_tasks {
         return to_lead(
             ctx,
             n,
@@ -152,6 +152,8 @@ fn metadata(
     stage.title = format!("{label}: {}", n.title);
     stage.role = role.into();
     stage.assignee = None;
+    // The parent's implementation estimate is no estimate of this review.
+    stage.estimate_minutes = 0;
     let quoted_report = report
         .split('\n')
         .map(|line| format!("> {line}"))

@@ -58,6 +58,8 @@
 :root[data-reduce-motion="1"] .icard-body, :root[data-reduce-motion="1"] .vm-text { animation: none !important; }
 :root[data-reduce-motion="1"] .icard-chev, :root[data-reduce-motion="1"] .col-edge::before,
 :root[data-reduce-motion="1"] .insp-resize > i, :root[data-reduce-motion="1"] .sp-resize > i { transition: none; }
+:root[data-reduce-motion="1"] .vrow.locate-pulse-a::after,
+:root[data-reduce-motion="1"] .vrow.locate-pulse-b::after { animation: none; opacity: .8; }
 
 /* A hidden document pauses everything. New entrances in a visible, unfocused
    Linux window must still finish, including questions, approvals and toasts. */

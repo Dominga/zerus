@@ -291,7 +291,7 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
         // Ingestion keeps it pending. A publication budget that cannot fit it
         // even on a fresh page reports it unavailable without retiring it.
         let mut small = fixture.budget(128);
-        small.bytes = RECORD_BYTES;
+        small.bytes = 256;
         let deferred = store
             .step(
                 &fixture.state,
@@ -305,7 +305,7 @@ fn large_shell_job_bindings_stay_searchable_and_are_reverified() {
         // zerus-0dmh: a loaded runner can meet the first page's deadline.
         fixture.expired_slices.set(1);
         let deferred = fixture.publish_pages(&mut store, "needle", || Budget {
-            bytes: RECORD_BYTES,
+            bytes: 512,
             ..fixture.budget(128)
         });
         assert!(deferred["results"].as_array().unwrap().is_empty());
@@ -395,7 +395,7 @@ fn sweep_keeps_a_source_active_when_only_the_remaining_slice_is_too_small() {
         .execute("DELETE FROM meta WHERE key='source_sweep'", [])
         .unwrap();
     let mut progress = Progress {
-        bytes: 3 << 20,
+        bytes: fixture.budget(128).bytes - 1,
         ..Progress::default()
     };
     store
@@ -407,7 +407,8 @@ fn sweep_keeps_a_source_active_when_only_the_remaining_slice_is_too_small() {
             &mut metadata::Reader::default(),
         )
         .unwrap();
-    assert_eq!(progress.bytes, 3 << 20);
+    assert_eq!(progress.bytes, fixture.budget(128).bytes - 1);
+    assert!(progress.metadata_io > RECORD_BYTES);
     assert_eq!(progress.files, 1);
     assert_eq!(store.index.query("needle", 50, None).unwrap().hits.len(), 1);
     let active: bool = store

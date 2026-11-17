@@ -10,6 +10,10 @@ use zerus_team_plan::{
 /// would save a seat that can never launch, so it is refused here.
 const KNOWN_AGENTS: [&str; 5] = ["claude", "codex", "kimi", "qwen", "dsh"];
 
+pub(crate) fn validate_member_agent(agent: &str) -> Result<(), Problem> {
+    agent_of(None, "member.agent", agent)
+}
+
 pub(crate) fn validate_roster(bundle: &TemplateBundle) -> Result<(), Problem> {
     let template = bundle.template.id.as_str();
     agent_of(Some(template), "lead.agent", &bundle.template.lead.agent)?;

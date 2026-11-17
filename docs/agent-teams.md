@@ -1,8 +1,8 @@
 # Agent Teams
 
 Agent Teams are a preview. They are off on every computer until a person turns
-them on, and this guide describes the first milestone: a team that takes tasks
-from a queue. The commands, their replies and their codes are in the
+them on. A team takes tasks from a queue; the Team tab also shows dependencies
+and lets you prepare phase drafts. The commands, their replies and their codes are in the
 [Agent Teams reference](reference.md#agent-teams).
 
 ## What a team is
@@ -38,7 +38,7 @@ keeps the switch disabled and shows its reason. **Read again** requests a fresh
 answer even when the followed views and their contents have not changed.
 
 Turning it on adds a marker file to this computer's `hgs` state directory and
-makes the desktop show **New team** and **Waiting for you** in the rail, the
+makes the desktop show **Teams** and **Waiting for you** in the rail, the
 **Team** tab on a lead's session, **Send to team** on the task board and a team
 chooser in the New task form. An `hgs task` command that touches a team, with
 `--team` or on a task whose team key guards it, then proves its caller as
@@ -55,7 +55,47 @@ team lives on another computer still refuses agents.
 
 ## Starting a team
 
-Press **New team** in the rail. The dialog starts from a **Template**:
+Open **Teams** in the rail, after Accounts and beside **Waiting for you**.
+This screen lists this computer's teams from the existing followed list read;
+it adds no polling. Each row shows the project, status, lead, accepted-task
+progress, Stuck marker, unanswered questions and member count when available.
+Counts with `+` are lower bounds. **More teams** reads one bounded cursor page;
+**First page** returns to the beginning. Browsing retains one current page and
+does not grow the bounded session lookup cache.
+
+Select a row to open its bound lead session's **Team** tab. The binding uses
+the computer's machine identity and launch or run identity. If the lead has no
+session yet, the list says so. A bound session missing from the session list
+gets its own notice. If a fresh Team tab read shows that
+the binding changed, the tab asks you to open the team from Teams again. A
+similarly named session is never substituted. The binding stays available
+when you switch tabs of the same selected session.
+
+### Queue views
+
+The lead's Team tab offers **Board**, **Graph**, **Lanes** and **Layers**. Lanes shows
+one section for each member, including empty sections, and **Unassigned** last.
+A task with a verified current pipeline holder appears in that member's lane;
+otherwise its explicit stage assignment or task assignment/implementer is used.
+A member missing from this bounded view does not make a task disappear: it
+stays in Unassigned until a member can be verified. The view preserves every
+card on the returned page; it does not fetch settled tasks from the archive.
+
+Lanes uses only the current queue page. Current work comes first, followed by
+submitted, pending, waiting, draft, accepted and cancelled work. Within a state,
+stages come first in node order; queue tasks keep board-rank order, with task
+UUID and node as tie-breakers. This is a page-local display order, not a claim
+that every shown task is ready for a hand-out. Use the same **More…** and
+**First page** controls as the Board; changing modes does not start another read
+or timer. A card opens the existing task detail, including the parent task for
+a folded pipeline stage. Lane headers fold their cards; fold keys are bounded
+to the current roster. Refreshed snapshots keep unchanged cards and lane scroll
+containers. The mode is local to the current team workspace.
+
+Press **New team** in the screen header or its empty state. The `team.new`
+command is also listed in Settings > Keyboard. It has no default shortcut;
+assign one there to open New team from the keyboard. The dialog starts from
+a **Template**:
 
 | Template | Roster besides the lead | Default pipeline | A queued task starts |
 |---|---|---|---|
@@ -104,8 +144,9 @@ exactly what the dialog showed you:
   **Check** asks again with the same request, so it can never create a second
   team.
 
-`hgs team create` at a terminal may leave out the digest and the permissions;
-the team then takes the template as the catalog holds it at that moment.
+Create team requires native confirmation in the Zerus window. A Person call
+to `hgs team create`, including through `@host`, returns
+`person_gesture_required` before creating anything.
 
 Team and template names may use ordinary Unicode letters. Creating a team,
 saving a catalog or importing a template refuses control characters, line
@@ -140,11 +181,41 @@ branches are refused before creation if an existing Git ref is equal, an ancesto
 or a descendant; the reason names both refs. A team created before this fix whose
 lead shows "Worktree creation refused" is archived and created again.
 
-With the preview on, Sessions groups a team under its name, with the lead first
-and the other members ordered by role and member ID. Each row shows its role.
+With the preview on, a team's members appear as ordinary child sessions beneath
+the lead, ordered by role and member ID. The usual children chip folds or expands
+them, with the same saved fold choice as other child sessions. The lead has a
+**Team: name** tag instead of a separate heading, and each row shows its role.
 Membership uses the team roster's computer and launch/run bindings, including
 when a parent link is pending; session names do not establish membership. A
 live, quiet member without its first conversation shows **Waiting for a task**.
+An unknown job count does not establish work; only a positive count prevents
+that waiting label.
+
+Before its first conversation, a member the team launched can take its first task
+when the native first-message gate verifies its empty composer. A pending question
+or known background or subagent work keeps it from taking that task. If its
+terminal cannot be verified as ready, the usual three-minute service card names
+the member as "waiting for its first-message readiness". Members with a
+conversation keep the usual idle and known-zero work checks.
+
+The lead's strip shows accepted/total tasks, its team status (highlighting
+**Stuck** when an explicit blocker remains), unanswered member questions as
+**?N**, and live members including the lead. Accepted tasks include archived
+work; cancelled tasks and internal review/test stage tasks are excluded from
+the total. The Team tab bar also excludes cancelled tasks. Counts stop at 1000 and
+show **+** when more exist; an approximate count does not draw a percentage.
+The open queue is a single phase, so it has no phase bar. A team with multiple
+phases also shows completed/total phases. Click the strip, or focus it and press
+Enter or Space, to open the lead session on its Team tab. Only the usual
+children chip folds the members; that choice survives a restart.
+
+Questions count only the open member-question inbox items, not cards for the
+person. Stuck comes from explicit launch/hand-out/unreadable-member blockers,
+a silent lead, a blocked service card, or a team project-limit service item.
+Ordinary work/integration approvals, questions and uncertain-delivery inbox
+items do not establish Stuck by themselves. These summaries arrive with the
+bounded team list; drawing a strip does not load each team's view.
+
 Ordinary sessions and the Sessions list with the preview off keep their usual
 status and grouping rules.
 
@@ -178,6 +249,25 @@ The lead's session has a **Team** tab. Its bar shows the team's status, its
 active members, open inbox items and open cards, and the team's actions:
 **Pause** or **Resume**, **Stop**, and **Archive** after a stop. Destructive
 actions ask for confirmation first.
+
+The bar also opens **Feed**, **Inbox**, **Reports**, **Cards** and **Lead chat**.
+The first four read one page at a time, at most 200 rows. **Next page** keeps
+the original page cursor, so later inserts do not move that snapshot;
+**First page** starts a fresh snapshot, and **Refresh** rereads the selected
+page. The feed follows the journal's oldest-first order. Reports are the
+report items on the selected inbox page, not an exhaustive report search.
+Only one page is retained, and closing the drawer drops it.
+
+Reports offer **Accept** or **Reject** (return with a reason), open questions
+offer **Answer**, and cards offer the decisions their writer recorded. A
+changed team revision or an unreadable page blocks these actions until a
+fresh read. An uncertain action remains in the existing Check/Dismiss flow;
+opening or refreshing a drawer never repeats it.
+
+**Lead chat** uses the selected lead's ordinary composer and its saved draft,
+shared with Activity. The bound computer and session must match, and its run
+and conversation must be available. Sends keep the normal guarded delivery
+and durable request identity; an uncertain delivery is never replayed.
 
 **Members** lists each member with its role, what it works on ("Working on
 #%1", "Reviewing #%1", "Testing #%1") and whether its session is linked. A
@@ -215,21 +305,130 @@ stop recorded: cancellation, release, key clearing, a refusal and its reason,
 or work not yet reached. An older stop without a recorded identity shows no
 invented outcome.
 
+## Starting from a goal
+
+In **New team**, choose **Plan a goal first**, enter a goal and review the
+template and permissions. **Start planning** starts only the lead, in its own
+worktree. Other members and the integration branch wait for your approval of
+the initial plan. A Person call to `hgs team start-planning` is refused with
+`person_gesture_required`; start planning in the window.
+
+The lead receives a durable inbox notice and can read the original goal with
+`hgs team current`. It submits drafts that you can inspect in **Layers**.
+Review the initial draft with **Approve phase**. The review includes the roster,
+account choices and working folders. The team stays in Planning until creation
+of every approved task is confirmed; then it starts the other members.
+
+**Pause planning** stops new launches and automatic messages; the lead's current
+work may continue. **Resume planning** returns to Planning. A lead cannot
+remove your pause. **Stop** ends the team. An uncertain launch remains visible
+and is never automatically launched again after a restart.
+
+Starting a planned team requires the new Teams engine. Older `hgs` versions
+cannot open that computer's Teams store afterward; use the updated CLI and
+desktop service together.
+
+## Preparing phase drafts
+
+Open **Layers** in the Team tab to read planned phases. **New phase draft**
+creates a proposed phase; **Edit draft** changes its title, barrier and tasks.
+Each task has a description, acceptance criteria, pipeline, optional assignee,
+dependencies, write paths and estimate. Layers uses the shared dependency
+projection; opening a task shows its original description and criteria.
+
+A person or the team's bound lead may save a draft. Drafts reserve task IDs
+and count against the team's planned-work cap, including when a pipeline
+creates a stage. They create no task documents, launches or hand-outs.
+Phase 0 remains the only intake queue. Approval freezes a draft and creates
+its tasks before the phase becomes available for hand-outs.
+
+The CLI reads are `hgs team phases --team TEAM` and
+`hgs team phase --team TEAM --phase N`. Use the returned revision, next phase
+and node IDs for `submit-draft-phase`; an `edit-draft-phase` also carries the
+generation read from the draft. Both accept the complete draft as JSON on
+stdin, with `request_id`, `team` and `expected_revision`; see the
+[draft input contract](reference.md#agent-teams) for its fields and bounds.
+Saved IDs stay attached to their tasks, and removed IDs are never reused.
+
+A failed read shows its reason and **Read again**, never an editable empty
+plan. A stale save retains the editor text for copying. An unconfirmed save
+locks saving and points to **Check** in the team's unresolved actions; it is
+never automatically sent again under a new request identity.
+
+## Reviewing and accepting phases
+
+**Approve phase** reviews the exact generation, its descriptions, criteria and
+changes since the previous draft. **Reject phase** requires a comment for the
+lead. **Undo rejection** restores only that rejection's draft; it does not
+approve it. The lead can edit a rejected draft and submit a new generation.
+
+The phase shows confirmed task-creation progress. A refusal or uncertain result
+keeps the phase closed; an unknown result never becomes a successful task or
+an automatic second creation. A frozen publication cannot be edited.
+The person's Auto policy can approve later phases of a running team; the
+initial roster and working-folder confirmation always requires the person.
+
+Layers shows live and archived tasks after publication. The service records
+**Awaiting acceptance** only when the work, pipeline stages, decisions and
+integration are settled. **Accept phase** rechecks those facts and completes
+the phase, allowing later work through its gate. It supplies no task or merge
+receipt. Send back, delegated lead acceptance and phase controls follow in
+later slices.
+
 ## Sending a task to a team
 
 - On the task board, a task in Backlog or To do has **Send to team: %1** in
-  its menu, one entry per team of its project.
+  its menu, one entry per running or paused team of its project.
 - The New task form has a **Team** chooser ("Send the new task to a team's
-  queue").
-- From a terminal: `hgs task add --project PROJECT --team TEAM < prompt.txt`
-  for a new task, `hgs task target REF team TEAM` for an existing one.
-  `--role` and `--pipeline` route the task as you send it.
+  queue"), with the same running/paused choices. Stopped, archived, finished
+  and not-yet-running teams are not offered. Identically named live teams
+  include an identifying suffix in both menus.
+- An independently proved agent may use
+  `hgs task add --project PROJECT --team TEAM < prompt.txt`.
+  `--role` and `--pipeline` retain their existing routing checks. A Person
+  creates or sends a task through the window; Person intake from the CLI
+  requires a native gesture. Ordinary commands on an existing team-owned
+  task remain an interim path for S2b, as listed below.
 
 The task stays an ordinary task with a `team` key that names its team and
 home computer. A task you send, or the lead sends, is admitted at once. A task
 sent by a member or by another agent waits until the lead admits it. The queue
 is taken in the order of the board's To do column, and each member works on
 one task at a time.
+
+### Editing a team
+
+In the **Team** tab, **Add member** chooses a role from this team's pinned
+catalog, an agent, model, effort and account. The account can be named or
+**The freest account**; empty model and effort use that account's defaults.
+Launch effort is available for Claude and Codex; DeepSeek keeps its model in
+its native account. The member gets its own readable session and worktree through the usual launch
+service. Existing members keep their sessions and work.
+
+**Rename team** and **Edit goal** change the team's name and goal. Clearing the
+goal is allowed. A rename keeps existing session, folder and branch names.
+All four edits are yours alone and refuse a stale team revision; reopening the
+form after a refresh shows the current values.
+
+The member menu's **Swap…** replaces the agent for a member you have already
+stopped with **Stop**, after its open tasks and attempts settle. The menu shows
+the open-work count when Swap is unavailable. A swap keeps the member ID,
+role, task history, folder and branch. The old session stays outside the team;
+Swap never stops, archives or adopts a session. The new session's readable
+name gains a revision suffix. Unknown launch or delivery receipts refuse a
+swap rather than repeating unfinished work. Active cutover and adoption are
+follow-up work, not choices in this dialog.
+
+Opening a form makes no write. A result that cannot be confirmed stays in the
+existing action list: use **Check**, without submitting another edit.
+
+## Routing
+
+On a `routing: lead` team, admitted tasks wait until the lead chooses their
+role and pipeline with `hgs team route`. Admission waits and routing waits
+each have one count-only inbox item pointing to `hgs team queue`, so the
+existing doorbell brings an idle lead back to the queue. Each item closes
+when no tasks wait in that category.
 
 When the team refuses a new task, for example because its queue is full, the
 task is still created but not queued: it stays on the board as an ordinary
@@ -332,6 +531,12 @@ lead. Every reopen counts as a round, whoever caused it.
 
 ## Doorbells and timers
 
+After its launch and after a delegated resume, a Claude, Codex or Kimi lead gets
+one short brief naming its team, `hgs team current` and `hgs team inbox`.
+The brief is launch context, not a task or an attempt. Unknown delivery is never
+replayed. DeepSeek leads do not get this brief yet; their hosted delivery path
+needs the same guarded first-send support (tracked in zerus-3tq9r).
+
 The inbox is where the lead's work waits; a doorbell only tells a session to
 look. When items wait, the service sends the lead one message that says how
 many wait and names `hgs team inbox`. When answers to its questions wait, a
@@ -347,6 +552,13 @@ read. A doorbell whose delivery is not known is never sent again; the next new
 item rings a new one, and a resumed session gets a new doorbell, never the old
 one. A member's doorbell is dropped once the member no longer holds that
 attempt: after an accept, a return, a reassignment, a cancel or a stop.
+
+The lead also gets one aggregate inbox item while tasks wait for its admission,
+and, on a `routing: lead` team, one while admitted tasks wait for routing.
+Each item names the current count and `hgs team queue`, never task text.
+More waiting tasks update that item without another doorbell. Each item closes
+when its category has no waiting tasks; a later arrival starts a new episode
+and can ring a new doorbell. The episodes survive a service restart.
 
 Timers turn waiting into an inbox item for the lead or a card for you:
 
@@ -435,6 +647,22 @@ also clears an older stale mark in Backlog or To do. An attempt still being
 cancelled is settled before the send creates its new queue entry; a task
 still in In review cannot be resent.
 
+## Hand-outs refused before delivery
+
+A task-attempt fence can refuse a hand-out as `cutting_over`: nothing was
+reserved or sent. That closes the effect as not delivered and frees the task
+and member. The service checks again after its normal refusal backoff and
+hands the task out under a new effect when the fence admits it. It never
+replays the refused effect. An ordinary refusal before input follows the same
+rule; an unknown or uncertain delivery keeps its reservation and is never
+sent again automatically.
+
+A proven non-delivery does not open a `delivery_uncertain` inbox item. The
+service also reconciles such effects recorded by older versions and closes
+only the false item bound to their original outcome receipt, including after
+manual recovery. A genuine unknown delivery stays open. A refused reopen
+still hands the task back to the lead, with its own reason and hold.
+
 ## Project limits
 
 A hand-out is written with the lead as its actor and the member as the
@@ -498,7 +726,9 @@ tool approvals.
   shell; run it from the Zerus window." Commands that a lead or a member runs
   are not affected.
 - A team lives on one computer: its lead, its members and its Team tab.
-- Only a queue: no planning from a goal, no phases and no Graph yet.
+- Queue execution has Board, Graph and Lanes views; planned phases use Layers.
+  A lead can prepare drafts from a goal. The person can approve, reject and
+  accept phases; send-back rework and phase controls follow in later slices.
 - DeepSeek can be a lead or member with a host that proves each tool call
   with its per-call token, witnesses task input and reports its lifecycle.
   A host lacking those capabilities stays unavailable; Zerus never reloads
@@ -510,11 +740,28 @@ tool approvals.
   A private process namespace also prevents the caller proof from seeing
   the host outside it: the refusal names that limit and the remedy. Run team
   commands outside that sandbox or turn its private process namespace off.
-- A person's command is recognized by an interim rule: no live agent session
-  may be among its process ancestors. It guards against accidents and against
-  an agent that merely drops its session markers, not against one that sets
-  out to pass as you. Every reply to such a command carries a note that
-  states what this rule cannot detect.
+- Person team decisions and mutations require explicit native confirmation in
+  the Zerus window on the computer that owns the team. This includes owner-card
+  **Decide**, Create, Start planning, team settings and membership, dependencies,
+  advance-base, queue and phase decisions (including Send back and correction
+  approval/rejection), and sending or creating a task for a team. A person's CLI command for these actions returns
+  `person_gesture_required`, including remote commands. Independently proved
+  lead/member commands and service facts retain their existing scope.
+- A CLI Person claim or renderer `confirmed` flag grants no permission. The
+  native confirmation binds the exact payload, computer, configuration, store,
+  team, revision and original UUID. After an uncertain result, Check reads only
+  that original receipt; missing, corrupt or foreign evidence never replays the
+  action. An unknown task intake preserves its original and cannot be resumed
+  or replaced with a new UUID. A new confirmation is allowed only for a known
+  closed refusal or a later explicit new action.
+- Two Person writer groups remain interim until the following slices: ordinary
+  task rename/edit/stage/target/send/cancel commands on a live team-owned task
+  (S2b), and preview, computer configuration, catalog/template and legacy
+  import/save/remove writers (S3). These still rely on process ancestry as
+  defense in depth. That rule guards against accidents and a session merely
+  dropping markers; it cannot stop same-user arbitrary code, detach/re-exec,
+  replacement of trusted software or state redirection. The full Person
+  authority migration is incomplete until both groups move to native admission.
 - An accepted or cancelled queue entry is already decided and takes no
   Cancel. A task's later run must be observed as its own current attempt;
   the team's cancellation never takes authority over an unrelated run.
@@ -532,3 +779,169 @@ working process and its desktop views, and builds the runtime on Zerus tasks
 and the desktop service. Files imported from the fork keep WhiteWh as their
 Git author. See "Origin and credit" in the
 [design](superpowers/specs/2026-11-11-agent-teams-design.md#origin-and-credit).
+
+## Advancing the base of a live team
+
+A person can use **Advance base…** in the Team tab's bar, or run
+`hgs team advance-base --json` with a JSON request on stdin:
+
+```json
+{"request_id":"00000000-0000-4000-8000-000000000165","team":"00000000-0000-4000-8000-000000000001","expected_revision":7,"commit":"0123456789abcdef0123456789abcdef01234567"}
+```
+
+The form reads the current base and the available main commits once, then asks
+for confirmation. Its revision remains the revision of that read. A stale
+revision requires reviewing the updated team; an uncertain result keeps its
+original request ID and offers the usual explicit Check and Dismiss actions.
+
+This operation is person-only, including when a lead has permission to accept
+results. It runs on the team's home computer and resolves the existing project
+through the same local placement reader as member launch. Branch integration
+must be enabled and the team must be running or paused. The full lowercase
+commit hash must exist in that repository, be strictly newer than the current
+base, and contain the current base in its ancestry. It must also be contained
+by either the literal local `refs/heads/main` or locally fetched
+`refs/remotes/origin/main`. There is no fetch, network lookup, HEAD fallback or
+arbitrary ref selection. Both names are read exactly in one ref snapshot;
+a branch whose name merely resembles either ref cannot substitute for it.
+Missing main refs and backward, equal, unrelated or
+non-main commits are refused. The journal records the old base, new base and
+the ref that admitted it. Repeating the exact request returns its saved receipt
+before rechecking the revision or repository.
+
+The new base applies to future hand-out and reopen reservations. Each effect
+pins its assigned base; its prompt and that generation's integration ancestry
+check use that pin even after another advance. The task detail and queue show
+`assigned_base` separately from the team's current default. On upgrade, older
+effects keep the pre-advance base through a frozen default and indexed
+high-water mark; upgrading does not scan or rewrite the effect history.
+
+The first successful advance also raises the computer's private Teams store
+compatibility mark. Older builds cannot reopen that store. An older engine
+that already holds a connection cannot write hand-out, effect or integration
+rows for an advanced team: its transaction fails without partial rows, with
+a cause naming the required newer Zerus writer. Those guards do not cover
+other teams or unrelated settings/status writes on an already-open connection.
+Use the updated engine to continue the affected work.
+
+Advancing writes no Git objects or refs. It does not merge into, reset or
+rewrite the integration branch or any member branch. Existing member
+checkouts and saved launch plans keep their identities. A newly selected
+member launch uses the current default as its initial checkout base. The
+hand-out tells the member to start from the integration branch and merge the
+assigned base into its own work branch before implementing. The member owns
+that merge and any conflicts. The service continues its ordinary acceptance
+merges using the base actually assigned to the reported task generation.
+
+### Tests and Builds provider metadata
+
+Team settings can inspect the native-selected project folder and save a
+person-reviewed provider selection. Opening the section and **Check** only read
+bounded metadata; neither saves a choice nor starts a program. Tests and builds
+remain ordinary member-agent tasks. Direct runners, executable templates,
+validation requests, report import and mandatory gates are unsupported.
+
+The version-1 file is `.zerus/tests.toml` (at most 64 KiB, at most 16 providers):
+
+```toml
+schema = 1
+[[provider]]
+name = "cargo-test"
+provider = "cargo"
+kind = "test"
+scopes = ["full", "focused"]
+reports = ["junit"]
+```
+
+Known provider metadata IDs are `cargo`, `npm`, `pytest`, and `cmake`; kind is
+`test` or `build`, scopes are `full`/`focused`, report formats are `junit`/`json`,
+and optional `disabled = true` keeps a provider listed but disabled. These are
+metadata declarations, not proof of installed tools, supported focused commands,
+executed suites or imported results. Unknown fields, providers and schemas are
+refused; command/program/template fields are not accepted.
+
+A present file supplies the base configuration. Without it, the fixed bounded
+marker reads `Cargo.toml`, `package.json`, `pytest.ini`, and `CMakeLists.txt` suggest
+known providers, without running discovery. A person's JSON override has the same
+shape and replaces entries by name. Empty uses the file/detected base. An override
+never hides a malformed or unsafe source file. Both `.zerus` and its file, and
+all detection files, refuse symlinks and irregular inputs below the configured
+root. The trusted configured root itself may use a symlink spelling.
+
+**Save provider selection** is a separate explicit settings action, enabled only
+after a successful Check. The operation rechecks the exact project computer,
+configured checkout object and source/config digests under the team writer lock.
+A changed checkout/config or stale revision needs a new review. The selection is
+advisory companion settings: it neither changes legacy settings JSON nor enables
+execution/acceptance policy, so older clients/services keep their existing task
+behavior. Old hgs versions show inspection as unavailable, never a successful
+empty configuration. An uncertain save keeps its original action for Check in the
+Team tab; it is never automatically reposted.
+
+## Correcting an awaiting phase
+
+**Send phase back** requires a comment and keeps the phase awaiting acceptance.
+Its earlier accepted tasks and commits stay unchanged. The person can send back
+a hard gate; the exact lead can decide only a Lead gate with the Accept results
+delegation. **Draft corrections** opens a separate nonempty proposal with new
+task IDs. **Edit corrections**, **Approve corrections**, rejection and undo
+retain that proposal's exact publication, episode and generation. The phase
+returns to Approved only after every new task is confirmed and publication
+settles. A partial or unknown outcome never causes an automatic replay.
+
+Corrections preserve the existing acceptance, approval policy, barrier, pause,
+order, kind and mode. The barrier shown in their editor is read-only. The
+existing phase reader/poller keeps the retained base snapshot separate from
+the proposal, then switches to the new frozen publication after confirmation.
+Older unreturned publications remain unavailable to estimate views; the whole
+phase live scope still includes earlier accepted work. No task is mass-reopened
+and no integration history is rewound. Read `hgs guide team-rework` for the
+strict command fields and original-request Check behavior.
+
+### Read-only implementation estimates
+
+The selected phase's **Observed timing** panel shows implementation estimates
+through its existing lazy read. An unapproved draft is labelled as a preview;
+a valid empty observation page can still show its known estimates. A reserved
+publication is a frozen selected identity, and its numbers stay unavailable
+until publication settles and the complete live membership is read. Published
+values come from that publication's frozen draft nodes, joined to their exact
+live task identities. Later edits, correction proposals and earlier tasks in
+the whole-phase live snapshot never replace those values.
+
+Zero or missing estimates, values over 525600 minutes, incomplete reads and
+prerequisites outside the selected cohort remain unknown. Estimate membership
+completeness does not certify observation coverage. Each observed unit retains
+its exact publication, task, attempt, effect and binding identity; a page's
+selected publication cannot fill missing original membership. Schema 1 records
+points and gaps, so implementation actuals remain unavailable, including when
+task states or delivery/report events are present. Estimates are not phase
+elapsed time, an ETA, or a completion promise. Hiding or changing the selected
+scope drops the derived page; a failed or mismatched read cannot retain its
+numbers.
+
+## Controlling a planned phase
+
+The phase header's **More** menu offers a barrier, pause/resume, movement and
+acceptance policy. These controls retain the phase's stable ID, task membership
+and history. The person or exact current lead can set a barrier or pause a
+nonterminal planned phase. A pause requires a reason; its owner and reason stay
+visible. The lead can remove or replace only the pause owned by that same lead
+session. A person's pause, a predecessor's pause and an unattributed legacy pause
+require the person. Existing reports and work already in hand continue, while
+the pause blocks new ordinary hand-outs.
+
+**Move earlier/later** uses the exact neighboring identity returned by the
+phase read, not a visible row position. The source, target and all crossed
+phases must be positively unstarted. Publishing, awaiting, terminal, incomplete
+or previously attempted work cannot move. Changing the phase's acceptance
+policy is Person-only and uses the same positive unstarted check; it never
+changes the team default or softens a waiting gate. Current task documents are
+checked as well as retained live/archive history, so an unobserved send
+reservation cannot be mistaken for an unused Todo task.
+
+Unavailable controls show their reason. Missing, stale or partial reads do not
+enable an action. An unknown result retains the exact original request for
+**Check**; it never automatically sends a replacement. During corrections,
+permitted barrier/pause changes preserve the BASE/proposal/NEW identities and
+all acceptance, approval, title, order and historical publication facts.

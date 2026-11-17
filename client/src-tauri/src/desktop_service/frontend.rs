@@ -39,6 +39,12 @@ pub enum Operation {
     DeferredSend,
     #[serde(skip)] // Native deferred answer owner only; never generic policy dispatch or receipts.
     DeferredAnswer,
+    #[serde(skip)] // Native owner-card confirmation only; never generic policy JSON.
+    TeamPersonDecide,
+    #[serde(skip)] // Data-only native preparation, never renderer admission.
+    TeamPersonPlanPiece,
+    #[serde(skip)] // Confirmed original native team action only.
+    TeamPersonAction,
     #[serde(skip)] // Native compact-to-send owner only; never generic policy dispatch or receipts.
     CompactToSend,
     #[serde(skip)] // Native session resume owner only; never generic policy dispatch or receipts.
@@ -58,6 +64,8 @@ pub enum Operation {
     AutomaticApprovals,
     QuestionRoutes,
     QuestionRouteChild,
+    #[serde(skip)]
+    InputAcknowledge,
     MaintenanceConfigure,
 }
 impl Operation {
@@ -74,6 +82,9 @@ impl Operation {
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::TeamPersonDecide { .. } => Self::TeamPersonDecide,
+            Request::TeamPersonPlanPiece { .. } => Self::TeamPersonPlanPiece,
+            Request::TeamPersonAction { .. } => Self::TeamPersonAction,
             Request::CompactToSend { .. } => Self::CompactToSend,
             Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
@@ -85,6 +96,7 @@ impl Operation {
             Request::AutomaticApprovals { .. } => Self::AutomaticApprovals,
             Request::QuestionRoutes { .. } => Self::QuestionRoutes,
             Request::QuestionRouteChild { .. } => Self::QuestionRouteChild,
+            Request::InputAcknowledge { .. } => Self::InputAcknowledge,
             Request::MaintenanceConfigure { .. } => Self::MaintenanceConfigure,
         }
     }
@@ -101,6 +113,9 @@ impl Operation {
             Self::TaskMessageInputRelease => "task_message_input_release",
             Self::DeferredSend => "deferred_send",
             Self::DeferredAnswer => "deferred_answer",
+            Self::TeamPersonDecide => "team_person_decide",
+            Self::TeamPersonPlanPiece => "team_person_plan_piece",
+            Self::TeamPersonAction => "team_person_action",
             Self::CompactToSend => "compact_to_send",
             Self::SessionResume => "session_resume",
             Self::TaskStartReconcile => "task_start_reconcile",
@@ -112,6 +127,7 @@ impl Operation {
             Self::AutomaticApprovals => "automatic_approvals",
             Self::QuestionRoutes => "question_routes",
             Self::QuestionRouteChild => "question_route_child",
+            Self::InputAcknowledge => "input_acknowledge",
             Self::MaintenanceConfigure => "maintenance_configure",
         }
     }
@@ -359,6 +375,7 @@ enum Input {
         enabled: bool,
     },
     QuestionRouteChild(Box<Request>),
+    Acknowledge(Box<Request>),
     Maintenance {
         id: String,
         configuration: Box<maintenance::Configuration>,
@@ -374,6 +391,7 @@ impl Input {
             Self::Approvals { .. } => Operation::AutomaticApprovals,
             Self::QuestionRoutes { .. } => Operation::QuestionRoutes,
             Self::QuestionRouteChild(_) => Operation::QuestionRouteChild,
+            Self::Acknowledge(_) => Operation::InputAcknowledge,
             Self::Maintenance { .. } => Operation::MaintenanceConfigure,
             Self::Result(op) => *op,
         }
@@ -406,7 +424,7 @@ impl Input {
                 request_id: id,
                 enabled,
             })),
-            Self::QuestionRouteChild(request) => Ok(Some(*request)),
+            Self::QuestionRouteChild(request) | Self::Acknowledge(request) => Ok(Some(*request)),
             Self::Maintenance {
                 id,
                 mut configuration,
@@ -444,7 +462,9 @@ impl Input {
             Self::QuestionRoutes { id, enabled } => {
                 json!({"request_id":id,"op":"question_routes","enabled":enabled,"accepted":false,"durable":false,"pending":false,"code":code})
             }
-            Self::QuestionRouteChild(request) => refused(request, code),
+            Self::QuestionRouteChild(request) | Self::Acknowledge(request) => {
+                refused(request, code)
+            }
             Self::Maintenance { id, .. } => {
                 json!({"request_id":id,"op":"maintenance_configure","accepted":false,"durable":false,"pending":false,"code":code})
             }
@@ -502,6 +522,9 @@ impl Service {
             Input::QuestionRouteChild(Box::new(request)),
         )
         .await
+    }
+    pub async fn acknowledge_input(self: &Arc<Self>, request: Request) -> Value {
+        submit(self.shared.clone(), Input::Acknowledge(Box::new(request))).await
     }
     pub async fn maintenance_configure(
         self: &Arc<Self>,
@@ -589,6 +612,21 @@ pub(super) async fn question_route_child_command(
     }
     match service {
         Some(service) => Ok(service.question_route_child(request).await),
+        None => Ok(refused(&request, "frontend_route_unavailable")),
+    }
+}
+pub(super) async fn acknowledge_input_command(
+    service: Option<Arc<Service>>,
+    acknowledgment: zerus_client_core::input_acknowledgment::Acknowledgment,
+) -> Result<Value, String> {
+    if !acknowledgment.valid() {
+        return Err("Invalid input acknowledgment.".into());
+    }
+    let request = Request::InputAcknowledge {
+        acknowledgment: Box::new(acknowledgment),
+    };
+    match service {
+        Some(service) => Ok(service.acknowledge_input(request).await),
         None => Ok(refused(&request, "frontend_route_unavailable")),
     }
 }
@@ -702,6 +740,7 @@ fn help(
             && !marker(zerus_client_core::desktop::cache_maintenance::HELP_MARKER))
         || (operation == Operation::ImportPendingReads
             && !marker(zerus_client_core::desktop::pending_reads::HELP_MARKER))
+        || (operation == Operation::InputAcknowledge && !marker("input-acknowledgment-v1"))
     {
         return Err("incompatible_frontend_cli");
     }
@@ -720,6 +759,9 @@ fn submission_ready(snapshot: &Snapshot, request: &Request) -> bool {
             | Request::TaskMessageInputRelease { .. }
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
+            | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -885,6 +927,30 @@ fn lookup(
     request: &Request,
     resources: Arc<dyn Send + Sync>,
 ) -> Result<Receipt, &'static str> {
+    if let Request::InputAcknowledge { acknowledgment } = request {
+        let id = uuid::Uuid::new_v4().to_string();
+        let input = serde_json::to_vec(&json!({"op":"input_acknowledge_result","request_id":id,"acknowledgment":acknowledgment}))
+            .map_err(|_| "invalid_frontend_request")?;
+        let bytes = owned(
+            shared,
+            relay,
+            &invocation(&["desktop", "request", "--json"], input),
+            resources,
+        )?;
+        let value: Value =
+            serde_json::from_slice(&bytes).map_err(|_| "invalid_frontend_response")?;
+        if value["op"] != "input_acknowledge_result"
+            || value["request_id"] != id
+            || value["original_request_id"] != request.id()
+        {
+            return Err("invalid_frontend_response");
+        }
+        return match value["found"].as_bool() {
+            Some(true) => Ok(Receipt::Present(value["result"].clone())),
+            Some(false) if value["result"].is_null() => Ok(Receipt::Absent),
+            _ => Err("frontend_receipt_unconfirmed"),
+        };
+    }
     if matches!(
         request,
         Request::NotificationControl { .. }
@@ -895,6 +961,9 @@ fn lookup(
             | Request::TaskMessageInputRelease { .. }
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
+            | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -945,6 +1014,9 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
             | Request::TaskMessageInputRelease { .. }
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
+            | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -1011,6 +1083,22 @@ fn lookup_receipt(request: &Request, id: &str, value: Value) -> Result<Receipt, 
     }
 }
 fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, bool)> {
+    if let Request::InputAcknowledge { acknowledgment } = request {
+        if value["request_id"] != request.id() || value["op"] != "input_acknowledge" {
+            return None;
+        }
+        let complete = if value["status"] == "person-acknowledged-unknown" {
+            value["accepted"] == true
+                && value["durable"] == true
+                && value["acknowledgment"] == json!(acknowledgment)
+        } else if value["status"] == "failed" {
+            value["accepted"] == false && value["durable"] == false
+        } else {
+            false
+        };
+        value["pending"] = json!(!complete);
+        return Some((value, complete));
+    }
     if matches!(
         request,
         Request::DesktopOwnership { .. }
@@ -1023,6 +1111,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
             | Request::TaskMessageInputRelease { .. }
             | Request::DeferredSend { .. }
             | Request::DeferredAnswer { .. }
+            | Request::TeamPersonDecide { .. }
+            | Request::TeamPersonPlanPiece { .. }
+            | Request::TeamPersonAction { .. }
             | Request::CompactToSend { .. }
             | Request::SessionResume { .. }
             | Request::TaskStartReconcile { .. }
@@ -1108,6 +1199,9 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::TaskMessageInputRelease { .. }
         | Request::DeferredSend { .. }
         | Request::DeferredAnswer { .. }
+        | Request::TeamPersonDecide { .. }
+        | Request::TeamPersonPlanPiece { .. }
+        | Request::TeamPersonAction { .. }
         | Request::CompactToSend { .. }
         | Request::SessionResume { .. }
         | Request::TaskStartReconcile { .. }
@@ -1116,6 +1210,7 @@ fn checked(request: &Request, mut value: Value, lookup: bool) -> Option<(Value, 
         | Request::TerminationOutcome { .. } => return None,
         // The service's own receipt of exactly this child, value and the
         // revision after the expected one (zerus-sa9qn.50).
+        Request::InputAcknowledge { .. } => return None,
         Request::QuestionRouteChild {
             session_id,
             person_off,

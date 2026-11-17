@@ -15,7 +15,30 @@ use zerus_team_plan::Problem;
 /// the operation; `create` is its own function because it reads the catalog.
 pub(super) fn variant(command: &str) -> Option<&'static str> {
     Some(match command {
+        "set-phase-barrier" => "set_phase_barrier",
+        "pause-phase" => "pause_phase",
+        "resume-phase" => "resume_phase",
+        "move-phase" => "move_phase",
+        "set-phase-acceptance" => "set_phase_acceptance",
+        "send-back-phase" => "send_back_phase",
+        "submit-phase-corrections" => "submit_phase_corrections",
+        "edit-phase-corrections" => "edit_phase_corrections",
+        "approve-phase-corrections" => "approve_phase_corrections",
+        "reject-phase-corrections" => "reject_phase_corrections",
+        "undo-phase-correction-rejection" => "undo_phase_correction_rejection",
+        "approve-phase" => "approve_phase",
+        "reject-phase" => "reject_phase",
+        "undo-reject-phase" => "undo_reject_phase",
+        "accept-phase" => "accept_phase",
+        "submit-draft-phase" => "submit_draft_phase",
+        "edit-draft-phase" => "edit_draft_phase",
+        "add-member" => "add_member",
+        "swap-member" => "swap_member",
+        "rename-team" => "rename_team",
+        "set-goal" => "set_goal",
         "settings" => "change_settings",
+        "advance-base" => "advance_base",
+        "validation-settings" => "set_validation_config",
         "pause" => "pause",
         "resume" => "resume",
         "stop" => "stop",
@@ -23,6 +46,7 @@ pub(super) fn variant(command: &str) -> Option<&'static str> {
         "decide" => "decide_card",
         "admit" => "admit",
         "route" => "route",
+        "set-deps" => "set_deps",
         "accept" => "accept",
         "return" => "return",
         "reassign" => "reassign",
@@ -56,11 +80,20 @@ pub(super) fn run(
     }
     let mut store = Store::open(&config.state)?;
     let identity = actor::resolve(&store, caller)?;
+    if command == "advance-base" {
+        actor::person_only(&identity, command)?;
+    }
     if matches!(command, "ask" | "verdict") {
         actor::member_session(&identity, command)?;
     }
     let request = build(variant, &request_input(provided)?)?;
-    let reply = ops::apply(&mut store, &identity.actor, &request, input::now_ms())?;
+    let reply = ops::apply_with_config(
+        &mut store,
+        &identity.actor,
+        &request,
+        input::now_ms(),
+        Some(config),
+    )?;
     reply_view(&identity.actor, &request.team, &reply)
 }
 
@@ -77,7 +110,7 @@ pub(super) fn create(
 
 /// The request is the operation's own fields plus the envelope; it never names
 /// its actor and never chooses the operation.
-fn build(variant: &str, text: &str) -> Result<Request, Problem> {
+pub(super) fn build(variant: &str, text: &str) -> Result<Request, Problem> {
     let mut fields = input::object(text)?;
     refuse_operation_word(&fields)?;
     fields.insert("op".into(), json!(variant));

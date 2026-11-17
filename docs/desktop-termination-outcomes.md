@@ -232,3 +232,47 @@ variant later; the coordinator owns that follow-up. Manual review loads only on
 its explicit action, so importing the action menus does not initialize its
 native event subscription. The original computer/path are copied before the
 asynchronous import and checked independently by the existing native review.
+
+## Reserved Unix mutation fence
+
+The shared Unix mutation-admission check treats the presence of a session's
+reserved `terminating` field as unfinished termination, even when its value is
+null, false or malformed. Native Terminal input and Clear input check the fresh
+record under the state writer before staging
+or claiming input and before later key handoffs. Screen/composer reads and
+original receipt lookups remain available; an old or unknown terminal UUID
+never delivers input again when the marker disappears.
+
+Claude's answer channel takes its handover lock before admitting an offer
+under the state writer. It checks the fresh record's marker and original hook
+caller immediately before each claim rename, retaining that writer through
+the rename and releasing it before a transient retry wait. A busy writer leaves
+the original offer unclaimed for a later poll or retraction, within the same
+channel lifetime. A marker that arrives while handover is busy therefore cannot
+turn an unclaimed offer into an uncertain claimed answer. Existing claimed or
+emitted outcomes never authorize another delivery.
+
+This exclusion opens only the existing writer lock, without links or special
+files, and performs no rename or worktree recovery. A bounded read of pending
+rename intents refuses an intent for the original run/session (or an untracked
+matching label); a proved different run may reuse an old label without blocking
+the claim. Unknown or incomplete intent inventories refuse. Kernel liveness
+and hook-caller checks never fall back to a `ps` helper while holding this lock.
+Other hook callers and normal writer recovery keep their existing behavior.
+The fresh binding read uses its observed fixed location and bounded metadata,
+without a fleet scan or presentation repair. Special or changed bindings refuse;
+the original channel deadline is checked again after these reads before claim.
+The native background-job registry and owning-window registry each require a
+regular file opened without following its final link or waiting on a FIFO, at
+most 64 KiB. Missing, unreadable, special, malformed or oversized registry
+metadata refuses the hold before claim, leaving the original offer and UUID
+unclaimed. The same bounded reader protects ordinary registry correlation.
+
+This preclaim gate does not serialize final stdout delivery with a future
+marker publisher or prove physical writer/pipe settlement. That integration
+remains required before graceful Terminate can be activated.
+
+This is refusal-only support. It does not create a marker, request graceful
+exit or establish descendant custody. Graceful Terminate remains gated on the
+original writer, marker, custody and finalization prerequisites. Pause, native
+Stop and Windows retain their existing behavior.

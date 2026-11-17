@@ -83,7 +83,7 @@ describe("the owner's compact session row menu", () => {
   it("a live row starts with Mark then Mute and keeps its terminal entry", () => {
     const live = toSession("", "run:run-live", { name: "codex/example/live", agent: "codex", state: "running", status: "ready", run_id: "run-live", conversation_id: "conv-live" });
     expect(labels(sessionMenu(live))).toEqual([
-      "Mark needs attention", "Mute", "Keep cache warm", "---", "Compact session row", "---",
+      "Mark needs attention", "Mute", "Keep cache warm", "---", "Add to favorites", "Compact session row", "---",
       "Open terminal", "Copy connect command", "Copy session ID", "---",
       "Clear session…", "Rename…", "Move to project…", "---", "Terminate session…",
     ]);
@@ -113,6 +113,16 @@ describe("the owner's compact session row menu", () => {
     // An agent that cannot keep its cache warm cannot be turned on, and a session without a conversation cannot keep warm.
     expect(entry(row(host({ supported: false, reason: "This agent reports no prompt cache that pings can keep warm." })))).toMatchObject({ disabled: true });
     expect(entry(row(host(), { conversation_id: undefined })).disabled).toBe(true);
+  });
+
+  it.each(["stopped", "paused"])("offers Archive separately from Forget for a %s session", (state) => {
+    const saved = toSession("", "run:saved-menu", {
+      name: "codex/example/saved-menu", agent: "codex", state, status: "paused", resumable: true,
+      run_id: "saved-menu", conversation_id: "saved-conversation", allowed_actions: ["resume", "archive", "forget"],
+    });
+    const entries = sessionMenu(saved);
+    expect(menuItem("Move to archive", entries)).toMatchObject({ disabled: false, icon: "archive" });
+    expect(menuItem("Forget saved session…", entries)).toMatchObject({ danger: true });
   });
 
   it("Clear session checks an unselected row and opens the same dialog for it", async () => {

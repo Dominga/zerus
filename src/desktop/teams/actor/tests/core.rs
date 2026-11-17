@@ -97,7 +97,7 @@ impl super::super::ports::Ports for Fake {
             if let Some(state) = self.pause_on_recheck.take() {
                 let mut store = Store::open(&state)?;
                 let revision = store.team(TEAM)?.unwrap().revision;
-                ops::apply(
+                ops::tests::apply_fixture(
                     &mut store,
                     &person(),
                     &request(
@@ -1043,3 +1043,5 @@ fn a_refused_reopen_opens_the_failure_gate_the_hand_back_witness_reads() {
     });
     assert!(settled.gate.is_some(), "{settled:?}");
 }
+
+mod cutover_delivery;

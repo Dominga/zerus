@@ -6,6 +6,8 @@ use crate::state::repositories::directory::Directory;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::state) struct DeliveryQuery {
+    #[serde(default = "original_schema")]
+    schema: u8,
     request_id: String,
     message_request_id: String,
     expected_machine_id: String,
@@ -17,6 +19,8 @@ pub(in crate::state) struct DeliveryQuery {
     #[serde(default)]
     agent_id: String,
 }
+
+fn original_schema() -> u8 { 1 }
 
 fn uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok_and(|id| !id.is_nil() && id.to_string() == value)
@@ -32,7 +36,8 @@ fn provider(value: &str) -> bool {
 }
 impl DeliveryQuery {
     pub(in crate::state) fn validate(&self, name: &str) -> Result<()> {
-        if name.is_empty()
+        if !matches!(self.schema, 1 | 2)
+            || name.is_empty()
             || !bounded_identity(name, 512)
             || !uuid(&self.request_id)
             || !uuid(&self.message_request_id)
@@ -61,7 +66,7 @@ impl DeliveryQuery {
         }
     }
     fn response(&self, name: &str, reason: &str) -> Value {
-        json!({"schema":1,"request_id":self.request_id,"message_request_id":self.message_request_id,
+        json!({"schema":self.schema,"request_id":self.request_id,"message_request_id":self.message_request_id,
             "name":name,"machine_id":self.expected_machine_id,"session_id":self.expected_session_id,
             "run_id":self.expected_run_id,"conversation_id":self.expected_conversation_id,
             "provider":self.provider,"agent_id":self.agent_id,"native_digest":self.native_digest,
@@ -71,15 +76,15 @@ impl DeliveryQuery {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct DeliveryBinding {
-    schema: u8,
-    machine_id: String,
-    session_id: String,
-    provider: String,
-    namespace: String,
+pub(in crate::state) struct DeliveryBinding {
+    pub(in crate::state) schema: u8,
+    pub(in crate::state) machine_id: String,
+    pub(in crate::state) session_id: String,
+    pub(in crate::state) provider: String,
+    pub(in crate::state) namespace: String,
 }
 impl DeliveryBinding {
-    fn valid(&self) -> bool {
+    pub(in crate::state) fn valid(&self) -> bool {
         self.schema == 1
             && uuid(&self.machine_id)
             && uuid(&self.session_id)
@@ -224,6 +229,25 @@ fn controlled_directory(directory: &Directory) -> std::result::Result<bool, &'st
 /// provider reconciliation or write. Unknown never grants replay authority.
 pub(in crate::state) fn delivery_receipt(state: &Path, name: &str, query: &DeliveryQuery) -> Value {
     let fail = |reason| query.response(name, reason);
+    if query.schema == 2 && matches!(query.source(), Source::Terminal) {
+        if let Ok(mut negative) = input::outcome::lookup(state, &query.message_request_id) {
+            for (field, expected) in [
+                ("request_id", query.message_request_id.as_str()), ("name", name),
+                ("machine_id", query.expected_machine_id.as_str()),
+                ("session_id", query.expected_session_id.as_str()),
+                ("run_id", query.expected_run_id.as_str()),
+                ("conversation_id", query.expected_conversation_id.as_str()),
+                ("provider", query.provider.as_str()), ("native_digest", query.native_digest.as_str()),
+            ] {
+                if negative[field].as_str() != Some(expected) { return fail("binding_changed"); }
+            }
+            if !query.agent_id.is_empty() { return fail("binding_changed"); }
+            negative["message_request_id"] = negative["request_id"].clone();
+            negative["request_id"] = json!(query.request_id);
+            negative["agent_id"] = json!("");
+            return negative;
+        }
+    }
     let receipt = match original(state, query.source(), &query.message_request_id) {
         Ok(value) => value,
         Err(reason) => return fail(reason),

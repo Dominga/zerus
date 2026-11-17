@@ -52,6 +52,7 @@ export function createContentSearch(port: SearchPort) {
   let queue: SearchHost[] = [];
   let running = 0, current = 0;
   let timer: (() => void) | undefined;
+  let preparationRefreshes = 1, partialZero = false;
   const updateBusy = () => setBusy(!!timer || queue.length > 0 || current > 0);
   function drain() {
     while (running < 4 && queue.length) {
@@ -59,6 +60,7 @@ export function createContentSearch(port: SearchPort) {
       running++; current++;
       void Promise.resolve().then(() => port.read(host.computer, text, token)).then((reply) => {
         if (token !== generation || reply.query !== query) return;
+        if (reply.truncated && !reply.results.length && (reply.contents_unavailable || reply.unavailable_sessions)) partialZero = true;
         const room = SEARCH_HITS - hits().length;
         batch(() => {
           setLimited((old) => old || reply.truncated || reply.results.length > room);
@@ -71,6 +73,14 @@ export function createContentSearch(port: SearchPort) {
         if (token === generation && String(error) !== "superseded") setErrors((old) => [...old, `${host.machine}: ${String(error).slice(0, 240)}`].slice(0, SEARCH_HOSTS));
       }).finally(() => { running--; if (token === generation) current--; drain(); updateBusy(); });
     }
+    if (active && !timer && !queue.length && !current && !hits().length && partialZero && preparationRefreshes > 0) {
+      partialZero = false; const token = generation;
+      timer = later(() => {
+        if (token !== generation) return;
+        timer = undefined; const remaining = preparationRefreshes - 1;
+        configure(query, hosts, active, true); preparationRefreshes = remaining;
+      }, 500);
+    }
     updateBusy();
   }
   function configure(nextQuery: string, nextHosts: SearchHost[], nextActive: boolean, force = false) {
@@ -78,7 +88,7 @@ export function createContentSearch(port: SearchPort) {
     if (key === signature && !force) return;
     key = signature; port.cancel(generation++); timer?.(); timer = undefined;
     query = nextQuery.trim(); hosts = nextHosts.slice(0, SEARCH_HOSTS); active = nextActive;
-    queue = []; current = 0;
+    queue = []; current = 0; partialZero = false; preparationRefreshes = 1;
     batch(() => { setHits([]); setErrors([]); setUnavailable(0); setLimited(nextHosts.length > SEARCH_HOSTS); setBusy(false); });
     if (!active || [...query].length < 2) return;
     if ([...query].length > 256 || /\p{Cc}/u.test(query)) { setErrors([tr("Search requires 2..256 printable characters.")]); return; }
@@ -91,7 +101,7 @@ export function createContentSearch(port: SearchPort) {
   }
   return { hits, errors, busy, limited, unavailable, configure,
     refresh: () => configure(query, hosts, active, true),
-    dispose: () => { timer?.(); timer = undefined; queue = []; current = 0; setBusy(false); setHits([]); port.cancel(generation++); },
+    dispose: () => { active = false; partialZero = false; preparationRefreshes = 0; timer?.(); timer = undefined; queue = []; current = 0; setBusy(false); setHits([]); port.cancel(generation++); },
   };
 }
 

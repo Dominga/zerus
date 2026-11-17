@@ -11,6 +11,7 @@ pub(super) fn references(request: &Request) -> Result<Vec<String>, Problem> {
     let mut refs = vec![format!("team:{}", request.team)];
     for (field, prefix) in [
         ("node", "node"),
+        ("phase", "phase"),
         ("member", "member"),
         ("effect_request_id", "effect"),
         ("item", "inbox"),
@@ -31,20 +32,54 @@ pub(super) fn references(request: &Request) -> Result<Vec<String>, Problem> {
     {
         refs.push(format!("task:{task}"));
     }
+    for field in ["scope", "relative_to"] {
+        if let Some(scope) = value.get(field) {
+            if let Some(phase) = scope.get("phase").and_then(|v| v.as_u64()) {
+                refs.push(format!("phase:{phase}"));
+            }
+            if let Some(id) = scope.get("publication").and_then(|v| v.as_str()) {
+                refs.push(format!("publication:{id}"));
+            }
+            if let Some(id) = scope
+                .get("rework")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+            {
+                refs.push(format!("rework:{id}"));
+            }
+        }
+    }
+    if let Some(pause) = value.get("pause").and_then(|v| v.as_str()) {
+        refs.push(format!("pause:{pause}"));
+    }
     Ok(refs)
 }
 
-pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
+pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<u64> {
     let kind = ctx
         .event
         .map(str::to_owned)
         .map_or_else(|| kind(ctx.op), Ok)?;
     let mut body = match ctx.op {
+        Operation::AdvanceBase { commit } => {
+            let reference: String = ctx
+                .db
+                .query_row(
+                    "SELECT main_ref FROM base_advances WHERE team=?1 AND revision=?2",
+                    params![ctx.team.id, ctx.reply.revision],
+                    |r| r.get(0),
+                )
+                .map_err(storage)?;
+            format!("Base advanced from {} to {commit} via {reference}. Earlier hand-outs keep their assigned base.",ctx.team.base_commit)
+        }
         Operation::CloseCard { reason, .. } => reason.clone(),
         Operation::ObserveTask { node, observation }
             if ctx.event == Some("person_override") && observation.key != KeyState::Ours =>
         {
             format!("Task {node} left the team.")
+        }
+        Operation::ObserveTask { node, .. } if ctx.event == Some("accepted_superseded") => {
+            format!("The person's own run replaced the accepted result of task {node}; the accepted decision was superseded and nothing was merged.")
         }
         // What the hand-out came to, and a refusal's reason, in the row's
         // own text (zerus-63rru.79): an intent that typed nothing must not
@@ -57,6 +92,12 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         _ => format!("{kind} at revision {}", ctx.reply.revision),
     };
     let mut refs = references(request)?;
+    if let Some(member) = &ctx.reply.member {
+        let reference = format!("member:{member}");
+        if !refs.contains(&reference) {
+            refs.push(reference);
+        }
+    }
     if let Some(earlier) = ctx.superseded {
         let (old, new) = replacement(ctx, earlier)?;
         body.push_str(&format!(
@@ -67,6 +108,7 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
         refs.push(format!("decision:{}", new.0));
     }
     ctx.db.execute("INSERT INTO journal(team,at_ms,actor,kind,request_id,text,refs) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![ctx.team.id,ctx.now,encode(ctx.actor)?,kind,request.request_id,body,encode(&refs)?]).map_err(storage)?;
+    let source_seq = ctx.db.last_insert_rowid() as u64;
     let cutoff: Option<u64> = ctx
         .db
         .query_row(
@@ -84,7 +126,7 @@ pub(super) fn append(ctx: &Context<'_>, request: &Request) -> Result<()> {
     {
         archive(ctx, None)?;
     }
-    Ok(())
+    Ok(source_seq)
 }
 /// A hand-out's outcome as the journal says it: its name, then its reason,
 /// cleaned as outside text is where the service takes it

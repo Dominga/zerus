@@ -54,6 +54,8 @@ pub(crate) mod compact_to_send;
 pub(crate) mod creation_clone;
 pub(crate) mod creation_launch;
 pub(crate) mod creation_worktree;
+pub(crate) mod team_person;
+pub(crate) mod team_person_actions;
 // Its one caller, the task editor's Service-mode routing, lands together with
 // attachments by reference (zerus-5wmh.66.4.4.2); until then it is unused.
 /// A question card's answer handed to the service (zerus-5wmh.66.4.7,
@@ -1839,6 +1841,7 @@ async fn request(
             "automatic_approvals"
                 | "question_routes"
                 | "question_route_child"
+                | "input_acknowledge"
                 | "maintenance_configure"
                 | "cache_maintenance"
         )
@@ -2830,6 +2833,36 @@ pub async fn desktop_service_question_routes(
         enabled,
     )
     .await
+}
+
+/// Explicit confirmation in the Terminal view; the service verifies native person authority.
+#[tauri::command]
+pub async fn acknowledge_input(
+    source: tauri::State<'_, crate::commands::AppState>,
+    target: zerus_client_core::actions::Target,
+    binding: String,
+    original_request_id: String,
+    pending_at: f64,
+) -> Result<Value, String> {
+    if !target.computer.is_empty() {
+        return Err("Review this input in Zerus on its own computer.".into());
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "System clock unavailable")?
+        .as_secs_f64();
+    let acknowledgment = zerus_client_core::input_acknowledgment::Acknowledgment {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        name: target.name,
+        expected_run_id: target.run_id,
+        expected_conversation_id: target.conversation_id,
+        original_request_id,
+        pending_at,
+        terminal_binding_id: binding,
+        expires_at: now + 5.0,
+    };
+    frontend::acknowledge_input_command(source.desktop_service().filter(|_| mode()), acknowledgment)
+        .await
 }
 
 #[cfg(test)]

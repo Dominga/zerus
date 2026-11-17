@@ -1,6 +1,6 @@
 //! Deliberate, identity-checked input to an existing interactive agent.
-//! A receipt acknowledges terminal submission, never a model response. Once input
-//! may have reached the PTY we retain its request ID and never automatically retry.
+//! A receipt acknowledges submission to a native input route, never a model response.
+//! Once input may have reached that route we retain its request ID and never retry.
 //! Codex's one-line status footer names its folder as `/…` or `~/…`, and with a
 //! Windows platform home also as a drive path or `~\…`. Under inbox ConPTY the
 //! hidden Claude and Kimi cursor stays at the end of the last painted row, so
@@ -13,8 +13,11 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::time::Duration;
 
+pub(in crate::state) mod acceptance;
+mod codex_queue;
 pub(crate) mod composer;
 mod diagnostic;
+pub(in crate::state) mod outcome;
 mod refusal;
 pub(crate) mod settle;
 pub(crate) mod task_refusal;
@@ -237,7 +240,7 @@ pub(super) fn checked_settings(name: &str, run_id: &str, conversation_id: &str) 
 
 /// A new session waiting at its first prompt with no work remaining, as the
 /// listing reports it; its settings may change before the first message.
-pub(super) fn first_message_ready(record: &Value) -> bool {
+pub(crate) fn first_message_ready(record: &Value) -> bool {
     first_message_candidate(record) && !telemetry::work_remains(record)
 }
 
@@ -336,6 +339,7 @@ pub(crate) fn input_unconfirmed(record: &Value) -> bool {
     let seen = if record.get("input_seen_at").is_some() { "input_seen_at" } else { "last_event_at" };
     record["input_pending_at"].as_f64().is_some_and(|pending| {
         record[seen].as_f64().unwrap_or(0.0) <= pending
+            && !terminal::acknowledgment::matches(record)
             // The person cleared the composer since (Terminal's Clear input,
             // zerus-wkj9l): what was typed is gone from it, by their choice.
             && record["input_cleared_at"].as_f64().unwrap_or(0.0) <= pending
@@ -368,7 +372,10 @@ pub(crate) fn send_in_flight(record: &Value) -> bool {
     let root = absolute_root().ok();
     in_flight(record, now(), |request| {
         let path = root.as_ref()?.join("input_receipts").join(format!("{request}.json"));
-        serde_json::from_slice(&fs::read(path).ok()?).ok()
+        // Unavailable evidence keeps the recent proof closed, without following
+        // a link or waiting on a special file before the recovery read.
+        let bytes = labels::read_file(&path, 256 * 1024).ok()??;
+        serde_json::from_slice(&bytes).ok()
     })
 }
 
@@ -424,7 +431,8 @@ fn checked_input_gate(
     // zerus-ucck P3c: the request's identities select among sessions that
     // share the label.
     expect(name, run_id, conversation_id)?;
-    let record = read(name)?;
+    let mut record = read(name)?;
+    acceptance::reconcile_locked(&mut record)?;
     checked_bound_record_gate(record, run_id, conversation_id, allow_working)
 }
 
@@ -608,7 +616,7 @@ pub(super) fn settings_unconfirmed(record: &Value) -> bool {
     settings_unconfirmed_metadata(record)
 }
 
-fn settings_unconfirmed_metadata(record: &Value) -> bool {
+pub(super) fn settings_unconfirmed_metadata(record: &Value) -> bool {
     record["settings_unconfirmed_at"]
         .as_f64()
         .is_some_and(|at| record["last_event_at"].as_f64().unwrap_or(0.0) <= at)
@@ -933,13 +941,22 @@ fn codex_warning_footer(row: &str) -> bool {
         && matches!(tail, "warning · f2 to view" | "warnings · f2 to view")
 }
 
-/// Native 0.167 adds the agent-picker hint before the idle shortcuts hint.
-/// Accept only that fixed row and its optional existing warning indicator;
-/// arbitrary trailing content still cannot terminate a draft.
+/// Native 0.167 adds an agent-picker hint; 0.169 uses a return-to-latest
+/// hint while its transcript is scrolled above the live composer. Accept only
+/// these fixed rows and the existing warning indicator, never arbitrary text.
 fn codex_shortcuts_footer(plain: &str) -> bool {
     let plain = plain.trim();
-    if plain.starts_with("? for shortcuts") { return true; }
-    let Some(tail) = plain.strip_prefix("← for agents · ? for shortcuts") else { return false; };
+    if plain.starts_with("? for shortcuts") {
+        return true;
+    }
+    let Some(tail) = [
+        "← for agents · ? for shortcuts",
+        "enter/esc latest · ? shortcuts",
+    ]
+    .iter()
+    .find_map(|prefix| plain.strip_prefix(prefix)) else {
+        return false;
+    };
     tail.is_empty() || (tail.starts_with(' ') && codex_warning_footer(tail))
 }
 
@@ -949,80 +966,163 @@ fn codex_shortcuts_footer(plain: &str) -> bool {
 pub(super) fn codex_wrapped_columns(record: &Value, screen: &str, x: usize, y: usize) -> Option<usize> {
     use unicode_width::UnicodeWidthStr;
     if record["agent"] != "codex" { return None; }
-    let columns = screen.lines().map(|line| {
-        styled_row(line).iter().map(|(ch, _)| ch).collect::<String>().width()
-    }).max()?;
+    // History can contain OSC hyperlink targets, which are not display cells.
+    // Only the live composer/footer can hint at its wrapping; the selected
+    // backend must still supply the authoritative width before input is allowed.
+    let columns = screen
+        .lines()
+        .skip(y)
+        .map(|line| {
+            styled_row(line)
+                .iter()
+                .map(|(ch, _)| ch)
+                .collect::<String>()
+                .width()
+        })
+        .max()?;
     codex_wrapped_empty(record, screen, x, y, columns).then_some(columns)
 }
 
 /// A hard-wrapped native model/path footer, with this run's exact folder.
-/// Rejoin only the exact model/folder content. Native word and hyphen wraps
-/// need not fill each row; the current width still bounds row size and count.
-pub(super) fn codex_wrapped_empty(record: &Value, screen: &str, x: usize, y: usize, columns: usize) -> bool {
+/// Rejoin the exact model/folder, or a bounded title continuation after them.
+/// Native word and hyphen wraps need not fill a folder row; title continuations
+/// require one necessary word wrap. The native width bounds every row.
+pub(super) fn codex_wrapped_empty(
+    record: &Value,
+    screen: &str,
+    x: usize,
+    y: usize,
+    columns: usize,
+) -> bool {
     use unicode_width::UnicodeWidthStr;
     if string(record, "agent") != "codex" || columns <= 2 || string(record, "cwd").is_empty() {
         return false;
     }
     let lines: Vec<_> = screen.lines().collect();
-    let Some(input) = lines.get(y) else { return false; };
-    if !styled_row(input).iter().skip(x).any(|(ch, dim)| !ch.is_whitespace() && *dim) {
+    let Some(input) = lines.get(y) else {
+        return false;
+    };
+    if !styled_row(input)
+        .iter()
+        .skip(x)
+        .any(|(ch, dim)| !ch.is_whitespace() && *dim)
+    {
         return false;
     }
     let mut style = TerminalStyle::default();
-    let rows: Vec<_> = lines.iter().map(|line| {
-        let cells = styled_cells(line, &mut style);
-        let plain: String = cells.iter().map(|(ch, _)| ch).collect();
-        let unshaded = cells.iter().filter(|(ch, _)| !ch.is_whitespace())
-            .all(|(_, cell)| !cell.background && !cell.inverse);
-        (plain, unshaded)
-    }).collect();
-    let Some(first) = (y + 1..rows.len()).find(|&i| !rows[i].0.trim().is_empty()) else { return false; };
-    if first + 2 >= rows.len() { return false; }
+    let rows: Vec<_> = lines
+        .iter()
+        .map(|line| {
+            let cells = styled_cells(line, &mut style);
+            let plain: String = cells.iter().map(|(ch, _)| ch).collect();
+            let unshaded = cells
+                .iter()
+                .filter(|(ch, _)| !ch.is_whitespace())
+                .all(|(_, cell)| !cell.background && !cell.inverse);
+            let unfaded = cells
+                .iter()
+                .filter(|(ch, _)| !ch.is_whitespace())
+                .all(|(_, cell)| !cell.dim);
+            (plain, unshaded, unfaded)
+        })
+        .collect();
+    let Some(first) = (y + 1..rows.len()).find(|&i| !rows[i].0.trim().is_empty()) else {
+        return false;
+    };
+    if first + 2 >= rows.len() {
+        return false;
+    }
     let last = rows.len() - 1;
     let shortcuts = &rows[last].0;
-    if !shortcuts.trim_start().starts_with("← for agents · ? for shortcuts")
-        || !codex_shortcuts_footer(shortcuts) || !rows[first..].iter().all(|r| r.1)
+    if !shortcuts
+        .trim_start()
+        .starts_with("← for agents · ? for shortcuts")
+        || !codex_shortcuts_footer(shortcuts)
+        || !rows[first..].iter().all(|r| r.1)
     {
         return false;
     }
     let model = codex_footer_model(record);
     let first_row = &rows[first].0;
-    let Some(label_model) = first_row.split_whitespace().next() else { return false; };
-    if !first_row.starts_with("  ") || first_row[2..].starts_with(char::is_whitespace)
+    let Some(label_model) = first_row.split_whitespace().next() else {
+        return false;
+    };
+    if !first_row.starts_with("  ")
+        || first_row[2..].starts_with(char::is_whitespace)
         || !codex_status_row(first_row, model)
         || !codex_model_footer(first_row, model.or(Some(label_model)))
     {
         return false;
     }
-    let Some((label, path)) = first_row.split_once(" · ") else { return false; };
+    let Some((label, path)) = first_row.split_once(" · ") else {
+        return false;
+    };
     let prefix = format!("{label} · ");
-    if rows[first..=last].iter().any(|(row, _)| row.width() > columns) {
+    if rows[first..=last]
+        .iter()
+        .any(|(row, _, _)| row.width() > columns)
+    {
         return false;
     }
     let cwd = string(record, "cwd");
     let home_alias = crate::platform::home().and_then(|home| shown_path::home_alias(cwd, &home));
-    let Some(folder) = std::iter::once(cwd).chain(home_alias.as_deref()).find(|folder| {
-        // Two cells are the native left margin on every physical footer row.
-        // Permit no more rows than this exact footer needs at the fresh width.
-        let needed = (prefix.width() + folder.width() - 2).div_ceil(columns - 2);
-        if last - first != needed { return false; }
-        let windows = shown_path::drive(cwd);
-        let Some(mut remaining) = shown_path::strip_prefix(folder, path, windows) else { return false; };
-        for (row, _) in &rows[first + 1..last] {
-            let Some(part) = row.strip_prefix("  ").filter(|s| !s.trim().is_empty()) else { return false; };
-            // A native word wrap may consume exactly one separating space.
-            // Hyphens and every other character must remain in the capture.
-            let rest = shown_path::strip_prefix(remaining, part, windows).or_else(|| {
-                shown_path::strip_prefix(remaining.strip_prefix(' ')?, part, windows)
-            });
-            let Some(rest) = rest else { return false; };
-            remaining = rest;
-        }
-        remaining.is_empty()
-    }) else { return false; };
+    let Some(folder) = std::iter::once(cwd)
+        .chain(home_alias.as_deref())
+        .find(|folder| {
+            // Two cells are the native left margin on every physical footer row.
+            // Permit no more rows than this exact footer needs at the fresh width.
+            let needed = (prefix.width() + folder.width() - 2).div_ceil(columns - 2);
+            if last - first != needed {
+                return false;
+            }
+            let windows = shown_path::drive(cwd);
+            let Some(mut remaining) = shown_path::strip_prefix(folder, path, windows) else {
+                return false;
+            };
+            for (row, _, _) in &rows[first + 1..last] {
+                let Some(part) = row.strip_prefix("  ").filter(|s| !s.trim().is_empty()) else {
+                    return false;
+                };
+                // A native word wrap may consume exactly one separating space.
+                // Hyphens and every other character must remain in the capture.
+                let rest = shown_path::strip_prefix(remaining, part, windows).or_else(|| {
+                    shown_path::strip_prefix(remaining.strip_prefix(' ')?, part, windows)
+                });
+                let Some(rest) = rest else {
+                    return false;
+                };
+                remaining = rest;
+            }
+            remaining.is_empty()
+        })
+        .or_else(|| {
+            // A named thread can wrap its title after a complete model/cwd row.
+            // The title is decoration, never an identity or input-authority source.
+            if model.is_none() || last - first != 2 || !rows[first..last].iter().all(|row| row.2) {
+                return None;
+            }
+            std::iter::once(cwd)
+                .chain(home_alias.as_deref())
+                .find(|folder| {
+                    wrapped_title::matches(
+                        folder,
+                        first_row,
+                        &rows[first + 1].0,
+                        columns,
+                        shown_path::drive(cwd),
+                    )
+                })
+        })
+    else {
+        return false;
+    };
     // Folding footer rows does not move the cursor or alter the composer.
     // Reuse its existing cursor, placeholder and input-boundary checks.
-    let folded = format!("{}\n\x1b[0m{prefix}{folder}\n{}", lines[..first].join("\n"), lines[last]);
+    let folded = format!(
+        "{}\n\x1b[0m{prefix}{folder}\n{}",
+        lines[..first].join("\n"),
+        lines[last]
+    );
     composer_empty_for_model("codex", &folded, x, y, model)
 }
 
@@ -1173,6 +1273,9 @@ fn checked_send_gate(record: &Value) -> std::result::Result<(), Gate> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(in crate::state) fn checked_send_terminal(record: &Value) -> Result<()> {
+    if codex_tasks::multiple(record) {
+        return Err("Codex task settings cannot verify the selected native conversation".into());
+    }
     terminal_check(record, true, true)
 }
 
@@ -1186,7 +1289,15 @@ pub(super) fn checked_terminal_on(record: &Value, empty: bool, terminal: &dyn ba
     terminal_check_on(record, empty, false, terminal)
 }
 
-fn terminal_check_on(record: &Value, empty: bool, sending: bool, terminal: &dyn backend::TerminalBackend) -> Result<()> {
+fn terminal_check_on(
+    record: &Value,
+    empty: bool,
+    sending: bool,
+    terminal: &dyn backend::TerminalBackend,
+) -> Result<()> {
+    if codex_tasks::multiple(record) && !sending {
+        return Err("Codex has separate native tasks; this Terminal action cannot verify the selected conversation".into());
+    }
     terminal_gate_on(record, empty, sending, terminal).map_err(Gate::reason)
 }
 
@@ -1618,7 +1729,8 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
         println!("{}", confirm_late(&args[0], &args[2])?);
         return Ok(0);
     }
-    if args.len() != 2 || args[1] != "--json" {
+    let terminal_outcome = args.len() == 3 && args[1] == "--delivery-outcome-v2" && args[2] == "--json";
+    if !terminal_outcome && (args.len() != 2 || args[1] != "--json") {
         return Err("usage: hgs send <session> --json (JSON from stdin), or hgs send <session> --confirm <request-id> --json".into());
     }
     let mut input = Vec::new();
@@ -1646,6 +1758,18 @@ pub(super) fn dispatch(args: &[String]) -> Result<i32> {
     if let Some(result) = native_send::front(&PublicSend(()), &args[0], &input) {
         println!("{}", result?);
         return Ok(0);
+    }
+    if terminal_outcome {
+        return match submit_core(&args[0], &input, Origin::Person, true, true) {
+            Ok(receipt) => { println!("{receipt}"); Ok(0) }
+            Err(Failure::TerminalRefusal(value)) => {
+                println!("{value}");
+                eprintln!("hgs: Message was not sent: {}", string(&value, "reason"));
+                Ok(1)
+            }
+            Err(Failure::NotOffered(witness)) => Err(witness.reason),
+            Err(Failure::Unknown(error)) => Err(error),
+        };
     }
     let receipt = submit_with(&args[0], &input, Origin::Person, true)?;
     super::teams::shadow::record(&check.bindings, &text, "hgs send");
@@ -2002,10 +2126,11 @@ enum Origin<'a> {
 /// A keep-warm ping (`keep_warm::TEXT`) for ping `id`. Like a task reply it
 /// tells a refusal before any input from a possibly delivered ping.
 pub(super) fn submit_keep_warm(name: &str, input: &[u8], id: &str) -> Submission {
-    match submit_core(name, input, Origin::KeepWarm(id), false) {
+    match submit_core(name, input, Origin::KeepWarm(id), false, false) {
         Ok(receipt) => Submission::Receipt(receipt),
         Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
         Err(Failure::Unknown(error)) => Submission::Unknown(error),
+        Err(Failure::TerminalRefusal(_)) => Submission::Unknown("Terminal refusal is unavailable to internal callers".into()),
     }
 }
 
@@ -2018,9 +2143,10 @@ pub(super) fn submit_answer(name: &str, input: &[u8]) -> Result<Value> {
 }
 
 fn submit_with(name: &str, input: &[u8], origin: Origin, retain_refusal: bool) -> Result<Value> {
-    submit_core(name, input, origin, retain_refusal).map_err(|failure| match failure {
+    submit_core(name, input, origin, retain_refusal, false).map_err(|failure| match failure {
         Failure::NotOffered(witness) => witness.reason.clone(),
         Failure::Unknown(error) => error,
+        Failure::TerminalRefusal(_) => "Terminal refusal is unavailable to internal callers".into(),
     })
 }
 
@@ -2084,10 +2210,11 @@ pub(crate) enum Submission {
 /// `submit` for a task reply that must tell a refusal before any input from
 /// one that may have delivered it.
 pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
-    match submit_core(name, input, Origin::Person, false) {
+    match submit_core(name, input, Origin::Person, false, false) {
         Ok(receipt) => Submission::Receipt(receipt),
         Err(Failure::NotOffered(witness)) => Submission::NotOffered(*witness),
         Err(Failure::Unknown(error)) => Submission::Unknown(error),
+        Err(Failure::TerminalRefusal(_)) => Submission::Unknown("Terminal refusal is unavailable to internal callers".into()),
     }
 }
 
@@ -2095,6 +2222,8 @@ pub(super) fn submit_witnessed(name: &str, input: &[u8]) -> Submission {
 enum Failure {
     NotOffered(Box<NotOffered>),
     Unknown(String),
+    /// An opted-in, durably spent negative, validated from its original store.
+    TerminalRefusal(Value),
 }
 
 /// What the receipt store already holds for a request ID, read under the
@@ -2177,6 +2306,16 @@ fn remember_before_input(typed: bool, witness: NotOffered, retain: bool) -> Fail
     failure
 }
 
+fn remember_send_refusal(typed: bool, witness: NotOffered, retain: bool, terminal: bool) -> Failure {
+    if terminal && !typed {
+        return match refusal::remember_terminal(&witness) {
+            Ok(value) => Failure::TerminalRefusal(value),
+            Err(error) => Failure::Unknown(format!("could not retain the terminal pre-input refusal: {error}")),
+        };
+    }
+    remember_before_input(typed, witness, retain)
+}
+
 /// zerus-iitw8.5: a Claude send releases the state lock while it waits for its
 /// paste to settle and for Claude's proof. Its marker on the record keeps every
 /// other input to that session out meanwhile: sends and session actions
@@ -2249,6 +2388,7 @@ fn submit_core(
     input: &[u8],
     origin: Origin,
     retain_refusal: bool,
+    terminal_outcome: bool,
 ) -> std::result::Result<Value, Failure> {
     let unknown = Failure::Unknown;
     // N34: a BOM is not part of the request or of its digest.
@@ -2265,6 +2405,11 @@ fn submit_core(
         .join("input_receipts")
         .join(format!("{request_id}.json"));
     let mut guard = Some(lock(None).map_err(unknown)?);
+    if terminal_outcome {
+        if let Some(value) = outcome::duplicate(&root, name, &request, &digest) {
+            return Err(Failure::TerminalRefusal(value));
+        }
+    }
     match refusal::admit(&receipt_path, &digest, name, &request_id, &request, retain_refusal, matches!(origin, Origin::Held)) {
         Existing::Absent => {}
         Existing::Submitted(receipt) => return Ok(receipt),
@@ -2285,12 +2430,12 @@ fn submit_core(
         waiting,
         dialog,
     };
-    let refused = |typed: bool, reason: String| remember_before_input(typed, witness(reason, false, None), retain_refusal);
+    let refused = |typed: bool, reason: String| remember_send_refusal(typed, witness(reason, false, None), retain_refusal, terminal_outcome);
     // The terminal gate's own refusal keeps its cause.
     let gated = |typed: bool, gate: Gate| {
         let waiting = matches!(gate, Gate::Waiting { .. });
         let dialog = gate.dialog().map(|d| d.name());
-        remember_before_input(typed, witness(gate.reason(), waiting, dialog), retain_refusal)
+        remember_send_refusal(typed, witness(gate.reason(), waiting, dialog), retain_refusal, terminal_outcome)
     };
     // Task 121: a delivery whose Enter did not go leaves its own paste in the
     // composer (`unsent_paste`). Before this delivery pastes, that exact paste
@@ -2321,6 +2466,13 @@ fn submit_core(
         }
         checked => checked.map_err(|gate| gated(typed, gate))?,
     };
+    if codex_tasks::multiple(&record) && effort::pending_applies(&record) {
+        return Err(refused(
+            typed,
+            "Codex task settings need a verified native task; no settings or input were sent"
+                .into(),
+        ));
+    }
     if matches!(origin, Origin::Answer) && effort::pending_applies(&record) {
         return Err(refused(
             typed,
@@ -2421,17 +2573,34 @@ fn submit_core(
     };
     let buffer = format!("hgs-input-{request_id}");
     let terminal = backend::current();
+    let mut queue = if codex_tasks::multiple(&record) {
+        if !matches!(origin, Origin::Person) {
+            return Err(refused(
+                typed,
+                "This Codex native-task operation needs its exact native input route".into(),
+            ));
+        }
+        Some(codex_queue::Queue::prepare(&record, &text).map_err(|e| refused(typed, e))?)
+    } else {
+        None
+    };
     // A staging error may leave a buffer loaded: unknown, never a witness.
-    if !terminal
-        .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
-        .map_err(|e| unknown(kimi_expiry::refused(&receipt_path,e)))?
+    if queue.is_none()
+        && !terminal
+            .stage(&buffer, pasted.as_bytes(), backend::StageErrors::Read)
+            .map_err(|e| unknown(kimi_expiry::refused(&receipt_path, e)))?
     {
         return Err(refused(
             typed,
             "could not stage terminal input; nothing was submitted".into(),
         ));
     }
-    let cleanup = || terminal.discard(&buffer);
+    let queued = queue.is_some();
+    let cleanup = || {
+        if !queued {
+            terminal.discard(&buffer);
+        }
+    };
     // Recheck immediately before the first input byte. All concurrent hgs writes
     // share this lock; a crash/exit can still race the PTY, so receipts are durable.
     if let Err(gate) = checked_record_gate(name, &request).and_then(|r| checked_send_gate(&r)) {
@@ -2454,7 +2623,12 @@ fn submit_core(
     let mut receipt = json!({"request_id":request_id,"name":name,"run_id":request.expected_run_id,
         "conversation_id":string(&record,"conversation_id"),"first_message":string(&record,"conversation_id").is_empty(),"digest":digest,"status":"in_progress",
         "submitted_at":submitted_at,"submitted_text":text,"text":request.text.trim(),"attachments":paths,"transport":"terminal"});
-    if pre_send_compaction.is_object() { receipt["pre_send_compaction"] = pre_send_compaction; }
+    if queued {
+        receipt["transport"] = json!("codex_queue");
+    }
+    if pre_send_compaction.is_object() {
+        receipt["pre_send_compaction"] = pre_send_compaction;
+    }
     if let Some(target) = session_graph::target_receipt(&record) {
         delivery::bind(&mut receipt, &record, &target);
         receipt["graph_target"] = target;
@@ -2470,6 +2644,7 @@ fn submit_core(
     }
     // Preserve attachments after any possible input: the agent may read them later.
     let _ = attachments.map(tempfile::TempDir::keep);
+    acceptance::bind_native_context(&mut record, &receipt);
     record["input_pending_at"] = json!(submitted_at);
     record["input_pending_request"] = json!(request_id);
     // Task 98: the composer was empty, so an earlier delivery's leftover
@@ -2477,6 +2652,8 @@ fn submit_core(
     if let Some(fields) = record.as_object_mut() {
         fields.remove("unsent_paste");
     }
+    record["input_pending_digest"] = receipt["digest"].clone();
+    record["input_pending_text_sha256"] = json!(format!("{:x}", Sha256::digest(string(&receipt, "submitted_text").as_bytes())));
     // From this send on the record follows the acceptance rule.
     if record.get("input_seen_at").is_none() {
         record["input_seen_at"] = json!(0.0);
@@ -2511,6 +2688,13 @@ fn submit_core(
     let mut residue: Option<String> = None;
     let mut pasted_at = now();
     let result: Result<()> = (|| {
+        if let Some(queue) = &mut queue {
+            let id = queue.offer()?;
+            receipt["native_queued_message_id"] = json!(id);
+            receipt["status"] = json!("submitted");
+            receipt_index::persist(&receipt_path, &receipt)?;
+            return Ok(());
+        }
         pasted_at = now();
         terminal.paste(&buffer, pane, backend::Paste::Composer)?;
         deadline = std::time::Instant::now() + settle::WINDOW;
@@ -3503,6 +3687,49 @@ and then stop"));
     }
 
     #[test]
+    fn codex_scrolled_footer_preserves_the_live_composer_guards() {
+        // Native Codex 0.169.0, private Responses stream held open while PageUp
+        // and mouse-wheel scrolling change history above the live composer.
+        let screen = include_str!("../../tests/fixtures/codex-composer-scrolled-0169.txt");
+        assert!(composer_empty("codex", screen, 2, 31));
+        let plain = "enter/esc\x1b[0;2m latest\x1b[0m · \x1b[1m?\x1b[0m shortcuts";
+        let footer = screen.lines().last().unwrap();
+        for suffix in [
+            "",
+            "   ⚠ 1 warning · f2 to view",
+            "   ⚠ 2 warnings · f2 to view",
+        ] {
+            let changed = screen.replace(footer, &format!("  {plain}{suffix}"));
+            assert!(composer_empty("codex", &changed, 2, 31), "{suffix}");
+        }
+        for footer in [
+            "enter/esc latest · ? shortcuts draft",
+            "enter/esc latest · ? shortcuts ⚠ 0 warnings · f2 to view",
+            "enter/esc latest · ? shortcuts ⚠ 2 warnings · enter to approve",
+            "enter/esc latest · ? shortcuts\n  draft",
+            "enter/esc latest · Approve command?",
+            "enter latest · ? shortcuts",
+            "arbitrary footer",
+        ] {
+            let changed = screen.replace(screen.lines().last().unwrap(), footer);
+            assert!(!composer_empty("codex", &changed, 2, 31), "{footer}");
+        }
+        for draft in [
+            "",
+            "retained draft",
+            "\n  draft continuation",
+            "\n  enter/esc latest · ? shortcuts",
+        ] {
+            let changed = screen.replace("\x1b[2mAsk Codex to do anything\x1b[0m", draft);
+            assert!(!composer_empty("codex", &changed, 2, 31), "{draft}");
+        }
+        assert!(!composer_empty("codex", screen, 3, 31));
+        assert!(!composer_empty("codex", screen, 2, 30));
+        assert!(!composer_empty("claude", screen, 2, 31));
+        assert!(!composer_empty("kimi", screen, 2, 31));
+    }
+
+    #[test]
     fn codex_warning_footer_does_not_turn_an_empty_queue_composer_into_a_draft() {
         // Codex 0.166's separate warning row can occupy the shortcuts row.
         let screen = "Working\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n  GPT-6.1-Sol default · /fixture\n    ⚠ \x1b[33m2 warnings\x1b[0m · \x1b[1mf2\x1b[0m to view";
@@ -3906,3 +4133,8 @@ mod clear_input_tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod wrapped_title_tests;
+
+mod wrapped_title;

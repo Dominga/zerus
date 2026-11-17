@@ -85,6 +85,10 @@ fn ancestor(pid: u32) -> Result<String> {
 }
 
 pub(super) fn admit(record: &Value) -> Result<Caller> {
+    admit_with(record, process_alive)
+}
+
+fn admit_with(record: &Value, alive: fn(&Value) -> bool) -> Result<Caller> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if string(record, "agent") != "claude" {
@@ -104,30 +108,32 @@ pub(super) fn admit(record: &Value) -> Result<Caller> {
             && old_start
             && record.get("run_identity_version").is_none();
         match dsh::host_check() {
-            dsh::HostCheck::Under => {
-                return Err(refused("a resident DeepSeek host owns this process tree"))
+            dsh::HostCheck::Under | dsh::HostCheck::Unregistered => {
+                return Err(refused("a resident DeepSeek host owns this process tree"));
             }
             dsh::HostCheck::Unverified(reason) if !legacy => return Err(refused(&reason)),
             _ => {}
         }
         if legacy {
-            eprintln!("hgs: legacy Claude hook record has no PID/start pin; retaining existing hook behavior without caller proof");
+            eprintln!(
+                "hgs: legacy Claude hook record has no PID/start pin; retaining existing hook behavior without caller proof"
+            );
             return Ok(Caller {
                 authority: Authority::Legacy,
             });
         }
         let pinned =
             pinned.ok_or_else(|| refused("the native launch record has lost its PID/start pin"))?;
-        if !process_alive(record) {
+        if !alive(record) {
             return Err(refused(
                 "the recorded Claude PID/start pin is no longer live",
             ));
         }
         // A held background job has its own process, not the window's PID.
-        let job = continuations::caller_job(record);
+        let job = continuations::caller_job(record, alive);
         let pid = job.unwrap_or(pinned.0);
         let birth = ancestor(pid)?;
-        if !process_alive(record) {
+        if !alive(record) {
             return Err(refused("the recorded Claude PID/start pin changed"));
         }
         Ok(Caller {
@@ -141,9 +147,21 @@ pub(super) fn admit(record: &Value) -> Result<Caller> {
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = record;
+        let _ = (record, alive);
         Ok(Caller {})
     }
+}
+
+/// Claim admission must never launch a fallback helper under the writer.
+pub(super) fn native_alive(record: &Value) -> bool {
+    native_alive_with(record, crate::platform::process_start_time)
+}
+
+fn native_alive_with(record: &Value, start: impl FnOnce(u32) -> Option<String>) -> bool {
+    let expected = string(record, "process_start");
+    let Some(pid) = record["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0) else { return false; };
+    !expected.is_empty() && start(pid).as_deref() == Some(expected)
 }
 
 /// This transport is Claude-only; other providers still use the shared hook.
@@ -201,6 +219,14 @@ impl Caller {
 
     #[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
     pub(super) fn recheck(&mut self, record: &Value) -> Result<()> {
+        self.recheck_with(record, process_alive)
+    }
+
+    pub(super) fn recheck_for_claim(&mut self, record: &Value) -> Result<()> {
+        self.recheck_with(record, native_alive)
+    }
+
+    fn recheck_with(&mut self, record: &Value, alive: fn(&Value) -> bool) -> Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         match &self.authority {
             Authority::Unchanged => {}
@@ -210,7 +236,7 @@ impl Caller {
                 }
                 // Once a pin appears, this worker can never downgrade it.
                 if pin(record).is_some() || record.get("run_identity_version").is_some() {
-                    *self = admit(record)?;
+                    *self = admit_with(record, alive)?;
                 }
             }
             Authority::Native {
@@ -221,12 +247,12 @@ impl Caller {
             } => {
                 if string(record, "agent") != "claude"
                     || pin(record).as_ref() != bound.as_ref()
-                    || !process_alive(record)
+                    || !alive(record)
                     || crate::platform::process_identity(*pid).is_none_or(|now| now.birth != *birth)
                 {
                     return Err(refused("the admitted Claude run or process changed"));
                 }
-                if *background && !continuations::holds_job(record, *pid) {
+                if *background && !continuations::holds_job_with(record, *pid, alive) {
                     return Err(refused(
                         "the background job is no longer held by this Claude window",
                     ));
@@ -239,7 +265,39 @@ impl Caller {
                 }
             }
         }
-        let _ = record;
+        let _ = (record, alive);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn claim_liveness_requires_readable_matching_kernel_start_without_ps_fallback() {
+        let record = json!({"pid":std::process::id(),"process_start":process_start(std::process::id())});
+        assert!(!string(&record, "process_start").is_empty());
+        assert!(native_alive_with(&record, |_| Some(string(&record, "process_start").into())));
+        assert!(!native_alive_with(&record, |_| None), "unreadable kernel evidence must refuse without ps");
+        assert!(!native_alive_with(&record, |_| Some("another start".into())));
+        assert!(!native_alive_with(&json!({"pid":0,"process_start":"start"}), |_| panic!("zero PID")));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn claim_background_hold_uses_the_same_native_only_liveness_policy() {
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let entries = temp.path().join("sessions");
+        fs::create_dir(&entries).unwrap();
+        let pid = std::process::id();
+        let job = u32::MAX - 1; // A private registry filename, never a process query.
+        fs::write(entries.join(format!("{pid}.json")), json!({"pid":pid,"parkedJobId":"fixture-job"}).to_string()).unwrap();
+        fs::write(entries.join(format!("{job}.json")), json!({"pid":job,"kind":"bg","jobId":"fixture-job"}).to_string()).unwrap();
+        let record = json!({"pid":pid,"process_start":process_start(pid),"claude_registry_home":temp.path()});
+        assert!(continuations::holds_job(&record, job), "ordinary liveness still permits the held job");
+        assert!(!continuations::holds_job_with(&record, job, |_| false),
+            "a second liveness read must keep the claim's native-only policy");
     }
 }

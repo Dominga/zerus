@@ -12,23 +12,29 @@ mod finish;
 mod fleet;
 mod integration;
 mod ledger;
+mod lead_queue;
 mod maintenance;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native_work;
+mod non_delivery;
 mod observe;
 mod ports;
 mod presence;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod sweep_items;
 pub(crate) use presence::presence;
+mod reply;
 mod reports;
 mod retry;
 mod schedule;
 mod tasks;
+mod publication;
+mod rework;
 mod project_limit;
 mod terminal;
+mod timing;
 #[cfg(test)]
 mod tests;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -105,6 +111,24 @@ impl Runtime {
         if team.home != self.machine {
             return Ok(());
         }
+        self.non_deliveries(store, &team, now)?;
+        let planning_pass = team.status == TeamStatus::Planning;
+        if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
+            self.publications(store, ports, &team, now)?;
+        }
+        let Some(team) = store.team(id)? else {
+            return Ok(());
+        };
+        if team.status == TeamStatus::Planning {
+            // Planning has no task/reopen/stage/integration work. Its durable
+            // goal uses the existing lead inbox and witnessed doorbell route.
+            self.observe(store, ports, &team, now, safety)?;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if store.planning(id)?.is_some_and(|p| !p.paused) {
+                self.team_entry(store, ports, &team, now)?;
+            }
+            return Ok(());
+        }
         if !matches!(team.status, TeamStatus::Running | TeamStatus::Paused) {
             let settled = self.terminal_deliveries(store, &team, now);
             self.for_row(|_| settled)?;
@@ -119,11 +143,15 @@ impl Runtime {
         if ports.stopped() {
             return Ok(());
         }
+        if !planning_pass {
+            self.publications(store, ports, &team, now)?;
+        }
         self.stage_tasks(store, ports, &team, now)?;
         if store
             .team(id)?
             .is_some_and(|t| t.status == TeamStatus::Running)
         {
+            self.lead_queue(store, &team, now)?;
             self.integrations(store, ports, &team, now)?;
             if ports.stopped() {
                 return Ok(());
@@ -138,6 +166,7 @@ impl Runtime {
             // A paused team hands nothing out, so it needs no member now.
             self.unreadable_members(store, &team, &schedule::Needs::default(), now)?;
         }
+        self.phase_completion(store, &team, now)?;
         self.cleanup_metadata(store, &team, now)?;
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {

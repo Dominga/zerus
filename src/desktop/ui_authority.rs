@@ -311,6 +311,8 @@ struct Metadata {
     ownership: Option<super::ownership::Origin>,
     notification: Option<zerus_client_core::desktop::notification_control::NativeControl>,
     application: String,
+    #[cfg(all(test, unix))]
+    expired: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 pub(super) struct Validated(Request, Freshness, Metadata);
 
@@ -661,6 +663,13 @@ enum Freshness {
     Fixture,
 }
 impl Validated {
+    pub fn input_acknowledgment(&self) -> Result<&zerus_client_core::input_acknowledgment::Acknowledgment> {
+        self.check()?;
+        let Request::InputAcknowledge { acknowledgment } = &self.0 else {
+            anyhow::bail!("not an input acknowledgment");
+        };
+        Ok(acknowledgment)
+    }
     pub fn id(&self) -> &str {
         self.0.id()
     }
@@ -673,6 +682,15 @@ impl Validated {
         self.0.operation()
     }
     fn check(&self) -> Result<()> {
+        #[cfg(all(test, unix))]
+        ensure!(
+            !self
+                .2
+                .expired
+                .as_ref()
+                .is_some_and(|expired| expired.load(std::sync::atomic::Ordering::Acquire)),
+            "model original expired"
+        );
         match &self.1 {
             Freshness::Native {
                 caller,
@@ -702,6 +720,7 @@ impl Validated {
             !matches!(
                 self.0,
                 Request::DesktopOwnership { .. }
+                    | Request::InputAcknowledge { .. }
                     | Request::DesktopOwnershipObserve { .. }
                     | Request::NotificationControl { .. }
                     | Request::CacheMaintenance { .. }
@@ -712,6 +731,9 @@ impl Validated {
                     | Request::TaskMessageInputRelease { .. }
                     | Request::DeferredSend { .. }
                     | Request::DeferredAnswer { .. }
+                    | Request::TeamPersonDecide { .. }
+                    | Request::TeamPersonPlanPiece { .. }
+                    | Request::TeamPersonAction { .. }
                     | Request::CompactToSend { .. }
                     | Request::SessionResume { .. }
                     | Request::TaskStartReconcile { .. }
@@ -781,6 +803,63 @@ impl Validated {
         self.check()?;
         let Request::DeferredAnswer { intent } = self.0 else {
             anyhow::bail!("not a deferred answer");
+        };
+        Ok(*intent)
+    }
+    /// Consumed by the Teams kernel only after its BEGIN IMMEDIATE.
+    pub(crate) fn team_person_decide(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person::Intent> {
+        self.check()?;
+        let Request::TeamPersonDecide { intent } = self.0 else {
+            anyhow::bail!("not a Teams Person decision");
+        };
+        Ok(*intent)
+    }
+    pub(crate) fn team_person_intent(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::team_person::Intent> {
+        match &self.0 {
+            Request::TeamPersonDecide { intent } => Some(intent),
+            _ => None,
+        }
+    }
+
+    /// Preparation is data only and cannot be consumed as a Person action.
+    pub(crate) fn team_person_plan_piece(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person_actions::Piece> {
+        self.check()?;
+        let Request::TeamPersonPlanPiece { piece } = self.0 else {
+            anyhow::bail!("not a native team plan piece")
+        };
+        Ok(*piece)
+    }
+
+    pub(crate) fn team_person_action_intent(
+        &self,
+    ) -> Option<&zerus_client_core::desktop::team_person_actions::Intent> {
+        match &self.0 {
+            Request::TeamPersonAction { intent } => Some(intent),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn check_team_person_action(&self) -> Result<()> {
+        self.check()?;
+        ensure!(
+            self.team_person_action_intent().is_some(),
+            "not a native team action"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn team_person_action(
+        self,
+    ) -> Result<zerus_client_core::desktop::team_person_actions::Intent> {
+        self.check_team_person_action()?;
+        let Request::TeamPersonAction { intent } = self.0 else {
+            anyhow::bail!("not a native team action")
         };
         Ok(*intent)
     }
@@ -961,6 +1040,17 @@ impl Validated {
             Freshness::Fixture,
             Metadata::default(),
         )
+    }
+    /// Deterministic expiry at a real writer/commit boundary. This is only a
+    /// model clock; production still checks native processes and Instant.
+    #[cfg(all(test, unix))]
+    pub fn fixture_clock(
+        value: &Value,
+        expired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        let mut permit = Self::fixture(value);
+        permit.2.expired = Some(expired);
+        permit
     }
     /// Actor policy model only: production observations obtain this Origin
     /// from authenticate(), never from a supplied value.
@@ -1234,6 +1324,8 @@ impl Authorized {
                 ownership: self.ownership_origin,
                 notification: self.notification,
                 application: self.application,
+                #[cfg(all(test, unix))]
+                expired: None,
             },
         ))
     }
@@ -1642,6 +1734,30 @@ fn validate(
             "deferred answer does not match the native service frontend"
         );
     }
+    if let Request::TeamPersonDecide { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "Teams Person decision does not match the native service frontend"
+        );
+    }
+    if let Request::TeamPersonPlanPiece { piece } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && piece.scope.configuration == configuration,
+            "Teams plan preparation does not match the native service frontend"
+        );
+    }
+    if let Request::TeamPersonAction { intent } = &envelope.request {
+        ensure!(
+            reply.request.ownership_mode
+                == Some(zerus_client_core::desktop::ownership::Mode::Service)
+                && intent.scope.configuration == configuration,
+            "Teams Person action does not match the native service frontend"
+        );
+    }
     if let Request::CompactToSend { intent } = &envelope.request {
         ensure!(
             reply.request.ownership_mode
@@ -1733,6 +1849,7 @@ fn dev_number(version: &str) -> Option<u64> {
 // string allowlist that can silently reject an otherwise authenticated read.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum OrderedOperation {
+    InputAcknowledge,
     WorktreeProgramStop,
     WorktreeProgramCleanup,
     TerminationOutcome,
@@ -1744,6 +1861,9 @@ enum OrderedOperation {
     TaskMessageInputRelease,
     DeferredSend,
     DeferredAnswer,
+    TeamPersonDecide,
+    TeamPersonPlanPiece,
+    TeamPersonAction,
     CompactToSend,
     SessionResume,
     TaskStartReconcile,
@@ -1762,6 +1882,7 @@ impl From<&Request> for OrderedOperation {
     fn from(request: &Request) -> Self {
         use zerus_client_core::desktop::notification_control::Command;
         match request {
+            Request::InputAcknowledge { .. } => Self::InputAcknowledge,
             Request::CacheMaintenance { .. } => Self::CacheMaintenance,
             Request::TerminationOutcome { .. } => Self::TerminationOutcome,
             Request::WorktreeProgramStop { .. } => Self::WorktreeProgramStop,
@@ -1773,6 +1894,9 @@ impl From<&Request> for OrderedOperation {
             Request::TaskMessageInputRelease { .. } => Self::TaskMessageInputRelease,
             Request::DeferredSend { .. } => Self::DeferredSend,
             Request::DeferredAnswer { .. } => Self::DeferredAnswer,
+            Request::TeamPersonDecide { .. } => Self::TeamPersonDecide,
+            Request::TeamPersonPlanPiece { .. } => Self::TeamPersonPlanPiece,
+            Request::TeamPersonAction { .. } => Self::TeamPersonAction,
             Request::CompactToSend { .. } => Self::CompactToSend,
             Request::SessionResume { .. } => Self::SessionResume,
             Request::TaskStartReconcile { .. } => Self::TaskStartReconcile,
@@ -2820,6 +2944,162 @@ mod tests {
         assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
     }
 
+    #[test]
+    fn team_person_decide_requires_the_original_service_frontend_and_its_own_typed_boundary() {
+        use zerus_client_core::desktop::{
+            creation_clone::Scope,
+            ownership::Mode,
+            team_person::{Intent, Plan},
+        };
+        let (mut envelope, caller, frontend, mut reply) = fixture();
+        let intent = Intent {
+            scope: Scope {
+                configuration: "a".repeat(64),
+                service_epoch: id(90),
+            },
+            machine: id(91),
+            store: "b".repeat(64),
+            facts: "c".repeat(64),
+            plan: Plan {
+                request_id: id(92),
+                team: id(93),
+                expected_revision: 7,
+                card: 1,
+                decision: "acknowledged".into(),
+            },
+        };
+        envelope.request = Request::TeamPersonDecide {
+            intent: Box::new(intent.clone()),
+        };
+        assert_eq!(
+            OrderedOperation::from(&envelope.request),
+            OrderedOperation::TeamPersonDecide
+        );
+        assert_ne!(
+            OrderedOperation::TeamPersonDecide,
+            OrderedOperation::DeferredAnswer
+        );
+        reply.request.request_id = intent.plan.request_id.clone();
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Native);
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        reply.request.ownership_mode = Some(Mode::Service);
+        validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+        let value = serde_json::json!(envelope.request);
+        assert!(Validated::fixture(&value).into_request().is_err());
+        assert_eq!(
+            Validated::fixture(&value).team_person_decide().unwrap(),
+            intent
+        );
+        if let Request::TeamPersonDecide { intent } = &mut envelope.request {
+            intent.scope.configuration = "f".repeat(64);
+        }
+        reply.request.fingerprint = envelope.request.fingerprint();
+        assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn team_person_actions_keep_preparation_separate_from_the_person_boundary() {
+        use base64::Engine;
+        use zerus_client_core::{
+            desktop::{creation_clone::Scope, ownership::Mode, team_person_actions as wire},
+            upstream_teams::action::TeamAction,
+        };
+        let plan = wire::Plan {
+            request_id: id(92),
+            team: id(93),
+            expected_revision: 7,
+            action: wire::Action::Team {
+                change: Box::new(TeamAction::RenameTeam {
+                    name: "A native review".into(),
+                }),
+            },
+        };
+        let scope = Scope {
+            configuration: "a".repeat(64),
+            service_epoch: id(90),
+        };
+        let intent = wire::Intent {
+            scope: scope.clone(),
+            machine: id(91),
+            store: wire::StoreBinding::Existing {
+                fingerprint: "b".repeat(64),
+            },
+            facts: "c".repeat(64),
+            plan: plan.reference().unwrap(),
+            request: "d".repeat(64),
+        };
+        let piece = wire::Piece {
+            request_id: id(94),
+            scope,
+            plan: intent.plan.clone(),
+            ordinal: 0,
+            payload: base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&plan).unwrap()),
+        };
+        let preparation = Request::TeamPersonPlanPiece {
+            piece: Box::new(piece.clone()),
+        };
+        let action = Request::TeamPersonAction {
+            intent: Box::new(intent.clone()),
+        };
+        assert_ne!(
+            OrderedOperation::from(&preparation),
+            OrderedOperation::from(&action)
+        );
+        for request in [preparation.clone(), action.clone()] {
+            let (mut envelope, caller, frontend, mut reply) = fixture();
+            envelope.request = request.clone();
+            reply.request.request_id = request.id().into();
+            reply.request.fingerprint = request.fingerprint();
+            for mode in [None, Some(Mode::Native)] {
+                reply.request.ownership_mode = mode;
+                assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+            }
+            reply.request.ownership_mode = Some(Mode::Service);
+            validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).unwrap();
+            let value = serde_json::json!(request);
+            assert!(Validated::fixture(&value).into_request().is_err());
+            let mut foreign = value.clone();
+            if request.operation() == "team_person_action" {
+                foreign["intent"]["scope"]["configuration"] = serde_json::json!("f".repeat(64));
+            } else {
+                foreign["piece"]["scope"]["configuration"] = serde_json::json!("f".repeat(64));
+            }
+            envelope.request = serde_json::from_value(foreign).unwrap();
+            reply.request.fingerprint = envelope.request.fingerprint();
+            assert!(validate(&envelope, &caller, &frontend, &reply, &"a".repeat(64)).is_err());
+        }
+        let preparation = serde_json::json!(preparation);
+        assert!(Validated::fixture(&preparation)
+            .team_person_action()
+            .is_err());
+        assert_eq!(
+            Validated::fixture(&preparation)
+                .team_person_plan_piece()
+                .unwrap(),
+            piece
+        );
+        let action = serde_json::json!(action);
+        assert!(Validated::fixture(&action)
+            .team_person_plan_piece()
+            .is_err());
+        assert_eq!(
+            Validated::fixture(&action).team_person_action().unwrap(),
+            intent
+        );
+        // Native metadata execution is Unix-only; this expiry model uses
+        // its actual Process::read fixture. The shared binding checks above
+        // still compile on every target.
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(
+            Validated::fixture_expiring(&action, Instant::now() - Duration::from_secs(1))
+                .team_person_action()
+                .is_err()
+        );
+    }
+
     /// A valid compact-to-send, built as the client builds it.
     fn compact_to_send_intent(
         configuration: String,
@@ -3479,6 +3759,21 @@ mod tests {
             notification: None,
             application: "com.hgdev.hgs-tray".into(),
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn input_acknowledgment_is_only_exposed_through_its_typed_native_boundary() {
+        let ack = zerus_client_core::input_acknowledgment::Acknowledgment {
+            request_id:id(103),name:"claude/example/review".into(),expected_run_id:"run".into(),expected_conversation_id:"conversation".into(),
+            original_request_id:id(104),pending_at:10.0,terminal_binding_id:"a".repeat(64),expires_at:15.0,
+        };
+        let request = Request::InputAcknowledge { acknowledgment: Box::new(ack.clone()) };
+        let permit = live_authorized(request.clone(),1).into_request(&mut Order::default()).unwrap();
+        assert_eq!(permit.input_acknowledgment().unwrap(), &ack);
+        assert!(permit.into_request().is_err(), "generic handlers cannot consume person input authority");
+        let wrong = live_authorized(Request::ActivationWait {request_id:id(105)},1).into_request(&mut Order::default()).unwrap();
+        assert!(wrong.input_acknowledgment().is_err());
     }
 
     #[test]

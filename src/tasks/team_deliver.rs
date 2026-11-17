@@ -5,6 +5,7 @@ mod cancel;
 mod hosted;
 pub(super) mod completion;
 pub(super) mod stage;
+pub(super) mod planned;
 use crate::swarm::fence::{Admission, Closed};
 use crate::teams::{store::Store, tasks::context};
 use rusqlite::{params, OptionalExtension};
@@ -90,7 +91,7 @@ fn rule(message: impl std::fmt::Display) -> Error {
 fn not_started(error: Error) -> Error {
     if matches!(
         error.code,
-        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE
+        RULE | STALE | CUTTING_OVER | NOT_STARTED | HANDED_BACK | PROJECT_LIMIT_CODE | STORE_BUSY_CODE
     ) {
         error
     } else {
@@ -101,10 +102,10 @@ fn cutting_over() -> Error {
     Error::new(CUTTING_OVER, BUSY)
 }
 fn replica(error: zerus_replica::Error) -> Error {
-    if error.kind() == zerus_replica::ErrorKind::Refused {
-        rule(error)
-    } else {
-        fail(error)
+    match error.kind() {
+        zerus_replica::ErrorKind::Refused => rule(error),
+        zerus_replica::ErrorKind::Busy => Error::new(STORE_BUSY_CODE, error.to_string()),
+        zerus_replica::ErrorKind::Failed => fail(error),
     }
 }
 
@@ -370,12 +371,28 @@ fn request(
     };
     let base = if handover {
         attempts::render(
-            settings, starts, task, name, &to, true, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            true,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else if permit.kind == "handout" {
         attempts::render(
-            settings, starts, task, name, &to, false, &who, &body.id, refused,
+            settings,
+            starts,
+            task,
+            name,
+            &to,
+            false,
+            &who,
+            &body.id,
+            refused,
             crate::state::Continuation::SameConversation,
         )?
     } else {
@@ -452,6 +469,9 @@ fn request(
             &permit.team,
             &permit.node,
             &permit.member,
+            &store
+                .effect_base(&permit.team.id, &body.id)
+                .map_err(problem)?,
             handover.then_some((permit.reason.as_str(), earlier))
         )
         .map_err(problem)?
@@ -944,7 +964,7 @@ fn run(
             recover(config, body, &task, &reference, &kind, &here, &store, deadline)
         }
         Ok(Admission::Refused(closed)) => {
-            let (state, error) = attempts::refusal(&closed, &detail.borrow());
+            let (state, error) = attempts::refusal(config, &reference.project, &closed, &detail.borrow());
             Ok(body.reply(state, &error, None))
         }
         Ok(Admission::Legacy(closed)) => Ok(body.reply(
@@ -960,6 +980,14 @@ fn run(
     }
 }
 
+/// Real task-command writers behind an admitted in-process test transport.
+#[cfg(all(test, unix))]
+pub(crate) fn fixture_delivery(config: &Config, args: &[String], input: &[u8]) -> Value {
+    let body: Input = serde_json::from_slice(input).unwrap();
+    body.validate().unwrap();
+    run(config, args, &body, &Native, Instant::now() + std::time::Duration::from_secs(20)).unwrap()
+}
+
 fn permit_for_reservation(
     store: &Store,
     body: &Input,
@@ -969,6 +997,21 @@ fn permit_for_reservation(
     task: &TaskDoc,
 ) -> Result<Permit> {
     let fresh = permit(store, body, here)?;
+    if fresh.kind == "handout" {
+        // Spawn admission precedes this project's task lock. Recheck the
+        // existing readiness kernel under the Teams writer retained through
+        // the new attempt's save. In-hands reopen and receipt recovery differ.
+        crate::teams::ops::handout_admissible(
+            store
+                .db
+                .as_ref()
+                .ok_or_else(|| fail("Team store disappeared."))?,
+            &fresh.team,
+            body.node,
+            &body.member,
+        )
+        .map_err(problem)?;
+    }
     marker(task, &body.team, here)?;
     let current = task.view().map_err(fail)?;
     if fresh.task != old.task
@@ -1092,7 +1135,8 @@ fn delivered_test_answer(body: &Input, result: attempts::Delivered) -> Value {
 mod tests;
 #[cfg(all(test, unix))]
 pub(crate) use tests::processes::{
-    blocked_handout, removed_stage_cancel, waiting_handout, Blocked, RealCancel, RealHandout,
+    blocked_handout, fence_delivery_cycle, removed_stage_cancel, waiting_handout, with_legacy_cancel,
+    Blocked, RealCancel, RealHandout,
 };
 
 #[cfg(test)]

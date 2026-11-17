@@ -1,14 +1,25 @@
 //! Mobile reaches the local machine or one enabled, directly configured SSH peer.
 //! The remote shell sees only fixed helper commands; native argv travels as data.
-use crate::{cli, config::Config, machines, platform, swarm};
+use crate::{cli, config::Config, swarm};
+#[cfg(unix)]
+use crate::{machines, platform};
 use anyhow::{bail, ensure, Context, Result};
+#[cfg(unix)]
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
+#[cfg(any(unix, test))]
+use serde_json::json;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
+    io::{Read, Seek},
+};
+#[cfg(unix)]
+use std::io::Write;
+#[cfg(unix)]
+use std::{
+    collections::BTreeSet,
     fs,
-    io::{Read, Seek, Write},
     os::{
         fd::AsRawFd,
         unix::fs::{DirBuilderExt, OpenOptionsExt},
@@ -19,20 +30,35 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
+#[cfg(any(unix, test))]
+use std::time::Duration;
+
+#[cfg(windows)]
+mod windows;
 
 const MAX_BYTES: usize = 32 * 1024 * 1024;
+#[cfg(unix)]
 const MAX_ERROR: usize = 64 * 1024;
+#[cfg(unix)]
 const MAX_PEERS: usize = 32;
+#[cfg(unix)]
 const CAPABILITY: &str = "mobile-peer ABI 1";
+#[cfg(unix)]
 const IDENTITY_HELPER: &str = "~/.local/bin/hgs swarm __mobile-peer-identity --json";
+#[cfg(unix)]
 const LOCAL_HELPER: &str = "~/.local/bin/hgs swarm __mobile-peer-local --json";
+#[cfg(unix)]
 const REMEMBERED: &str = "swarm/mobile-peers.json";
+#[cfg(unix)]
 const REMEMBERED_LOCK: &str = "swarm/mobile-peers.lock";
+#[cfg(unix)]
 const REMEMBERED_BYTES: u64 = 64 * 1024;
+#[cfg(unix)]
 static TRANSPORT_STOP: AtomicBool = AtomicBool::new(false);
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Helper {
@@ -42,6 +68,7 @@ enum Helper {
     OwnIdentity,
 }
 
+#[cfg(unix)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct TransportRequest {
@@ -53,6 +80,7 @@ struct TransportRequest {
     deadline_ms: u64,
 }
 
+#[cfg(unix)]
 fn monotonic_ms() -> Result<u64> {
     let mut time = libc::timespec {
         tv_sec: 0,
@@ -65,10 +93,12 @@ fn monotonic_ms() -> Result<u64> {
     Ok(time.tv_sec as u64 * 1000 + time.tv_nsec as u64 / 1_000_000)
 }
 
+#[cfg(unix)]
 extern "C" fn stop_transport(_: libc::c_int) {
     TRANSPORT_STOP.store(true, Ordering::Relaxed);
 }
 
+#[cfg(unix)]
 enum CaptureMode {
     Supervisor,
     OwnedSsh { parent_pid: u32, deadline_ms: u64 },
@@ -83,6 +113,7 @@ struct LocalRequest {
     payload: Option<Value>,
 }
 
+#[cfg(unix)]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PeerRequest {
@@ -102,6 +133,7 @@ struct Identity {
 }
 
 /// An identity this gateway itself verified through one configured alias.
+#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Verified {
@@ -110,6 +142,7 @@ struct Verified {
 }
 
 /// Last verified peer identities, bound to the local identity that observed them.
+#[cfg(unix)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Remembered {
@@ -126,6 +159,7 @@ fn text(value: &str, max: usize, empty: bool) -> bool {
     (empty || !value.is_empty()) && value.len() <= max && !value.chars().any(char::is_control)
 }
 
+#[cfg(any(unix, test))]
 fn alias(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 80
@@ -135,6 +169,7 @@ fn alias(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
+#[cfg(unix)]
 fn direct(config: &Config, via: &str) -> bool {
     alias(via)
         && !config.is_self(via)
@@ -354,6 +389,31 @@ fn validate(request: &LocalRequest) -> Result<()> {
         request.payload.as_ref().is_none_or(Value::is_object),
         "native payload must be an object"
     );
+    // The negotiated mode changes receipt semantics only. Validate its exact
+    // argv after removing this one flag using the existing scoped send ABI.
+    if let [command, tail @ ..] = args.as_slice() {
+        if command == "send" && tail.iter().any(|arg| arg == "--delivery-outcome-v2") {
+            ensure!(
+                matches!(tail,
+                [name, mode, json] if session(name) && mode == "--delivery-outcome-v2" && json == "--json")
+                    || matches!(tail, [name, flag, id, mode, json] if session(name) && flag == "--session-id"
+                    && crate::state::session_id::canonical(id) && mode == "--delivery-outcome-v2" && json == "--json"),
+                "invalid negotiated send outcome argv"
+            );
+            let legacy = LocalRequest {
+                schema: request.schema,
+                target_machine_id: request.target_machine_id.clone(),
+                argv: request
+                    .argv
+                    .iter()
+                    .filter(|arg| *arg != "--delivery-outcome-v2")
+                    .cloned()
+                    .collect(),
+                payload: request.payload.clone(),
+            };
+            return validate(&legacy);
+        }
+    }
     if let Some(original_shape) = selected_auxiliary(request)? {
         return validate(&original_shape);
     }
@@ -473,8 +533,8 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 ensure!(rest.len() == 4 && rest[2] == "--request-id" && uuid(&rest[3]),
                     "directory creation requires an exact request UUID");
                 let path = &rest[1];
-                let leaf = path.rsplit('/').next().unwrap_or("");
-                ensure!(path.starts_with('/') && text(path, 4096, false)
+                let leaf = path.rsplit(|c| c == '/' || cfg!(windows) && c == '\\').next().unwrap_or("");
+                ensure!(std::path::Path::new(path).is_absolute() && text(path, 4096, false)
                     && !matches!(leaf, "" | "." | ".."), "invalid directory creation path");
             } else {
                 ensure!(rest.len() == 1 && session(&rest[0]), "invalid directory request");
@@ -544,7 +604,8 @@ fn validate(request: &LocalRequest) -> Result<()> {
                 let parent = values["--parent"];
                 ensure!(
                     parent == "~" && command == "check"
-                        || parent.starts_with('/') && !parent.starts_with("//"),
+                        || std::path::Path::new(parent).is_absolute()
+                            && !parent.starts_with("//") && !parent.starts_with("\\\\"),
                     "repository parent must be absolute"
                 );
                 let name = values["--name"];
@@ -810,12 +871,14 @@ fn session(value: &str) -> bool {
     text(value, 4096, false) && !value.starts_with(['-', '@'])
 }
 
+#[cfg(unix)]
 struct Output {
     code: i32,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
 }
 
+#[cfg(unix)]
 fn nonblocking(fd: i32) -> Result<()> {
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     ensure!(
@@ -825,6 +888,7 @@ fn nonblocking(fd: i32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_pipe<T: Read>(pipe: &mut Option<T>, bytes: &mut Vec<u8>, cap: usize) -> Result<()> {
     let Some(reader) = pipe.as_mut() else {
         return Ok(());
@@ -851,6 +915,7 @@ fn read_pipe<T: Read>(pipe: &mut Option<T>, bytes: &mut Vec<u8>, cap: usize) -> 
 
 /// No reader threads or blocking joins: inherited pipe descriptors cannot extend
 /// the whole deadline. Only this owned helper/SSH child is stopped on failure.
+#[cfg(unix)]
 fn capture_control(
     mut command: Command,
     input: &[u8],
@@ -960,6 +1025,7 @@ fn capture_control(
     result
 }
 
+#[cfg(unix)]
 fn transport(
     via: &str,
     helper: Helper,
@@ -992,6 +1058,7 @@ fn transport(
     capture_control(command, &bytes, deadline, cap, CaptureMode::Supervisor)
 }
 
+#[cfg(unix)]
 fn supervise() -> Result<i32> {
     // This helper performs no native operations itself. It owns exactly one
     // SSH/identity child and survives cancellation of the gateway wrapper.
@@ -1080,6 +1147,7 @@ fn supervise() -> Result<i32> {
     Ok(output.code)
 }
 
+#[cfg(unix)]
 fn ssh(config: &Config, via: &str, helper: &str, deadline: Instant) -> Result<Command> {
     // Each helper is a fixed source constant; request bytes stay on stdin.
     let words: Vec<_> = helper.strip_prefix("~/.local/bin/hgs ").context("invalid fixed peer helper")?.split_whitespace().collect();
@@ -1101,6 +1169,7 @@ fn ssh(config: &Config, via: &str, helper: &str, deadline: Instant) -> Result<Co
     Ok(command)
 }
 
+#[cfg(unix)]
 fn supported(via: &str, deadline: Instant) -> Result<()> {
     let output = transport(
         via,
@@ -1125,6 +1194,7 @@ fn own_identity(config: &Config) -> Result<Identity> {
     })
 }
 
+#[cfg(unix)]
 fn identity(output: Output) -> Result<Identity> {
     ensure!(output.code == 0, "mobile peer unavailable");
     let identity: Identity = serde_json::from_slice(&output.stdout)?;
@@ -1135,6 +1205,7 @@ fn identity(output: Output) -> Result<Identity> {
     Ok(identity)
 }
 
+#[cfg(unix)]
 fn verified(id: &Verified, local: &str) -> bool {
     uuid(&id.machine_id) && id.machine_id != local && text(&id.name, 256, false)
 }
@@ -1143,6 +1214,7 @@ fn verified(id: &Verified, local: &str) -> bool {
 /// damaged record, or one observed under another local identity (a copied or
 /// reset configuration), is ignored. It only describes offline routes; it never
 /// authorizes dispatch, whose destination verifies its own UUID again.
+#[cfg(unix)]
 fn remembered(config: &Config, local: &str) -> BTreeMap<String, Verified> {
     let record = fs::File::open(config.dir.join(REMEMBERED))
         .ok()
@@ -1167,6 +1239,7 @@ fn remembered(config: &Config, local: &str) -> BTreeMap<String, Verified> {
 /// Keep currently direct aliases and replace the identities verified just now.
 /// A removed or disabled edge forgets its identity. Writes happen only on a
 /// change; a writer that keeps the lock beyond a brief wait postpones this one.
+#[cfg(unix)]
 fn remember(
     config: &Config,
     local: &str,
@@ -1222,6 +1295,7 @@ fn remember(
     swarm::replace(&config.dir.join(REMEMBERED), &serde_json::to_vec(&record)?)
 }
 
+#[cfg(unix)]
 fn discovery(config: &Config) -> Result<Value> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let local = identity(transport(
@@ -1329,19 +1403,25 @@ fn local(config: &Config, request: LocalRequest) -> Result<i32> {
         serde_json::to_writer(&mut input, &payload)?;
     }
     input.rewind()?;
+    ensure!(input.metadata()?.len() <= MAX_BYTES as u64, "native payload is too large");
+    #[cfg(unix)]
     ensure!(
         unsafe { libc::dup2(input.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
         "cannot prepare native input"
     );
+    #[cfg(windows)]
+    windows::bind(input)?;
     cli::dispatch(request.argv).map_err(anyhow::Error::new)
 }
 
+#[cfg(any(unix, test))]
 fn peer_budget(argv: &[String]) -> Duration {
     let acquisition = argv.first().is_some_and(|op| op == "repository")
         && argv.get(1).is_some_and(|op| op == "clone");
     Duration::from_secs(if acquisition { 80 } else { 30 })
 }
 
+#[cfg(unix)]
 fn transport_budget(helper: Helper, request: Option<&LocalRequest>) -> Duration {
     if matches!(helper, Helper::Local) {
         if let Some(request) = request.filter(|request| validate(request).is_ok()) {
@@ -1352,6 +1432,7 @@ fn transport_budget(helper: Helper, request: Option<&LocalRequest>) -> Duration 
 }
 
 /// An agent's `mobile-peer` call (zerus-ppd26.11).
+#[cfg(unix)]
 const AGENT_REFUSED: &str = "hgs mobile-peer forwards a phone's request, which the other computer runs as the person; an agent never forwards one";
 
 fn execute(config: &Config, args: &[String]) -> Result<i32> {
@@ -1364,12 +1445,15 @@ fn execute(config: &Config, args: &[String]) -> Result<i32> {
             println!("{}", serde_json::to_string(&own_identity(config)?)?);
             Ok(0)
         }
+        #[cfg(unix)]
         "mobile-peers" => {
             println!("{}", discovery(config)?);
             Ok(0)
         }
         "__mobile-peer-local" => local(config, input()?),
+        #[cfg(unix)]
         "__mobile-peer-transport" => supervise(),
+        #[cfg(unix)]
         "mobile-peer" => {
             // The peer's __mobile-peer-local runs the phone's request as the
             // person, so an agent's process never forwards one; the
@@ -1425,6 +1509,41 @@ pub(crate) fn dispatch(config: &Config, args: &[String]) -> cli::Result<i32> {
 mod tests {
     use super::*;
     const ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    #[test]
+    fn negotiated_send_preserves_scoped_and_selected_abis_only() {
+        for selector in [false, true] {
+            let mut argv = vec!["send".to_owned(), "codex/example/send".into()];
+            if selector {
+                argv.extend(["--session-id".into(), ID.into()]);
+            }
+            argv.extend(["--delivery-outcome-v2".into(), "--json".into()]);
+            let request = LocalRequest {
+                schema: 1,
+                target_machine_id: ID.into(),
+                argv,
+                payload: Some(
+                    json!({"request_id":ID,"expected_run_id":"run","expected_conversation_id":"conversation","text":"original"}),
+                ),
+            };
+            assert!(validate(&request).is_ok());
+            for extra in [
+                "--archive",
+                "--delivery-outcome-v2",
+                "--new",
+                "--session-id",
+            ] {
+                let mut changed = LocalRequest {
+                    schema: 1,
+                    target_machine_id: ID.into(),
+                    argv: request.argv.clone(),
+                    payload: request.payload.clone(),
+                };
+                changed.argv.insert(2, extra.into());
+                assert!(validate(&changed).is_err(), "{extra}");
+            }
+        }
+    }
 
     #[test]
     fn repository_acquisition_only_admits_exact_native_actions() {
@@ -1497,7 +1616,12 @@ mod tests {
         LocalRequest {
             schema: 1,
             target_machine_id: ID.into(),
-            argv: argv.iter().map(|v| (*v).into()).collect(),
+            // Native drive-rooted equivalents for absolute fixture paths.
+            argv: argv.iter().map(|v| {
+                if cfg!(windows) && v.starts_with('/') && !v.starts_with("//") {
+                    format!("C:{v}")
+                } else { (*v).into() }
+            }).collect(),
             payload,
         }
     }
@@ -2216,6 +2340,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn fixture_config(dir: &std::path::Path) -> Config {
         Config {
             home: dir.to_str().unwrap().into(),
@@ -2231,6 +2356,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn known(machine_id: &str, name: &str) -> Verified {
         Verified {
             machine_id: machine_id.into(),
@@ -2239,6 +2365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn remembered_identities_follow_direct_edges_and_the_observing_identity() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
         let temp = tempfile::tempdir().unwrap();
@@ -2290,6 +2417,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn only_verified_local_swarm_bindings_are_identity_evidence() {
         let temp = tempfile::tempdir().unwrap();
         let config = fixture_config(temp.path());
@@ -2319,6 +2447,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_transport_never_inherits_pipes_another_worker_is_still_creating() {
         // This thread stands in for another discovery worker that holds the
         // spawn turn between creating its pipes and marking them close-on-exec,

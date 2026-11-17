@@ -3,6 +3,15 @@ use super::*;
 use std::fs;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod claim;
+pub(super) fn claim_ready(root: &Path, record: &Value, name: &str) -> Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    { claim::ready(root, record, name) }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    { let _ = (root, record, name); Ok(()) }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod guarded;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) use guarded::{
@@ -11,6 +20,10 @@ pub(super) use guarded::{
 };
 
 fn remove(path: &Path) -> Result<()> {
+    super::listing_metadata::remove_at(&root(), path, || remove_inner(path))
+}
+
+fn remove_inner(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => crate::platform::sync_dir(path.parent().ok_or("invalid state path")?)
             .map_err(|e| e.to_string()),
@@ -20,11 +33,18 @@ fn remove(path: &Path) -> Result<()> {
 }
 
 fn load(path: &Path) -> Result<Value> {
+    if let Some(bytes) = storage::listing_scope::read(path) {
+        return serde_json::from_slice(&bytes.map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string());
+    }
     serde_json::from_str(&fs::read_to_string(path).map_err(|e| e.to_string())?)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn json_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    if let Some(paths) = storage::listing_scope::paths(directory) {
+        return paths;
+    }
     if !directory.exists() {
         return Ok(Vec::new());
     }
@@ -51,6 +71,21 @@ fn validate(old: &str, new: &str) -> Result<()> {
     };
     if !valid(&a) || !valid(&b) || b.len() != 3 || a[..2] != b[..2] {
         return Err("rename must keep the same agent/project and use a nonempty tag without '/', ':', '.', control characters or surrounding whitespace".into());
+    }
+    Ok(())
+}
+
+// New requests only: recovery above/below keeps the recorded-name shape.
+pub(super) fn validate_new(old: &str, new: &str) -> Result<()> {
+    validate(old, new)?;
+    validate_new_tag(new)
+}
+
+// Provider adapters keep their existing selector/prefix checks. Only the
+// proposed tag gets the new policy; never revalidate a legacy source label.
+pub(super) fn validate_new_tag(new: &str) -> Result<()> {
+    if let Some(problem) = zerus_client_core::actions::tag_problem(new.rsplit('/').next().unwrap()) {
+        return Err(problem.into());
     }
     Ok(())
 }
@@ -86,7 +121,7 @@ pub(super) fn dispatch_scoped(args: &[String], dry: bool, scope: Option<&session
     };
     let old = &args[0];
     let new = &args[1];
-    validate(old, new)?;
+    validate_new(old, new)?;
     let _guard = lock(None)?;
     let snapshot = live()?;
     if archive_id.is_none()
@@ -479,6 +514,14 @@ pub(super) fn remove_legacy(record: &Value) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        assert!(validate_new("claude/project/old$tag", "claude/project/safe").is_ok());
+        assert!(validate("claude/project/old", "claude/project/old$tag").is_ok(), "recorded recovery stays compatible");
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag", "bad\u{2019}tag"] {
+            assert!(validate_new("claude/project/old", &format!("claude/project/{tag}")).is_err());
+        }
+    }
     /// A rename pins the history it leaves: the label as the journal of a
     /// record that had none, and the label it leaves as `launch_label` when an
     /// older hgs rebuilt the record without one. Existing values are kept.

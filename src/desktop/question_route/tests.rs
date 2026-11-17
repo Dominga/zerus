@@ -1,15 +1,16 @@
 /// Every literal a `source` takes under `src/state`, classified on purpose
-/// (zerus-sa9qn.8). Only Claude's own AskUserQuestion hook card routes; a new
+/// (zerus-sa9qn.8). Only qualified ordinary AskUserQuestion sources route; a new
 /// literal fails [`every_source_literal_under_state_is_classified`] until it
 /// is classified here.
 mod inventory {
     use std::{collections::BTreeMap, path::Path};
-    use zerus_client_core::desktop::question_route::{routable, ROUTED_SOURCE};
+    use zerus_client_core::desktop::question_route::{routable, ROUTED_SOURCES};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Class {
         /// Claude's own AskUserQuestion of the main agent, from its
-        /// PreToolUse hook (`questions::from_hook`): the only route.
+        /// PreToolUse hook, Kimi's foreground question and DeepSeek's
+        /// qualified ordinary forever-waiting request.
         Routes,
         /// Claude Code's, Codex's or Kimi's own prompt, or a synthetic
         /// native card: trust, approvals, sign-in, limits, resumes, choices.
@@ -17,7 +18,7 @@ mod inventory {
         /// Codex async questions: optional, never blocking. Codex therefore
         /// has nothing to route in v1.
         Optional,
-        /// Kimi, DeepSeek and OpenCode questions: zerus-sa9qn.34.
+        /// Unqualified API paths and OpenCode's person-only forms.
         OtherProvider,
         /// Not a question card's source: history, processes, links, goals,
         /// usage, tool metadata.
@@ -66,12 +67,12 @@ mod inventory {
         ("kimi_cache_hint", NativePrompt),
         ("startup_terminal_choice", NativePrompt),
         ("codex_async", Optional),
-        ("kimi_wire", OtherProvider),
-        ("kimi_plan_review", OtherProvider),
-        ("kimi_tool_approval", OtherProvider),
-        ("dsh_native", OtherProvider),
+        ("kimi_wire", Routes),
+        ("kimi_plan_review", NativePrompt),
+        ("kimi_tool_approval", NativePrompt),
+        ("dsh_native", Routes),
         ("dsh_native_api", OtherProvider),
-        ("opencode_native", OtherProvider),
+        ("opencode_native", Routes),
         ("adopt", NotACard),
         ("agent/disposed", NotACard),
         ("auto", NotACard),
@@ -114,6 +115,7 @@ mod inventory {
         ("native_statusline", NotACard),
         ("native_terminal", NotACard),
         ("native_usage", NotACard),
+        ("native_user_input", NotACard),
         ("process_tree", NotACard),
         ("provider_hook", NotACard),
         ("read-marks.json", NotACard),
@@ -215,22 +217,25 @@ mod inventory {
             .collect();
         assert!(
             unclassified.is_empty(),
-            "classify each new source literal in CLASSES (only Claude's own hook question routes): {unclassified:?}"
+            "classify each new source literal in CLASSES (only qualified ordinary questions route): {unclassified:?}"
         );
     }
 
     #[test]
-    fn only_the_hook_source_routes() {
+    fn only_qualified_ordinary_sources_route() {
         let routes: Vec<&str> = CLASSES
             .iter()
             .filter(|(_, class)| *class == Routes)
             .map(|(literal, _)| *literal)
             .collect();
-        assert_eq!(routes, [ROUTED_SOURCE]);
+        assert_eq!(routes, ROUTED_SOURCES);
         // An otherwise routable card routes exactly for the routed class.
         for (literal, class) in CLASSES {
             let card = serde_json::json!({"source": literal, "agent_id": "main",
-                "can_answer": true, "questions": [{"question": "?"}]});
+                "can_answer": true, "answer_transport": if *literal == "opencode_native" { "native_opencode" } else if *literal == "dsh_native" { "native_dsh" } else { "kimi_tui" },
+                "kind": "opencode_form", "status": "pending", "blocking": true,
+                "question_id":"frm_question", "native_question":{"message_id":"msg_question","tool_call_id":"call_question"},
+                "questions": [{"question": "?"}]});
             assert_eq!(routable(&card), *class == Routes, "{literal}");
         }
     }

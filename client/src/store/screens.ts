@@ -35,6 +35,8 @@ export function startScreens(page: Accessor<Page>, visibility: PageVisibility): 
     let sent: Promise<void> = Promise.resolve();
     const send = (screen: Screen, visible: boolean) => (sent = sent.then(() => screenVisible(screen, visible)).catch(() => {}));
     createEffect(on(() => screenOf(page(), hidden()), (next, previous) => {
+      // Teams and Projects share one projection and visibility slot.
+      if (next === previous) return;
       // The new screen shows before the old one hides: between Overview and
       // Accounts the hub always has an account screen and keeps its queued inspects.
       if (next) void send(next, true).then(() => reload(next));

@@ -64,7 +64,6 @@ fn bounded(value: &Value, max: usize, empty: bool) -> bool {
         (empty || !s.is_empty()) && s.len() <= max && !s.chars().any(char::is_control)
     })
 }
-#[cfg(unix)]
 pub(crate) fn validate_request(value: &Value) -> Result<()> {
     prepare_request(value).map(|_| ())
 }

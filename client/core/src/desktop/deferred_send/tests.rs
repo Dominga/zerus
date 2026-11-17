@@ -577,6 +577,28 @@ fn only_this_originals_exact_submitted_cli_receipt_is_an_outcome() {
 }
 
 #[test]
+fn exact_native_queue_receipt_is_recorded_without_reinterpreting_unknown_routes() {
+    let verified = intent().verify().unwrap();
+    let plan = &verified.plan;
+    let mut receipt = cli_receipt(plan, SUBMITTED);
+    receipt["transport"] = json!("codex_queue");
+    assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
+    receipt["native_queued_message_id"] = json!("11111111-1111-4111-8111-111111111111");
+    assert!(
+        Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap())
+            .unwrap()
+            .matches(plan)
+    );
+    receipt["native_queued_message_id"] = json!("unknown");
+    assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
+    receipt["native_queued_message_id"] = json!("00000000-0000-0000-0000-000000000000");
+    assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
+    receipt["native_queued_message_id"] = json!("11111111-1111-4111-8111-111111111111");
+    receipt["conversation_id"] = json!("different");
+    assert!(Outcome::from_receipt(plan, &serde_json::to_vec(&receipt).unwrap()).is_err());
+}
+
+#[test]
 fn verify_refuses_what_the_cli_itself_would_refuse_before_any_spawn() {
     let base = intent();
     let cp: Checkpoint = serde_json::from_str(&base.checkpoint).unwrap();

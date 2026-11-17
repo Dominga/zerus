@@ -111,10 +111,9 @@ fn every_row_that_is_not_supervised_and_quiet_never_routes() {
             Box::new(|r| r["human_request"] = json!("false")),
         ),
         ("a Codex child", Box::new(|r| r["cmd"] = json!("codex"))),
-        ("a Kimi child", Box::new(|r| r["cmd"] = json!("kimi"))),
         (
-            "an OpenCode child",
-            Box::new(|r| r["cmd"] = json!("opencode")),
+            "agent and name disagree",
+            Box::new(|r| r["cmd"] = json!("kimi")),
         ),
         (
             "not waiting for input",
@@ -176,7 +175,7 @@ fn every_row_that_is_not_supervised_and_quiet_never_routes() {
 }
 
 #[test]
-fn only_claudes_own_blocking_hook_question_routes() {
+fn only_qualified_main_blocking_questions_route() {
     assert!(routable(&card()));
     let cases: Cases<Value> = vec![
         (
@@ -217,8 +216,7 @@ fn only_claudes_own_blocking_hook_question_routes() {
     let mut screen = card();
     screen["answer_transport"] = json!("claude_tui");
     assert!(routable(&screen));
-    // Every other source never routes: Claude Code's own prompt and every
-    // synthetic or other provider's prompt, however answerable.
+    // Unqualified and person-only sources never route, however answerable.
     for source in [
         "claude_native_question",
         "claude_tool_approval",
@@ -232,8 +230,11 @@ fn only_claudes_own_blocking_hook_question_routes() {
         "codex_hooks_trust",
         "codex_sandbox_setup",
         "codex_update",
-        "kimi_wire",
+        "kimi_plan_review",
+        "kimi_tool_approval",
         "dsh_native",
+        "dsh_native_api",
+        "opencode_native",
         "",
         "HOOK",
     ] {
@@ -761,5 +762,131 @@ fn failures_escalate_immediately_without_replay_against_the_shared_contract() {
             crate::view::row(&case["row"]).quiet,
             case["quiet"].as_bool().unwrap()
         );
+    }
+}
+
+#[test]
+fn a_supervised_kimi_question_routes_with_its_exact_native_identity() {
+    let mut row = row();
+    row["name"] = json!("kimi/project/child");
+    row["cmd"] = json!("kimi");
+    let edge = edge(&row).expect("a supervised Kimi child must be eligible");
+    let mut card = card();
+    card["source"] = json!("kimi_wire");
+    card["answer_transport"] = json!("kimi_tui");
+    card["blocking"] = json!(true);
+    card["question_id"] = json!("native-question-1");
+    let mut inspected = inspect(vec![card.clone()]);
+    inspected["name"] = row["name"].clone();
+    inspected["agent"] = json!("kimi");
+    let routed = questions(&inspected, &edge, MACHINE);
+    assert_eq!(routed.len(), 1);
+    assert_eq!(routed[0].identity.question_id, "native-question-1");
+    assert_eq!(routed[0].identity.question_hash, card["question_hash"]);
+    assert_eq!(routed[0].identity.run_id, edge.run_id);
+    assert_eq!(routed[0].identity.conversation_id, edge.conversation_id);
+
+    for (key, value) in [
+        ("source", json!("kimi_tool_approval")),
+        ("source", json!("kimi_plan_review")),
+        ("source", json!("kimi_cache_hint")),
+        ("source", json!("kimi_folder_trust")),
+        ("source", json!("hook")),
+        ("agent_id", json!("child-agent")),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("optional", json!(true)),
+        ("answer_delivery", json!({"status":"in_progress"})),
+        ("can_answer", json!(false)),
+        ("answer_transport", json!("unqualified")),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("question_id", json!("kimi-cache:hash")),
+        ("question_id", json!("kimi-trust:hash")),
+        ("run_id", json!("replacement-run")),
+        ("conversation_id", json!("replacement-conversation")),
+    ] {
+        let mut refused = card.clone();
+        refused[key] = value;
+        inspected["pending_questions"] = json!([refused]);
+        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
+    }
+    inspected["pending_questions"] = json!([card]);
+    inspected["agent"] = json!("claude");
+    assert!(questions(&inspected, &edge, MACHINE).is_empty());
+}
+
+#[test]
+fn only_api_verified_pending_opencode_question_tools_route() {
+    let mut child = row();
+    child["cmd"] = json!("opencode");
+    child["name"] = json!("opencode/project/child");
+    let original_edge = edge(&child).expect("a supervised OpenCode child");
+    let mut claimed = card();
+    claimed["source"] = json!("opencode_native");
+    claimed["kind"] = json!("opencode_form");
+    claimed["status"] = json!("pending");
+    claimed["answer_transport"] = json!("native_opencode");
+    claimed["blocking"] = json!(true);
+    claimed["question_id"] = json!("frm_question");
+    claimed["native_question"] =
+        json!({"message_id":"msg_question","tool_call_id":"call_question"});
+    assert!(routable(&claimed));
+    let mut inspected = inspect(vec![claimed.clone()]);
+    inspected["agent"] = json!("opencode");
+    inspected["name"] = child["name"].clone();
+    assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
+    let mut provider_card = claimed.clone();
+    provider_card["native_question"]["tool_call_id"] = json!("toolu_native_provider_id");
+    inspected["pending_questions"] = json!([provider_card]);
+    assert_eq!(questions(&inspected, &original_edge, MACHINE).len(), 1);
+    for (key, value) in [
+        ("native_question", Value::Null),
+        ("blocking", json!(false)),
+        ("kind", json!("opencode_permission")),
+        ("status", json!("answered")),
+        ("approval", json!(true)),
+        ("answer_transport", json!("unknown")),
+    ] {
+        let mut changed = claimed.clone();
+        changed[key] = value;
+        inspected["pending_questions"] = json!([changed]);
+        assert!(
+            questions(&inspected, &original_edge, MACHINE).is_empty(),
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn a_deepseek_native_ordinary_question_routes_but_approvals_and_unproven_requests_do_not() {
+    let mut row = row();
+    row["name"] = json!("dsh/project/child");
+    row["cmd"] = json!("dsh");
+    let edge = edge(&row).expect("a supervised DeepSeek child must be eligible");
+    let mut card = card();
+    card["source"] = json!("dsh_native");
+    card["answer_transport"] = json!("native_dsh");
+    card["blocking"] = json!(true);
+    let mut inspected = inspect(vec![card.clone()]);
+    inspected["name"] = row["name"].clone();
+    inspected["agent"] = json!("dsh");
+    assert_eq!(questions(&inspected, &edge, MACHINE).len(), 1);
+    for (key, value) in [
+        ("source", json!("dsh_native_api")),
+        ("source", json!("hook")),
+        ("approval", json!(true)),
+        ("approval_choices", json!(true)),
+        ("blocking", json!(false)),
+        ("blocking", Value::Null),
+        ("answer_transport", json!("unknown")),
+        ("optional", json!(true)),
+        ("agent_id", json!("native-subagent")),
+        ("run_id", json!("replacement")),
+    ] {
+        let mut refused = card.clone();
+        refused[key] = value;
+        inspected["pending_questions"] = json!([refused]);
+        assert!(questions(&inspected, &edge, MACHINE).is_empty(), "{key}");
     }
 }

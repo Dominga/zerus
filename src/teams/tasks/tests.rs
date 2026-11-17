@@ -6,6 +6,25 @@ use crate::teams::ops::{
 use zerus_replica::{Actor as TaskActor, Position, ProjectStore, Stage, Target, TaskDoc};
 use zerus_team_plan::model::{NodeState, TaskRef};
 
+/// A positive Person setup is an explicitly modeled window original. Bare
+/// Person refusal controls below continue to call `super::send` directly.
+fn send(
+    caller: &Caller<'_>,
+    task: &TaskRef,
+    team: &str,
+    role: Option<&str>,
+    pipeline: Option<&str>,
+) -> Result<intake::Intake> {
+    #[cfg(unix)]
+    {
+        super::models::send(caller, task, team, role, pipeline)
+    }
+    #[cfg(not(unix))]
+    {
+        super::send(caller, task, team, role, pipeline)
+    }
+}
+
 /// The direct tests below have no command project lock open; the meeting
 /// still writes through one caller-owned store, never a second one.
 fn guard(caller: &Caller<'_>, doc: &TaskDoc, action: &str) -> Result<()> {
@@ -736,3 +755,42 @@ fn a_task_store_admission_that_cannot_be_taken_answers_store_busy() {
     drop(held);
     super::load(&store, &reference.uuid).unwrap();
 }
+
+#[test]
+fn person_gesture_intake_preflight_refuses_before_a_project_is_created() {
+    let h = Harness::new();
+    let error = preflight(
+        &caller(&h, &TaskActor::Person),
+        "example-project",
+        TEAM,
+        None,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "person_gesture_required");
+    assert!(!h.temp.path().join("replica").exists());
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}
+
+#[test]
+fn person_gesture_intake_refuses_before_task_metadata_or_queue_writes() {
+    let h = Harness::new();
+    let reference = document(&h);
+    let before = task(&h, &reference);
+    let revision = before.revision();
+    let error = super::send(
+        &caller(&h, &TaskActor::Person),
+        &reference,
+        TEAM,
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "person_gesture_required");
+    let after = task(&h, &reference);
+    assert_eq!(after.revision(), revision);
+    assert_eq!(after.team().unwrap(), before.team().unwrap());
+    assert!(h.store.queue(TEAM, 200, None).unwrap().rows.is_empty());
+}
+mod timing;

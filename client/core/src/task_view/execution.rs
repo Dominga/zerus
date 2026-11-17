@@ -93,7 +93,7 @@ fn nonempty(value: &Value, key: &str) -> Option<bool> {
 }
 
 impl Execution {
-    pub(super) fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         value.as_object()?;
         let current = match value.get("current") {
             None | Some(Value::Null) => None,

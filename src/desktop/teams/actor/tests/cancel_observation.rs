@@ -39,7 +39,7 @@ fn fixture() -> (Harness, Native, TaskRef, super::super::cancel::Pending) {
     };
     tasks.save(&mut doc).unwrap();
     drop(tasks);
-    let node = crate::teams::tasks::send(
+    let node = crate::teams::tasks::models::send(
         &crate::teams::tasks::Caller {
             state: h.temp.path(),
             machine: &team.home,
@@ -144,7 +144,7 @@ fn outcomes(h: &Harness, node: u32) -> u32 {
 fn stop(state: &Path) {
     let mut store = Store::open(state).unwrap();
     let revision = store.team(TEAM).unwrap().unwrap().revision;
-    crate::teams::ops::apply(
+    crate::teams::ops::tests::apply_fixture(
         &mut store,
         &person(),
         &crate::teams::ops::tests::request(revision, Operation::Stop),

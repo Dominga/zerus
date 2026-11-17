@@ -10,6 +10,7 @@ import supplement from "./i18n.next-ru.json";
 // trNoop() tables or from literal component props, never from session text,
 // agent output, identities or file names.
 const DYNAMIC_FILES: Record<string, string> = {
+  "./store/phase-controls.ts": "the closed product/Core phase-control reasons registered in its trNoop table; unknown prose stays verbatim",
   "./ui/components/Rail.tsx": "its own screen table",
   "./ui/components/TitleBar.tsx": "the rail's screen table (Rail.tsx ITEMS)",
   "./ui/teams/decisions.ts": "the lead-changes digest's group names (trNoop GROUP_LABELS)",

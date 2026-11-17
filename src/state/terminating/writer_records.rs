@@ -1,5 +1,6 @@
-//! Per-run pending writer data and close-only lease custody. No production
-//! caller yet. The host must hold the normal state writer at admission, check
+//! Per-run pending writer data and close-only lease custody. The dormant owned
+//! supervisor bootstraps its domain; real mutators are not enrolled. The host
+//! must hold the normal state writer at admission, check
 //! the original record fence and retain the original native request identity.
 //! These rows never select an agent, send input, signal, archive or clean up.
 //!
@@ -11,11 +12,14 @@
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 
+pub(super) mod domain;
+pub(super) mod startup;
 mod store;
 use store::{Lease, Store};
 mod admission;
 mod gate;
 mod io;
+mod marker;
 
 const VERSION: u8 = 1;
 const ROWS: usize = 16;
@@ -30,8 +34,9 @@ pub(super) struct Run {
     run: String,
 }
 
-/// Initialization belongs to a newly attested supervisor, not a status lookup
-/// or recovery of missing files. There is no production caller in this leaf.
+/// Primitive format fixtures share the original creator's publication path.
+/// Production can only obtain a live domain through its sealed creation source.
+#[cfg(test)]
 pub(super) fn initialize(scope: &Run, until: Instant) -> Result<()> {
     Store::initialize(scope, until)
 }

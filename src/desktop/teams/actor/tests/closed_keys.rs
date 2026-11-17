@@ -178,15 +178,23 @@ fn returned_from_sync() -> (Harness, String, String) {
     let uuid = bind(&h, 97, TEAM, &home);
     let node = queue(&mut h, &uuid);
     close_cancelled(&mut h, &uuid, node);
-    let old = {
+    let (seal, old, source_store) = {
         let tasks = ProjectStore::open(&h.temp.path().join("replica"), "example-project").unwrap();
-        tasks.load(&uuid).unwrap().snapshot().unwrap()
+        let (seal, bytes) = tasks.export_cutover(&uuid).unwrap();
+        let source = ProjectStore::store_id(&h.temp.path().join("replica")).unwrap();
+        (seal, bytes, source)
     };
     let remote_root = tempfile::tempdir().unwrap();
     let incoming = {
         let remote =
             ProjectStore::open(&remote_root.path().join("replica"), "example-project").unwrap();
-        let mut doc = zerus_replica::TaskDoc::from_bytes(&old).unwrap();
+        // A second native writer needs its own admitted source-bound cutover;
+        // loading a transport snapshot never supplies that authority.
+        let (capture, _) = remote.prepare_cutover(&uuid, FOREIGN).unwrap();
+        remote
+            .catch_up_cutover(&old, &capture, &home, &source_store, &seal.identity())
+            .unwrap();
+        let mut doc = remote.load(&uuid).unwrap();
         // Advance the remote branch with the real key writers. The final key
         // write is concurrent with and later in Loro order than the clear.
         for n in 0..8 {

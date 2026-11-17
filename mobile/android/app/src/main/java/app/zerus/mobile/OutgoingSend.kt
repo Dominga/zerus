@@ -54,4 +54,6 @@ internal class OutgoingSend(
 
 /** The outbox mutation POST. The attempt evidence is required by type (zerus-a4mub.21). */
 internal suspend fun submitOutgoing(api: RelayApi, connection: Connection, target: Target, payload: JSONObject, id: String,
-    attempt: SendAttempt): JSONObject = api.submit(connection, target, "send", payload, id, attempt)
+    attempt: SendAttempt, nativeIntent:NativeSendIntent?=null): JSONObject =
+    if(nativeIntent==null) api.submit(connection,target,"send",payload,id,attempt)
+    else api.submit(connection,target,NativeSendOutcome.send,NativeSendOutcome.request(id,nativeIntent,payload),id,attempt)

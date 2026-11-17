@@ -9,6 +9,7 @@ import { collapseTeams } from "./collapsed-teams";
 import type { Session, Status } from "../ui/sessions/types";
 import type { FolderScope } from "../ui/sessions/scope-filters";
 import { trNoop } from "../i18n";
+import { archiveReveal, forgetListReveal } from "./listReveal";
 export { isActive, needsAttention };
 
 // Interface state of the first screen: page, selection, filters, list layout,
@@ -37,6 +38,7 @@ export function setSelectedKey(value?: string | ((previous: string | undefined) 
   return batch(() => {
     const previous = untrack(selectedKey);
     const next = setSelectedKeyRaw((current) => typeof value === "function" ? value(current) : value);
+    if (next !== previous) forgetListReveal();
     if (next !== previous && untrack(detailTab) === "taskview") setDetailTab("activity");
     return next;
   });
@@ -196,7 +198,8 @@ export function bindArchivedRows(lookup: (key: string) => Session | undefined) {
 
 export const selected = createMemo<Session | undefined>(() => {
   const key = selectedKey();
-  return key ? catalog.rows[key] ?? archivedRow(key) ?? searchRow(key) : undefined;
+  return key ? catalog.rows[key] ?? archivedRow(key) ?? searchRow(key)
+    ?? (archiveReveal()?.session.key === key ? archiveReveal()!.session : undefined) : undefined;
 });
 
 /** The window's online state of a row: its computer's rows are current (Qt's `entry.online`). */

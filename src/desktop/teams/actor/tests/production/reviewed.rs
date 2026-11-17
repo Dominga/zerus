@@ -26,7 +26,7 @@ fn change(state: &Path, node: u32, mode: &str) {
             observation: o,
         }
     };
-    ops::apply(
+    ops::tests::apply_fixture(
         &mut store,
         &if mode == "stop" { person() } else { service() },
         &crate::teams::ops::tests::request(team.revision, operation),
@@ -81,11 +81,29 @@ fn a_merge_rechecks_the_accepted_attempt_at_the_ref_update_and_allows_done() {
         "stop",
         "done",
     ] {
-        let (h, o, plan) = merge_fixture();
+        let (h, o, plan, task) = merge_fixture_task();
         let state = h.temp.path().to_owned();
         let node = plan.node;
-        crate::teams::integrate::BEFORE_ADMISSION
-            .with(|s| *s.borrow_mut() = Some(Box::new(move || change(&state, node, mode))));
+        crate::teams::integrate::BEFORE_ADMISSION.with(|s| {
+            *s.borrow_mut() = Some(Box::new(move || {
+                if mode == "done" {
+                    // The person accepts the review in the task itself: a
+                    // real Done the store observes and applies, so the
+                    // revision admission (zerus-63rru.37 round 4) holds.
+                    edit(&state, &task, |doc| {
+                        doc.set_stage(
+                            zerus_replica::Stage::Done,
+                            &zerus_replica::Actor::Person,
+                            9,
+                        )
+                        .unwrap()
+                    });
+                    observe_task(&state, &task).unwrap();
+                } else {
+                    change(&state, node, mode)
+                }
+            }))
+        });
         let result = native(&h).work_merge(&plan);
         let tip = git(&o.root, &o.empty, &["rev-parse", &plan.branch]);
         if mode == "done" {
@@ -95,8 +113,15 @@ fn a_merge_rechecks_the_accepted_attempt_at_the_ref_update_and_allows_done() {
             );
             assert_ne!(tip, plan.base);
         } else {
+            // Each refusal is the check this mode names, ahead of the
+            // revision admission that the synthetic observation also fails.
+            let expected = if mode == "stop" {
+                "Integration admission changed"
+            } else {
+                "The accepted task's reviewed attempt changed"
+            };
             assert!(
-                matches!(result, ports::MergeResult::Unavailable { .. }),
+                matches!(&result, ports::MergeResult::Unavailable { reason } if reason == expected),
                 "{mode}: {result:?}"
             );
             assert_eq!(tip, plan.base, "{mode}");

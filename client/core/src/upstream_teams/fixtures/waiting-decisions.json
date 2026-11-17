@@ -1,0 +1,121 @@
+{
+  "items": [
+    {
+      "by": "",
+      "card": 1,
+      "created_ms": 1,
+      "decisions": [
+        "retry"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:1",
+      "kind": "launch_capacity",
+      "node": null,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "Team member creation: no_account_available."
+    },
+    {
+      "by": "",
+      "card": 2,
+      "created_ms": 2,
+      "decisions": [
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:2",
+      "kind": "launch_blocked",
+      "node": null,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "Member m2: worktree_unavailable."
+    },
+    {
+      "by": "",
+      "card": 3,
+      "created_ms": 3,
+      "decisions": [
+        "approve",
+        "reject"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:3",
+      "kind": "integration",
+      "node": 2,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "Approve integration of the accepted result."
+    },
+    {
+      "by": "",
+      "card": 4,
+      "created_ms": 4,
+      "decisions": [
+        "retry",
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:4",
+      "kind": "team_actor_blocked",
+      "node": null,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "gate:integrate:2: The integration branch moved outside the team."
+    },
+    {
+      "by": "",
+      "card": 5,
+      "created_ms": 5,
+      "decisions": [
+        "retry",
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:5",
+      "kind": "team_actor_blocked",
+      "node": 3,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "Task 3: the held decision return waits for its observation."
+    },
+    {
+      "by": "",
+      "card": 6,
+      "created_ms": 6,
+      "decisions": [
+        "snooze",
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:6",
+      "kind": "note",
+      "node": null,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "A card with a decision this version does not know."
+    },
+    {
+      "by": "",
+      "card": 7,
+      "created_ms": 7,
+      "decisions": [
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:7",
+      "kind": "note",
+      "node": null,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "Tell the team the release moved to Monday."
+    },
+    {
+      "by": "",
+      "card": 8,
+      "created_ms": 8,
+      "decisions": [
+        "acknowledged"
+      ],
+      "id": "00000000-0000-4000-8000-00000000beef:8",
+      "kind": "report_waiting",
+      "node": 3,
+      "state": "open",
+      "team": "00000000-0000-4000-8000-00000000beef",
+      "text": "The report on task 3 has waited 45 minutes for the lead's decision."
+    }
+  ],
+  "next": null
+}

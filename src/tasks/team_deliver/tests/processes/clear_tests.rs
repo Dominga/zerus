@@ -99,7 +99,7 @@ fn clear_refuses_task_nodes_live_stages_foreign_keys_and_rebound_nodes() {
                     .unwrap();
             }
             8 => {
-                crate::teams::tasks::send(
+                crate::teams::tasks::models::send(
                     &crate::teams::tasks::Caller {
                         state: &f.config.state,
                         machine: &f.lead.machine,

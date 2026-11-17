@@ -49,17 +49,24 @@ fn holding(state: &str) -> (Harness, u32, String) {
         "cutting_over" => h.outcome(&id, HandoutOutcome::CuttingOver { reason }),
         _ => unreachable!(),
     }
-    assert_eq!(effect(&h, &id).state, state);
+    assert_eq!(
+        effect(&h, &id).state,
+        if state == "cutting_over" {
+            "refused"
+        } else {
+            state
+        }
+    );
     (h, node, id)
 }
 
 #[test]
 fn removal_settles_an_unstarted_hand_out_in_each_open_state_and_tells_the_lead_once() {
-    for state in ["reserved", "submitted", "uncertain", "cutting_over"] {
+    for state in ["reserved", "submitted", "uncertain"] {
         let (mut h, node, id) = holding(state);
         let before = items(&h, node);
         // An uncertain end already told the lead once.
-        let told = usize::from(matches!(state, "uncertain" | "cutting_over"));
+        let told = usize::from(state == "uncertain");
         assert_eq!(before.len(), told, "{state}");
         h.run(&person(), removed("m1")).unwrap();
 
@@ -568,4 +575,14 @@ fn lead_actor() -> Actor {
         member: "lead".into(),
         session: m.session.unwrap(),
     }
+}
+
+#[test]
+fn removal_after_proven_non_delivery_does_not_hand_back_or_hold_the_node() {
+    let (mut h, node, id) = holding("cutting_over");
+    h.run(&person(), removed("m1")).unwrap();
+    assert_eq!(effect(&h, &id).state, "refused");
+    assert!(!h.node(node).hold);
+    assert!(items(&h, node).is_empty());
+    h.intent(node, "m2");
 }

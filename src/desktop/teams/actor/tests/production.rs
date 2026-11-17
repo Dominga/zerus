@@ -118,6 +118,7 @@ fn owned(h: &Harness) -> Owned {
 }
 fn member(o: &Owned) -> Member {
     Member {
+        launch: None,
         id: "m1".into(),
         role: "developer".into(),
         agent: "codex".into(),
@@ -210,6 +211,14 @@ impl Drop for Owned {
         crate::teams::integrate::BEFORE_REF_WRITE.with(|s| {
             s.borrow_mut().take();
         });
+        for hook in [
+            &crate::teams::tasks::held::BEFORE_LOCK,
+            &crate::teams::tasks::held::AFTER_READ,
+        ] {
+            hook.with(|s| {
+                s.borrow_mut().take();
+            });
+        }
     }
 }
 #[test]
@@ -289,7 +298,72 @@ fn production_recovery_returns_the_integration_tip_and_a_known_negative() {
     );
 }
 
-fn merge_fixture() -> (Harness, Owned, ports::MergePlan) {
+/// A real task document in the fixture's replica, sent to the team through
+/// the product's intake, which records the task's first observation.
+fn real_task(h: &Harness) -> (u32, TaskRef) {
+    use zerus_replica::{Actor as TaskActor, Position, ProjectStore, Stage, Target};
+    let team = h.store.team(TEAM).unwrap().unwrap();
+    let tasks = ProjectStore::open(&h.temp.path().join("replica"), &team.project).unwrap();
+    let mut doc = tasks
+        .new_task(
+            "Work",
+            Stage::Todo,
+            Target::Any,
+            TaskActor::Person,
+            &Position::End,
+            "example",
+            1,
+        )
+        .unwrap();
+    let task = TaskRef {
+        project: team.project.clone(),
+        uuid: doc.uuid().into(),
+    };
+    tasks.save(&mut doc).unwrap();
+    drop(tasks);
+    let node = crate::teams::tasks::models::send(
+        &crate::teams::tasks::Caller {
+            state: h.temp.path(),
+            machine: &team.home,
+            actor: TaskActor::Person,
+        },
+        &task,
+        TEAM,
+        None,
+        None,
+    )
+    .unwrap()
+    .node
+    .unwrap();
+    (node, task)
+}
+/// One write to the task document, saved under its project lock.
+fn edit(state: &Path, task: &TaskRef, change: impl FnOnce(&mut zerus_replica::TaskDoc)) {
+    let tasks = zerus_replica::ProjectStore::open(&state.join("replica"), &task.project).unwrap();
+    let mut doc = tasks.load(&task.uuid).unwrap();
+    change(&mut doc);
+    tasks.save(&mut doc).unwrap();
+}
+/// The production service observation of the task: the replica reader that
+/// builds ObserveTask and the store's own writer.
+fn observe_task(state: &Path, task: &TaskRef) -> std::result::Result<(), zerus_team_plan::Problem> {
+    crate::teams::tasks::observe(state, task)
+}
+struct Reported {
+    h: Harness,
+    o: Owned,
+    lead: crate::teams::ops::Actor,
+    node: u32,
+    task: TaskRef,
+    commit: String,
+}
+/// A real repository with the integration branch at the team's base, a team
+/// created on that base, and a real task document that a person's legacy
+/// send took In progress and reported In review. Every store row comes from
+/// the product's writers; the store applied the document's current state.
+/// Without `stages` the default pipeline has none, so the lead decides.
+fn reported_fixture(stages: bool) -> Reported {
+    use zerus_replica::{execution::ReportKind, Actor as TaskActor};
     let mut h = Harness::empty();
     let o = owned(&h);
     let base = git(&o.root, &o.empty, &["rev-parse", "HEAD"]);
@@ -298,23 +372,47 @@ fn merge_fixture() -> (Harness, Owned, ports::MergePlan) {
     if let Operation::Create {
         base_commit,
         integration_branch,
+        bundle,
         ..
     } = &mut op
     {
         *base_commit = base.clone();
         *integration_branch = "teams/integration".into();
+        if !stages {
+            bundle.pipelines[0].stages.clear();
+        }
     }
     h.run(&person(), op).unwrap();
-    h.bind("lead");
+    let lead = h.bind("lead");
     h.bind("m1");
-    h.add(&person(), 1);
-    h.submit(1, "m1");
-    h.observe(1, ops::TaskStage::InReview);
+    let (node, task) = real_task(&h);
+    h.submit(node, "m1");
+    let home = h.store.team(TEAM).unwrap().unwrap().home;
+    edit(h.temp.path(), &task, |doc| {
+        let session = zerus_replica::SessionKey {
+            machine: home,
+            session: "codex/example/member".into(),
+            session_id: "run_id:member".into(),
+        };
+        doc.record_send(
+            &session,
+            &uuid::Uuid::new_v4().to_string(),
+            &TaskActor::Person,
+            2,
+        )
+        .unwrap();
+        let reported = doc
+            .report("Member report", ReportKind::Ready, None, &TaskActor::Person, 3)
+            .unwrap();
+        assert!(reported.moves, "{reported:?}");
+    });
+    observe_task(h.temp.path(), &task).unwrap();
+    let generation = h.store.generation(TEAM, node).unwrap().unwrap();
     h.run(
         &service(),
         Operation::RecordReport {
-            node: 1,
-            generation: 1,
+            node,
+            generation,
             member: "m1".into(),
             text: "Report".into(),
             commit: commit.clone(),
@@ -322,24 +420,52 @@ fn merge_fixture() -> (Harness, Owned, ports::MergePlan) {
         },
     )
     .unwrap();
-    h.run(&person(), Operation::Accept { node: 1 }).unwrap();
+    let branch = h.store.team(TEAM).unwrap().unwrap().integration_branch;
+    git(&o.root, &o.empty, &["branch", &branch, &base]);
+    Reported {
+        h,
+        o,
+        lead,
+        node,
+        task,
+        commit,
+    }
+}
+/// The plan the actor builds for the node's latest acceptance.
+fn merge_plan(h: &Harness, o: &Owned, node: u32, commit: &str) -> ports::MergePlan {
     let t = h.store.team(TEAM).unwrap().unwrap();
-    git(&o.root, &o.empty, &["branch", &t.integration_branch, &base]);
-    let plan = ports::MergePlan {
+    ports::MergePlan {
         team: t.id,
         owner: t.owner,
         machine: t.home,
         project: t.project,
         branch: t.integration_branch,
-        base,
+        base: t.base_commit,
         repo: o.root.join(".git").to_string_lossy().into_owned(),
-        node: 1,
-        generation: 1,
-        decision: h.accept_decision(1),
+        node,
+        generation: h.store.generation(TEAM, node).unwrap().unwrap(),
+        decision: h.accept_decision(node),
         member: "m1".into(),
-        commit,
+        commit: commit.into(),
         id: uuid::Uuid::new_v4().to_string(),
-    };
+    }
+}
+/// The reported fixture accepted by the person, with its task.
+fn merge_fixture_task() -> (Harness, Owned, ports::MergePlan, TaskRef) {
+    let Reported {
+        mut h,
+        o,
+        node,
+        task,
+        commit,
+        ..
+    } = reported_fixture(true);
+    h.run(&person(), Operation::Accept { node }).unwrap();
+    let plan = merge_plan(&h, &o, node, &commit);
+    (h, o, plan, task)
+}
+fn merge_fixture() -> (Harness, Owned, ports::MergePlan) {
+    let (h, o, plan, _) = merge_fixture_task();
     (h, o, plan)
 }
 #[test]
@@ -350,7 +476,7 @@ fn pause_committed_during_tree_computation_prevents_the_ref_update() {
         *s.borrow_mut() = Some(Box::new(move || {
             let mut store = Store::open(&state).unwrap();
             let t = store.team(TEAM).unwrap().unwrap();
-            ops::apply(
+            ops::tests::apply_fixture(
                 &mut store,
                 &person(),
                 &crate::teams::ops::tests::request(t.revision, Operation::Pause),
@@ -492,7 +618,7 @@ impl ports::Ports for PauseAtDelivery {
                 member: m.id.clone(),
             }
         };
-        ops::apply(
+        ops::tests::apply_fixture(
             &mut store,
             &person(),
             &crate::teams::ops::tests::request(current.revision, operation),
@@ -547,6 +673,74 @@ mod deferred;
 
 mod reviewed;
 
+mod applied;
+
 mod answers;
 
 mod handovers;
+
+/// Product-written tasks/reports in a private Git repository: advancing the
+/// default must leave both actor planning and native ref admission on the
+/// older hand-out's base. This also proves that advancement did not merge main.
+#[test]
+fn advance_base_integration_uses_the_handouts_base_in_actor_and_native_admission() {
+    for through_actor in [false, true] {
+        let (mut h, o, plan) = merge_fixture();
+        std::fs::write(o.root.join("main-only.txt"), "new main\n").unwrap();
+        git(&o.root, &o.empty, &["add", "main-only.txt"]);
+        git(&o.root, &o.empty, &["commit", "-qm", "Advance main"]);
+        let newer = git(&o.root, &o.empty, &["rev-parse", "main"]);
+        let repo = crate::teams::integrate::Repo {
+            git_dir: o.root.join(".git"),
+        };
+        assert!(!crate::teams::integrate::descends(&repo, &plan.commit, &newer).unwrap());
+        let team = h.store.team(TEAM).unwrap().unwrap();
+        let req = crate::teams::ops::tests::request(
+            team.revision,
+            Operation::AdvanceBase {
+                commit: newer.clone(),
+            },
+        );
+        ops::tests::base_advance::apply_with_repository_fixture(
+            &mut h.store,
+            &person(),
+            &req,
+            100,
+            &|_| Ok(repo.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            git(&o.root, &o.empty, &["rev-parse", &plan.branch]),
+            plan.base
+        );
+        if through_actor {
+            let team = h.store.team(TEAM).unwrap().unwrap();
+            let mut runtime = Runtime::open(h.temp.path(), &team.home).unwrap();
+            let mut port = super::work::Work::default();
+            port.repo = Some(repo);
+            runtime
+                .integrations(&mut h.store, &mut port, &team, 200)
+                .unwrap();
+            assert_eq!(
+                port.last_plan.as_ref().map(|p| p.base.as_str()),
+                Some(plan.base.as_str())
+            );
+        } else {
+            let result = native(&h).work_merge(&plan);
+            assert!(
+                matches!(result, ports::MergeResult::Merged { .. }),
+                "{result:?}"
+            );
+        }
+        let tip = git(&o.root, &o.empty, &["rev-parse", &plan.branch]);
+        assert_ne!(tip, plan.base);
+        assert!(!crate::teams::integrate::descends(
+            &crate::teams::integrate::Repo {
+                git_dir: o.root.join(".git")
+            },
+            &tip,
+            &newer
+        )
+        .unwrap());
+    }
+}

@@ -19,6 +19,8 @@ final class TasksModel {
     private(set) var tasksKey: ProjectKey?
     private(set) var tasksChosen: ChosenSession?
     private(set) var taskListing: [TaskInfo] = []
+    /// The retained local listing failed its latest refresh. Never native freshness.
+    private(set) var taskExecutionStale = false
     var taskTab: TaskTab = .todo
     private(set) var tasksOnlyThisSession = false
     /// The screen's next notice.
@@ -58,7 +60,153 @@ final class TasksModel {
         self.app = app
         self.replicas = replicas
         self.storageError = replicas == nil && storageError.isEmpty ? "The phone keeps no task storage." : storageError
-        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0) }
+        taskSync = replicas.map { TaskSync(client: app.client, replicas: $0, mediaUnavailable: taskEditText("task_media_exchange_update"), heldSend: taskEditText("task_send_unknown_hold"), capabilities: { [weak app] in app?.machineFeatures ?? [:] }) }
+    }
+
+    private(set) var taskEditor: TaskEditorModel?
+    private(set) var taskContent: TaskContentController?
+    private func contentContext(_ key: ProjectKey, _ target: TaskTarget) -> TaskContentContext? {
+        guard let connection = app.connections.first(where: { $0.id == key.connectionId }) else { return nil }
+        let bound: String? = if case .session(let session) = target { session.machine } else { nil }
+        let matches = app.machines.filter { $0.connectionId == key.connectionId && (bound != nil ? $0.machineId == bound : $0.id == tasksChosen?.computerId) }
+        guard matches.count == 1 else { return nil }
+        return TaskContentContext(connection: connection, key: key, projectName: taskProjectName(key), computer: matches[0])
+    }
+    private func contentUpload(_ context: TaskContentContext, _ target: TaskTarget) -> Bool {
+        TaskContentCapabilities.upload(context, target: target, connections: app.connections, machines: app.machines, features: app.machineFeatures)
+    }
+    private func openContent(_ context: TaskContentContext, _ draft: TaskContentDraft) {
+        guard let replicas, let assets = app.attachmentStore else { return }
+        do {
+            if taskContent == nil {
+                taskContent = TaskContentController(replicas: replicas, files: try TaskContentDraftFiles.applicationSupport(),
+                    read: { file in try await replicas.run { try assets.decrypt(file) } },
+                    remove: { id, protected in _ = try await replicas.run { try assets.remove(id, protected: protected) } },
+                    upload: { [weak self] context, target in self?.contentUpload(context, target) == true },
+                    changed: { [weak self] context, _ in
+                        guard let self else { return }
+                        if self.tasksKey == context.key { self.refreshTasks() }
+                        self.launchProjectSync(context.key)
+                    }, text: taskEditText)
+            }
+            taskContent?.open(context, proposed: draft)
+        } catch { taskNotice = TaskSyncError.reason(error) }
+    }
+    func openTaskContent(_ key: ProjectKey, _ task: TaskInfo) {
+        guard tasksKey == key, task.writable, task.schema <= 2, [.todo, .backlog].contains(task.stage),
+              let context = contentContext(key, task.target) else { return }
+        openContent(context, TaskContentDraft.existing(key, computer: context.computer.id, machine: context.computer.machineId, task: task))
+    }
+    func newTaskContent() {
+        guard let key = tasksKey, let chosen = tasksChosen else { return }
+        let reason = TasksPresentation.addReason(chosen)
+        guard reason.isEmpty else { taskNotice = reason; return }
+        let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId))
+        guard let context = contentContext(key, target) else { return }
+        guard contentUpload(context, target) else { taskNotice = taskEditText("task_content_upload"); return }
+        openContent(context, TaskContentDraft.new(key, computer: context.computer.id, machine: context.computer.machineId, stage: taskTab == .backlog ? .backlog : .todo, target: target))
+    }
+    func contentTargetLabel(_ state: TaskContentState) -> String {
+        guard let form = state.draft?.form, case .session(let session) = form.target ?? form.originalTarget else { return taskEditText("task_edit_any") }
+        return TasksPresentation.resolve(session, machines: app.machines, connectionId: state.context.key.connectionId,
+                                         sessions: projectSessions(state.context.key))?.target.session ?? session.session
+    }
+    func chooseContentSession(_ id: UUID, _ session: Session) {
+        guard let editor = taskContent, let state = editor.state, state.id == id, editorSessions(state.context.key).contains(session),
+              let machine = app.machines.first(where: { $0.connectionId == state.context.key.connectionId && $0.id == session.target.computerId }) else { return }
+        let identity = editorIdentity(session)
+        guard !identity.isEmpty else { return }
+        editor.change(id) { $0.target = .session(session: SessionRef(machine: machine.machineId, session: session.target.session, sessionId: identity)) }
+    }
+    func commentFiles(_ key: ProjectKey, task: String, entry: String) async throws -> [TaskMediaInfo] {
+        guard let replicas, !entry.isEmpty else { throw ZerusError.invalid(taskEditText("task_edit_unavailable")) }
+        let name = taskProjectName(key)
+        return try await replicas.run { try replicas.store(key, name: name).media(reference: task, entry: entry) }
+    }
+    func openTaskMedia(_ key: ProjectKey, task: String, file: TaskMediaInfo, entry: String? = nil) {
+        guard let replicas else { return }
+        let name = taskProjectName(key)
+        app.viewer.openTask(key: JSON([key.connectionId, key.swarmId, key.id, task, entry ?? "", file.token]).compact, file: file) {
+            try await replicas.run {
+                try TaskMediaSelection(task: task, entry: entry, token: file.token).read(replicas.store(key, name: name))
+            }
+        }
+    }
+    func contentPicked(_ ticket: TaskContentPicker, sources: [PickedSource]) {
+        guard let taskContent, let replicas, let assets = app.attachmentStore else { ConversationModel.discardTemporary(sources); return }
+        let imports: [([Attachment]) async throws -> Attachment] = sources.map { source in
+            { current in try await replicas.run { try ConversationModel.importSource(source, store: assets, current: current) } }
+        }
+        taskContent.picked(ticket, imports: imports, finished: { ConversationModel.discardTemporary(sources) })
+    }
+    func previewContentFile(_ file: Attachment) { app.viewer.open(nil, file.displayed()) }
+    private func editorIdentity(_ session: Session) -> String { TasksPresentation.nativeIdentity(session) }
+
+    func taskCurrentSession(_ ref: SessionRef) -> String? {
+        guard let key = tasksKey else { return nil }
+        return TasksPresentation.resolve(ref, machines: app.machines, connectionId: key.connectionId, sessions: projectSessions(key))?.target.session
+    }
+    var displayedTaskChosen: ChosenSession? {
+        guard let chosen = tasksChosen else { return nil }
+        let ref = SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId)
+        return ChosenSession(name: taskCurrentSession(ref) ?? chosen.name, computerId: chosen.computerId, machineId: chosen.machineId, sessionId: chosen.sessionId)
+    }
+    func taskSessionLabel(_ task: TaskInfo) -> String { TasksPresentation.sessionLabel(task, chosen: displayedTaskChosen, current: taskCurrentSession) }
+    func editorSessions(_ key: ProjectKey) -> [Session] {
+        projectSessions(key).filter { session in
+            app.machines.filter { $0.connectionId == key.connectionId && $0.id == session.target.computerId && !$0.machineId.isEmpty }.count == 1 && !editorIdentity(session).isEmpty
+        }
+    }
+    func chooseEditorSession(_ token: UUID, _ session: Session) {
+        guard let editor = taskEditor, let state = editor.state, state.id == token, editorSessions(state.context.key).contains(session),
+              let machine = app.machines.first(where: { $0.connectionId == state.context.key.connectionId && $0.id == session.target.computerId }) else { return }
+        let identity = editorIdentity(session)
+        guard !identity.isEmpty else { return }
+        editor.change(token) { $0.target = .session(session: SessionRef(machine: machine.machineId, session: session.target.session, sessionId: identity)) }
+    }
+    func moveEditorTop(_ token: UUID) {
+        guard let editor = taskEditor, let state = editor.state, state.id == token, tasksKey == state.context.key else { return }
+        let first = taskListing.filter { $0.uuid != state.task.uuid && $0.stage == .todo }.map(\.rank).min()
+        do { let rank = try taskEditRankBetween(low: nil, high: first); editor.change(token) { $0.rank = rank } }
+        catch { editor.reportError(token, TaskSyncError.reason(error)) }
+    }
+    func openTaskMedia(_ task: TaskInfo, _ file: TaskMediaInfo) {
+        guard let key = tasksKey else { return }; openTaskMedia(key, task: task.uuid, file: file)
+    }
+    func openTaskEditor(_ task: TaskInfo) {
+        guard task.schema == 8, let key = tasksKey, let replicas, let assets = app.attachmentStore,
+              let connection = app.connections.first(where: { $0.id == key.connectionId }) else { return }
+        let targetMachine: String? = if case .session(let target) = task.target { target.machine } else { nil }
+        let bound = [.todo, .backlog].contains(task.stage) ? targetMachine : task.session?.machine ?? targetMachine
+        let computers = app.machines.filter { $0.connectionId == key.connectionId && (bound != nil ? $0.machineId == bound : $0.id == tasksChosen?.computerId) }
+        guard computers.count == 1 else { taskNotice = taskEditText("task_edit_unavailable"); return }
+        do {
+            if taskEditor == nil { taskEditor = TaskEditorModel(app: app, replicas: replicas, files: try TaskEditDraftFiles.applicationSupport(), assets: assets) { [weak self] context, task, token in
+                self?.refreshEditedTask(context, task, token)
+            } }
+            taskEditor?.open(TaskEditContext(connection: connection, key: key, projectName: taskProjectName(key), computer: computers[0], features: app.machineFeatures), task)
+        } catch { taskNotice = TaskSyncError.reason(error) }
+    }
+
+    /// Known edit completion refreshes its exact computer even if its last heartbeat is unchanged.
+    /// A failed document read never changes or repeats the already completed edit.
+    private func refreshEditedTask(_ context: TaskEditContext, _ task: String, _ token: UUID) {
+        guard let taskSync else { return }
+        let id = UUID()
+        projectSyncs[id] = Task { [weak self] in
+            guard let self else { return }
+            defer { self.projectSyncs[id] = nil }
+            do {
+                try await taskSync.exchangeNow(context.connection, context.key, name: context.projectName,
+                                               computerId: context.computer.id, fetch: [task])
+            } catch {
+                if !Task.isCancelled, let editor = self.taskEditor, let shown = editor.state,
+                   shown.id == token, shown.context.key == context.key, shown.task.uuid == task {
+                    editor.reportError(shown.id, taskEditText("task_edit_refresh_failed"))
+                }
+            }
+            if !Task.isCancelled && self.tasksKey == context.key { self.refreshTasks() }
+        }
     }
 
     // MARK: Sync
@@ -175,7 +323,7 @@ final class TasksModel {
     func sendRoute(_ task: TaskInfo) -> RouteState {
         guard let key = tasksKey else { return .blocked("No project") }
         if taskBusy { return .blocked("Another task action is running") }
-        if heldSends.contains(task.uuid) { return .blocked("It may have been sent already; its stage arrives with the next sync") }
+        if heldSends.contains(task.uuid) { return .blocked(taskEditText("task_send_unknown_hold")) }
         return TasksPresentation.route(task, chosen: tasksChosen, machines: app.machines, connectionId: key.connectionId,
                                        operations: taskOperations, sessions: projectSessions(key))
     }
@@ -191,7 +339,7 @@ final class TasksModel {
     func openTasks(_ session: Session) {
         guard let key = taskProject(session) else { return }
         let machine = app.machines.first { $0.connectionId == session.target.connectionId && $0.id == session.target.computerId }
-        showTasks(key, ChosenSession(name: session.target.session, computerId: session.target.computerId, machineId: machine?.machineId ?? ""))
+        showTasks(key, ChosenSession(name: session.target.session, computerId: session.target.computerId, machineId: machine?.machineId ?? "", sessionId: editorIdentity(session)))
     }
 
     /// Another session for Tasks only, keeping the tab; one of another project shows that project's tasks.
@@ -213,6 +361,7 @@ final class TasksModel {
         tasksKey = key
         tasksChosen = chosen
         taskListing = []
+        taskExecutionStale = false
         doneRows = []
         doneNext = nil
         doneTotal = 0
@@ -229,6 +378,7 @@ final class TasksModel {
     func closeTasks() {
         tasksKey = nil
         taskNotice = nil
+        taskExecutionStale = false
     }
 
     /// Done lists from a computer each time it is opened, so tasks accepted since show.
@@ -256,12 +406,14 @@ final class TasksModel {
                 }
             }
             guard let listing = read else {
+                if tasksKey == key { taskExecutionStale = true }
                 if tasksKey == key && (selectDefault || taskListing.isEmpty) {
                     taskNotice = failure.isEmpty ? "The tasks could not be read." : failure
                 }
                 return
             }
             guard tasksKey == key else { return }
+            taskExecutionStale = false
             taskListing = listing.tasks
             reviewCounts[key] = listing.tasks.count { $0.stage == .review }
             if selectDefault {
@@ -308,7 +460,7 @@ final class TasksModel {
             return
         }
         let stage: TaskStage = taskTab == .backlog ? .backlog : .todo
-        let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name))
+        let target = TaskTarget.session(session: SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId))
         editTasks { _ = try $0.add(text: text, stage: stage, target: target, position: .end) }
     }
 
@@ -396,7 +548,7 @@ final class TasksModel {
         let name = taskProjectName(key), computer = computerName(key, route.computerId)
         Task {
             let outcome = await taskSync.send(connection, key, name: name, computerId: route.computerId, task: task.uuid,
-                                              session: route.session, computerName: computer)
+                                              session: route.session, computerName: computer, sessionId: route.sessionId)
             taskNotice = switch outcome {
             case .done: "Sent to \(route.session)"
             case .refused(let reason): reason
@@ -455,12 +607,12 @@ final class TasksModel {
         doneExpanded = more || (keepExpanded && doneExpanded)
         var session: SessionRef?
         if tasksOnlyThisSession {
-            let reason = TasksPresentation.addReason(tasksChosen)
-            guard reason.isEmpty, let chosen = tasksChosen else {
+            let reason = TasksPresentation.addReason(displayedTaskChosen)
+            guard reason.isEmpty, let chosen = displayedTaskChosen else {
                 doneError = reason
                 return
             }
-            session = SessionRef(machine: chosen.machineId, session: chosen.name)
+            session = SessionRef(machine: chosen.machineId, session: chosen.name, sessionId: chosen.sessionId)
         }
         guard let machine = doneComputer(key) else {
             doneError = "No computer of this project lists Done tasks now"
@@ -501,8 +653,7 @@ final class TasksModel {
             do {
                 try await taskSync.exchangeNow(connection, key, name: name, computerId: machine.id, fetch: [uuid])
                 let task = try await replicas.run { try replicas.store(key, name: name).get(reference: uuid) }
-                refreshTasks()
-                opened(task)
+                if tasksKey == key { refreshTasks(); opened(task) }
             } catch {
                 taskNotice = Self.reason(error, "The task could not be opened.")
             }

@@ -17,7 +17,11 @@ type Result<T> = std::result::Result<T, Problem>;
 mod creation;
 mod header;
 mod intake;
+#[cfg(all(test, unix))]
+pub(crate) mod models;
+pub(crate) mod native;
 mod policy;
+pub(crate) mod timing;
 pub(crate) use intake::{preflight, send};
 pub(crate) use policy::{clear, clear_named, guard, guarded, meet};
 
@@ -59,6 +63,12 @@ mod report;
 #[allow(unused_imports)] // Consumed by the service package.
 pub(crate) use report::report;
 
+fn replica_storage(error: zerus_replica::Error) -> Problem {
+    if error.kind() == zerus_replica::ErrorKind::Busy {
+        Problem::new(code::STORE_BUSY, error.to_string())
+    } else { storage(error) }
+}
+
 /// Native caller proof is resolved by the task command before entering here.
 pub(crate) struct Caller<'a> {
     pub state: &'a Path,
@@ -80,6 +90,17 @@ fn request(store: &Store, team: &str, operation: Operation) -> Result<Request> {
         operation,
     })
 }
+/// The task's project store, as the service's observation opens it: `observe`
+/// waits for the project lock; a bounded reader gives up after `wait`.
+fn project(state: &Path, task: &TaskRef, wait: Option<std::time::Duration>) -> Result<ProjectStore> {
+    let root = state.join("replica");
+    match wait {
+        None => ProjectStore::open(&root, &task.project).map_err(replica_storage),
+        Some(wait) => ProjectStore::open_within(&root, &task.project, wait)
+            .map_err(replica_storage)?
+            .ok_or_else(|| storage("Task store is busy.")),
+    }
+}
 fn load(store: &ProjectStore, uuid: &str) -> Result<TaskDoc> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     store
@@ -91,7 +112,7 @@ fn load(store: &ProjectStore, uuid: &str) -> Result<TaskDoc> {
             )
         })?
         .load_complete(uuid)
-        .map_err(storage)
+        .map_err(replica_storage)
 }
 /// The document retains the highest claim across stage changes. A conflicted
 /// projection has no current identity that the team can safely act on. A
@@ -192,14 +213,14 @@ impl Meeting<'_, '_> {
             Meeting::Projects(store) => store.load(uuid),
             Meeting::Admitted(admitted) => admitted.load(uuid),
         }
-        .map_err(storage)
+        .map_err(replica_storage)
     }
     fn save(&mut self, task: &mut TaskDoc) -> Result<()> {
         match self {
             Meeting::Projects(store) => store.save(task),
             Meeting::Admitted(admitted) => admitted.save(task),
         }
-        .map_err(storage)
+        .map_err(replica_storage)
     }
 }
 
@@ -231,8 +252,10 @@ pub(crate) fn clear_returned_key(
         // Bound again to a live team after the stop: the key is live again.
         return Ok(false);
     }
-    let Ok(mut document) = meeting.load(&task.uuid) else {
-        return Ok(false);
+    let mut document = match meeting.load(&task.uuid) {
+        Ok(document) => document,
+        Err(error) if error.code == code::STORE_BUSY => return Err(error),
+        Err(_) => return Ok(false),
     };
     let view = document.view().map_err(storage)?;
     let Some(key) = view.team else {
@@ -267,7 +290,7 @@ pub(crate) fn observe(state: &Path, task: &TaskRef) -> Result<()> {
     if !super::enabled(state) {
         return Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."));
     }
-    let tasks = ProjectStore::open(&state.join("replica"), &task.project).map_err(storage)?;
+    let tasks = project(state, task, None)?;
     let document = load(&tasks, &task.uuid)?;
     #[cfg(test)]
     observe_pause();
@@ -276,6 +299,57 @@ pub(crate) fn observe(state: &Path, task: &TaskRef) -> Result<()> {
         record(&mut store, &team, node, &document)?;
     }
     Ok(())
+}
+
+/// The revision that the service's ObserveTask would carry for the task now,
+/// with the project lock it was read under (zerus-63rru.37 rounds 4 and 5):
+/// the same project store, complete load and observation as `observe`,
+/// recording nothing. While the returned store lives, no task-document
+/// writer of this computer can save the task, so native merge admission
+/// compares the revision with the one the Teams store applied for the node
+/// and keeps the store until its ref update has returned. The project lock
+/// is waited for no longer than `wait`; a busy, missing or unreadable task
+/// is an error, never a revision. Its one caller, the desktop Teams actor,
+/// runs only on Linux and macOS.
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
+pub(crate) fn held_revision(
+    state: &Path,
+    task: &TaskRef,
+    team: &str,
+    home: &str,
+    wait: std::time::Duration,
+) -> Result<(ProjectStore, String)> {
+    #[cfg(test)]
+    held::before_lock();
+    let tasks = project(state, task, Some(wait))?;
+    let document = load(&tasks, &task.uuid)?;
+    let revision = observation(&document, team, home)?.revision;
+    #[cfg(test)]
+    held::after_read();
+    Ok((tasks, revision))
+}
+
+/// Test points of the held reader, each run once on the thread that armed
+/// it: just before it waits for the project lock, and just after it read
+/// the revision under that lock.
+#[cfg(test)]
+pub(crate) mod held {
+    use std::cell::RefCell;
+    type Hook = RefCell<Option<Box<dyn FnOnce()>>>;
+    thread_local! {
+        pub(crate) static BEFORE_LOCK: Hook = const { RefCell::new(None) };
+        pub(crate) static AFTER_READ: Hook = const { RefCell::new(None) };
+    }
+    pub(super) fn before_lock() {
+        if let Some(hook) = BEFORE_LOCK.with(|s| s.borrow_mut().take()) {
+            hook();
+        }
+    }
+    pub(super) fn after_read() {
+        if let Some(hook) = AFTER_READ.with(|s| s.borrow_mut().take()) {
+            hook();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -358,7 +432,7 @@ pub(crate) fn clear_team_key(
         ));
     }
     clear(state, &mut document, actor)?;
-    tasks.save(&mut document).map_err(storage)?;
+    tasks.save(&mut document).map_err(replica_storage)?;
     Ok(true)
 }
 #[cfg(test)]

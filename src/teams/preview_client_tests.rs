@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
-use zerus_client_core::teams::{TeamsFollow, TeamsPoller};
+use zerus_client_core::upstream_teams::{TeamsFollow, TeamsPoller};
 use zerus_client_core::{Batch, Coalescer};
 
 fn quote(path: &Path) -> String {

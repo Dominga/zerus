@@ -107,7 +107,10 @@ fn the_input_upgrade_adds_only_its_two_tables_with_no_charge() {
     // Its own two tables, then the deferred send, deferred answer and
     // compact-to-send leaves' two each.
     // ... and the question route leaves' tables (zerus-sa9qn.8, .32, .50, .36 and .52).
-    assert_eq!(tables(&store.db), before + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 1 + 1);
+    assert_eq!(
+        tables(&store.db),
+        before + 2 + 2 + 2 + 2 + 2 + 1 + 2 + 2 + 1 + 1
+    );
     assert_eq!(inputs::totals(&store.db).unwrap(), (0, 0));
 }
 
@@ -1900,7 +1903,6 @@ mod actor {
             }
         }
 
-
         /// Actual ReferenceV1 preparation reaches operation admission with a full
         /// valid roster. Its separate input is removed before that input charge
         /// returns; no new reference original/negative ABI or retry is created.
@@ -3410,9 +3412,15 @@ mod actor {
                     } else {
                         staging::ReviewPoint::Hashed
                     };
+                    // Force a nonterminal owner-count decrease while the
+                    // real review worker still holds both of its loans.
+                    let staged_loan = f.owner.clone();
+                    let (finish_worker, finishing) = std::sync::mpsc::channel::<()>();
                     at(&original, point, move || {
                         let _ = entered.send(());
                         let _ = held.recv_timeout(Duration::from_secs(10));
+                        drop(staged_loan);
+                        let _ = finishing.recv_timeout(Duration::from_secs(10));
                     });
                     let before = Arc::strong_count(&f.owner);
                     let queue =
@@ -3431,13 +3439,27 @@ mod actor {
                     assert_eq!(Arc::strong_count(&f.owner), during, "{absent}: still held");
                     resume.send(()).unwrap();
                     let end = Instant::now() + Duration::from_secs(10);
-                    while Arc::strong_count(&f.owner) >= during {
-                        assert!(Instant::now() < end, "{absent}: the worker never let go");
+                    let mut partial_seen = false;
+                    let settled = loop {
+                        let count = Arc::strong_count(&f.owner);
+                        if count == 2 {
+                            break count;
+                        }
+                        if !partial_seen && count < during {
+                            assert_eq!(count, during - 1, "{absent}: staged loan dropped");
+                            partial_seen = true;
+                            finish_worker.send(()).unwrap();
+                        }
+                        assert!(
+                            Instant::now() < end,
+                            "{absent}: owner loans still held: {count}, expected 2"
+                        );
                         std::thread::sleep(Duration::from_millis(2));
-                    }
+                    };
                     // Its loans (its own and its lease's) are gone: the
                     // fixture's and the new runtime's remain.
-                    assert_eq!(Arc::strong_count(&f.owner), 2, "{absent}");
+                    assert_eq!(settled, 2, "{absent}: both worker loans must end");
+                    assert!(partial_seen, "{absent}: exercised a nonterminal loan drop");
                     assert_eq!(path.exists(), !absent, "{absent}: never unlinked late");
                     assert_eq!(f.state(&original), "orphaned", "{absent}");
                 }

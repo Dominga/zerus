@@ -216,7 +216,7 @@ pub(super) fn recover(
 /// Why a fresh request was not reserved: a business change since it was
 /// frozen (`changed`, refused like a stale plan), or the fence's, the
 /// hold's or the bootstrap's reason (`cutting_over`).
-pub(super) fn refusal(closed: &Closed, detail: &str) -> (&'static str, String) {
+fn basic_refusal(closed: &Closed, detail: &str) -> (&'static str, String) {
     if matches!(closed.reason, "changed" | "not_sendable") {
         let text = if detail.is_empty() {
             super::dispatch::CHANGED
@@ -238,6 +238,26 @@ pub(super) fn refusal(closed: &Closed, detail: &str) -> (&'static str, String) {
             closed.reason
         ),
     )
+}
+
+// Diagnostic context is deliberately outside every fence/admission decision.
+pub(super) fn refusal(config: &Config, project: &str, closed: &Closed, detail: &str) -> (&'static str, String) {
+    let label = if matches!(closed.reason, "unroutable" | "unverified" | "deadline") {
+        closed.node.as_deref().and_then(|node| crate::swarm::diagnostic_machine_label(config, node))
+    } else { None };
+    diagnostic_refusal(closed, detail, project, label.as_deref())
+}
+fn diagnostic_refusal(closed: &Closed, detail: &str, project: &str, label: Option<&str>) -> (&'static str, String) {
+    let (code, mut text) = basic_refusal(closed, detail);
+    if matches!(closed.reason, "unroutable" | "unverified" | "deadline") {
+        if let Some(node) = &closed.node {
+            let label = label.map(|label| format!("{label:?}")).unwrap_or_else(|| "unavailable".into());
+            text.push_str(&format!(" Computer {node} (catalog label, diagnostic only: {label})."));
+        }
+        text.push_str(" Absent computers do not block starts on reachable computers. This computer must finish its automatic task cutover before starting.");
+        text.push_str(&format!(" For details: hgs task cutover --project {} --json", crate::platform::quote(project)));
+    }
+    (code, text)
 }
 
 /// `fence::admit_attempt` over SSH within `deadline`, mapping its errors.
@@ -523,7 +543,7 @@ pub(super) fn send(
             }
         }
         Admission::Legacy(_) => Ok(None),
-        Admission::Refused(closed) => Err(fail(refusal(&closed, &detail.borrow()).1)),
+        Admission::Refused(closed) => Err(fail(refusal(config, project, &closed, &detail.borrow()).1)),
         Admission::Uncertain(error) => {
             Err(fail(format!("delivery uncertain: {UNCONFIRMED} {error}")))
         }
@@ -785,10 +805,14 @@ pub(super) fn reopen(
             Delivered::Uncertain(text) => ("uncertain", text),
         },
         Admission::Legacy(_) => return Ok(None),
-        Admission::Refused(closed) => return Err(fail(refusal(&closed, &detail.borrow()).1)),
+        Admission::Refused(closed) => return Err(fail(refusal(config, &project.0, &closed, &detail.borrow()).1)),
         Admission::Uncertain(error) => {
             return Err(fail(format!("delivery uncertain: {UNCONFIRMED} {error}")))
         }
     };
     reopened(config, project, uuid, id, machines, state, &error).map(Some)
 }
+
+#[cfg(test)]
+#[path = "attempts/diagnostic_tests.rs"]
+mod diagnostic_tests;

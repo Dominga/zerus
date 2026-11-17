@@ -422,6 +422,7 @@ fn candidate(record: &Value, guard: &Guard<'_>, pending_receipt: &Value) -> bool
     let id = string(pending, "request_id");
     crate::state::storage::in_id_layout(record)
         && matches!(string(record, "agent"), "claude" | "codex" | "kimi")
+        && !codex_tasks::multiple(record)
         // Codex's unprimed startup-dialog checks and exact Settings walk do
         // not leave the measured margin. Preserve its ordinary send path.
         && (string(record, "agent") != "codex" || !string(record, "conversation_id").is_empty())
@@ -639,7 +640,7 @@ pub(in crate::state) fn bounded_error(mut reason: String) -> String {
 mod tests {
     use super::*;
     #[test]
-    fn every_non_admitted_submission_keeps_the_original_core_body() {
+    fn the_reviewed_core_keeps_delivery_guards_and_exact_native_task_routing() {
         // Combined with #2055: the original core body's two atomic receipt
         // writes became receipt_index::persist. Batch 7 adds, besides that,
         // only these PRs' own lines: Claude's native proof (#2092, zerus-iitw8),
@@ -649,6 +650,9 @@ mod tests {
         // zerus-a4mub.4). PR #2195 (zerus-cdhjm.3) adds Kimi's pre-send
         // compaction reservation, wait, identity recheck and receipt diagnostics.
         // Pin the complete resulting core, including ordinary delivery guards.
+        // Native multi-task Codex adds a request-reserved exact-thread queue
+        // branch. Its real native test pins one offer and original UUID dedup;
+        // this seal also covers the retained single-conversation PTY path.
         let source = include_str!("../input.rs");
         let body = source
             .split_once("fn submit_core(")
@@ -676,8 +680,10 @@ mod tests {
             ("// From here no possible-input receipt existed for this ID.", "// From here no receipt existed for this ID."),
             ("    if retain_refusal && typed { refusal::prepare(&witness(String::new(), false, None)).map_err(unknown)?; }\n", ""),
             ("    origin: Origin,\n    retain_refusal: bool,\n", "    origin: Origin,\n"),
-            ("remember_before_input(typed, witness(reason, false, None), retain_refusal)", "before_input(typed, witness(reason, false, None))"),
-            ("remember_before_input(typed, witness(gate.reason(), waiting, dialog), retain_refusal)", "before_input(typed, witness(gate.reason(), waiting, dialog))"),
+            ("remember_send_refusal(typed, witness(reason, false, None), retain_refusal, terminal_outcome)", "before_input(typed, witness(reason, false, None))"),
+            ("remember_send_refusal(typed, witness(gate.reason(), waiting, dialog), retain_refusal, terminal_outcome)", "before_input(typed, witness(gate.reason(), waiting, dialog))"),
+            ("    terminal_outcome: bool,\n", ""),
+            ("    if terminal_outcome {\n        if let Some(value) = outcome::duplicate(&root, name, &request, &digest) {\n            return Err(Failure::TerminalRefusal(value));\n        }\n    }\n", ""),
         ] {
             assert_eq!(original.matches(retained).count(), 1, "refusal retention projection changed");
             original = original.replacen(retained, previous, 1);
@@ -740,9 +746,20 @@ mod tests {
             assert_eq!(original.matches(teams).count(), 1, "Teams gate projection changed");
             original = original.replacen(teams, main, 1);
         }
+        // wvzyk adds original receipt/text fences and a request-bound native
+        // ordering snapshot. Project only those metadata additions away;
+        // the original body seal, admission and native keys stay unchanged.
+        let context_binding = "    acceptance::bind_native_context(&mut record, &receipt);\n";
+        assert_eq!(original.matches(context_binding).count(), 1);
+        original = original.replacen(context_binding, "", 1);
+        let acceptance_fences = r###"    record["input_pending_digest"] = receipt["digest"].clone();
+    record["input_pending_text_sha256"] = json!(format!("{:x}", Sha256::digest(string(&receipt, "submitted_text").as_bytes())));
+"###;
+        assert_eq!(original.matches(acceptance_fences).count(), 1);
+        original = original.replacen(acceptance_fences, "", 1);
         assert_eq!(
             format!("{:x}", Sha256::digest(original.as_bytes())),
-            "fff1e65bfc4cda56753b9f9e5b425db0c7deac5046ae0748e95d4e678ccd39c9"
+            "59613e90dd2487deb1c88ce9820f0194714dcbab6ea0f7b580cf9f50598f36bd"
         );
     }
     fn fixture() -> (Value, Value, Guard<'static>) {
@@ -807,6 +824,20 @@ mod tests {
         ] {
             assert!(!candidate(&value, &guard, &receipt));
         }
+    }
+
+    #[test]
+    fn separate_codex_tasks_never_enter_the_pending_settings_lane() {
+        let (mut record, receipt, guard) = fixture();
+        record["agent"] = json!("codex");
+        assert!(candidate(&record, &guard, &receipt));
+        record["codex_native_tasks"] = json!({"parent":"cid","run":"run",
+            "pending":{"native-create":1},"threads":{}});
+        assert!(!candidate(&record, &guard, &receipt));
+        record["codex_native_tasks"]["pending"] = json!({});
+        record["codex_native_tasks"]["threads"] = json!({uuid::Uuid::new_v4().to_string():true});
+        assert!(!candidate(&record, &guard, &receipt));
+        assert!(super::super::checked_send_terminal(&record).is_err());
     }
     #[test]
     fn background_with_one_pending_keeps_the_legacy_route() {

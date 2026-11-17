@@ -1,5 +1,15 @@
 # Zerus Android
 
+For main Claude, Codex and Kimi conversations, a computer and relay advertising
+both `send_outcome` operations enable exact native send outcomes. Before the
+first POST, the encrypted outbox retains a bounded binding to the original UUID,
+machine/SID, run/conversation and native payload digest, including attachments.
+Only its matching closed `native_input_lock` proof shows **Not sent**. Review
+prepares an editable draft; sending it is a separate action with a new UUID.
+Missing, legacy, malformed or foreign proof stays delivery unknown. Receipt
+recovery uses a fresh read UUID and never sends the original message again.
+Existing controls and translations also cover this state; no new UI text is added.
+
 Independent-session waits declared through `hgs wait` appear as **Waiting for
 acceptance** or **Waiting for result**, with producer, computer and elapsed time.
 They remain in Active while the exact waiter is live and online; work and

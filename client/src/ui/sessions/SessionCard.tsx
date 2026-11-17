@@ -1,5 +1,6 @@
 import { For, Show, createEffect, createMemo, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { steadyTitle } from "../lib/steady-title";
+import { FavoriteMark } from "./FavoriteMark";
 import { tr, trNoop } from "../../i18n";
 import { AGENT_LABEL, AgentLogo, Icon } from "../lib/icons";
 import { computerFresh, computerOffline } from "../../store/catalog";
@@ -650,6 +651,7 @@ export function SessionCard(props: {
   onChip?: (kind: "services" | "background" | "git") => void;
   team?: Team;
   onToggleTeam?: () => void;
+  onOpenTeam?: () => void;
   fromParent?: { name: string; key?: string };
   onOpenParent?: (key: string) => void;
   /** A Teams lead's team: its strip, and the fold of its members under it. */
@@ -707,6 +709,7 @@ export function SessionCard(props: {
             its title gives way first (an ellipsis) so the state badge and the
             machine chip after it keep their whole box. */}
         <span class="sc-title ell" style={titleReserve(s().title, props.member ? 0 : 72)} title={s().name}>{s().title}</span>
+        <FavoriteMark session={s()} />
         <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
         <StatusBadge kind={kind()} caption={statusCaption(s())} heat={state().shown.heat} title={state().kind ? state().shown.tooltip : undefined} />
         <Show when={visibleUnreadReply(s(), computerFresh(s().computer)) && (s().status === "working" || s().status === "attention" || s().draft)}>
@@ -926,6 +929,7 @@ export function CompactCard(props: { session: Session; selected: boolean; onExpa
       <Show when={sessionMark(s())}>{(m) => <span class="cc-mark" title={markTooltip(s(), m())}><AccountMarkCircle mark={m()} size={14} /></span>}</Show>
       <Show when={s().parent?.state === "live" && !props.fromParent}><SupervisedMark session={s()} /></Show>
       <span class="sc-title ell" style={titleReserve(s().title, 60)} title={described.title()} onPointerEnter={described.enter} onPointerLeave={described.leave}>{s().title}</span>
+      <FavoriteMark session={s()} />
       <Show when={s().muted}><Icon name="mute" size={14} class="sc-mute" /></Show>
       <StatusBadge kind={badgeKind(s())} caption={statusCaption(s())} />
       <OptionalQuestionsChip session={s()} />

@@ -163,11 +163,19 @@ pub(super) fn choose_name(
         {
             return Err("fork name must be a nonempty tag without '/', ':', '.', control characters or surrounding whitespace".into());
         }
+        if let Some(problem) = zerus_client_core::actions::tag_problem(tag) {
+            return Err(problem.into());
+        }
         // A name is a label: one a live or saved session uses gets the first
         // free `-2`, `-3`… instead of failing the fork.
         return free(&format!("{prefix}{tag}"), occupied);
     }
-    let base = format!("{}-fork", parts.get(2).copied().unwrap_or("session"));
+    let source_tag = parts.get(2).copied().unwrap_or("session");
+    let base = if zerus_client_core::actions::tag_problem(source_tag).is_none() {
+        format!("{source_tag}-fork")
+    } else {
+        "fork".to_owned()
+    };
     free(&format!("{prefix}{base}"), occupied)
 }
 
@@ -385,6 +393,15 @@ pub(super) fn start_scoped(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        let used = Default::default();
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            assert!(choose_name("codex/project/old$tag", Some(tag), &used).is_err());
+        }
+        assert_eq!(choose_name("codex/project/old$tag", Some("safe name"), &used).unwrap(), "codex/project/safe name");
+        assert_eq!(choose_name("codex/project/old$tag", None, &used).unwrap(), "codex/project/fork");
+    }
     use super::*;
     #[test]
     fn powershell_codex_fork_replaces_the_agent_selector_only() {

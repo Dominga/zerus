@@ -42,6 +42,7 @@ mod not_admitted;
 mod owner;
 mod ownership;
 mod pending_reads;
+pub(crate) mod input_acknowledgment;
 pub(crate) mod portable_frontend;
 mod presence_admission;
 mod presence_worker;
@@ -692,6 +693,15 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut frontend = frontend::Cache::default();
     let mut background: Option<background::Runtime> = None;
     let mut frontend_order = ui_authority::Order::default();
+    let mut person_actions = teams::person_actions::Runtime::new(
+        config,
+        zerus_client_core::desktop::creation_clone::Scope {
+            configuration: location.configuration.clone(),
+            service_epoch: epoch.clone(),
+        },
+        owner.clone(),
+        stopped.clone(),
+    );
     // At most16 queued controls/data, thirteen bounded parsers and one passive
     // producer. Background mode owns the only internal source producer.
     let (send, receive) = mpsc::sync_channel(protocol::PENDING);
@@ -749,6 +759,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     let mut migration = handoff::inspect(&location);
     let mut seq = 0;
     let mut heartbeat = Instant::now() + HEARTBEAT;
+    let mut readiness_publication = lifecycle::ReadinessPublication::default();
     let mut fleet_publication = fleet::Publication::default();
     let mut collect_at = Instant::now();
     let mut failed = false;
@@ -887,7 +898,16 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     );
                 }
             }
+            // Readiness may settle after the switch's status reply. Reuse the
+            // watch heartbeat on a change instead of waiting ten seconds or
+            // adding steady-state client polls. This grants no writer authority.
+            readiness_publication.refresh(
+                background.as_ref().map(background::Runtime::readiness),
+                Instant::now(),
+                &mut heartbeat,
+            );
             frontend.tick(&location);
+            person_actions.poll();
             store.recover_operation_custody(&location);
             if let Some(runtime) = task_runtime.as_mut() {
                 runtime.poll(
@@ -983,18 +1003,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                     )?;
                     value["frontend_read_delivery"] = frontend.status();
                     value["notification_controls"] = notification_controls.projection(&store);
-                    value["lifecycle"]["mode"] = if background_mode {
-                        "background"
-                    } else {
-                        "passive"
-                    }
-                    .into();
                     value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                     if let Some(runtime) = &background {
                         runtime.decorate(&mut value);
                     } else if background_blocked {
                         value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                     }
+                    lifecycle::decorate_mode(&mut value, background_mode);
                     upgrade.decorate(&mut value);
                     #[cfg(any(windows, all(test, target_os = "linux")))]
                     if hello.op == "status" && hello.request.is_none() {
@@ -1051,11 +1066,65 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         frame(&epoch, seq, "status", value)
                     } else if hello.op == "frontend_request" {
                         let result = match (authority, &mut background) {
-                            (Some(authority), _) if authority.operation() == "desktop_ownership_observe" => {
-                                match authority.into_request(&mut frontend_order).and_then(|permit|
-                                    ownership::observation::frontend(&location, &store, &epoch, permit)) {
+                            (Some(authority), _)
+                                if matches!(
+                                    authority.operation(),
+                                    "team_person_plan_piece" | "team_person_action"
+                                ) =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request)
+                                        if request.operation() == "team_person_plan_piece" =>
+                                    {
+                                        person_actions.stage(request)
+                                    }
+                                    Ok(request) => {
+                                        match person_actions.action(request, queue.clone(), seq) {
+                                            Ok(()) => {
+                                                activation_waiting = true;
+                                                streaming = true;
+                                                Value::Null
+                                            }
+                                            Err(problem) => frontend_refused(
+                                                hello.request.as_ref(),
+                                                &problem.code,
+                                            ),
+                                        }
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
+                            (Some(authority), _)
+                                if authority.operation() == "team_person_decide" =>
+                            {
+                                match authority.into_request(&mut frontend_order) {
+                                    Ok(request) => {
+                                        teams::person_gesture::frontend(config, &store, request)
+                                    }
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "frontend_identity_expired",
+                                    ),
+                                }
+                            }
+                            (Some(authority), _)
+                                if authority.operation() == "desktop_ownership_observe" =>
+                            {
+                                match authority.into_request(&mut frontend_order).and_then(
+                                    |permit| {
+                                        ownership::observation::frontend(
+                                            &location, &store, &epoch, permit,
+                                        )
+                                    },
+                                ) {
                                     Ok(observation) => serde_json::to_value(observation)?,
-                                    Err(_) => frontend_refused(hello.request.as_ref(), "ownership_observation_unavailable"),
+                                    Err(_) => frontend_refused(
+                                        hello.request.as_ref(),
+                                        "ownership_observation_unavailable",
+                                    ),
                                 }
                             }
                             (Some(authority), _)
@@ -1147,6 +1216,12 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                                 "activation_receiver_unavailable",
                                             ),
                                         }
+                                    }
+                                    Ok(request) if request.operation() == "input_acknowledge" => {
+                                        runtime.acknowledge_input(request, epoch.clone(), queue.clone(), seq);
+                                        streaming = true;
+                                        activation_waiting = true;
+                                        Value::Null
                                     }
                                     // The reference form prepares off the actor and
                                     // answers later on this same connection.
@@ -1244,7 +1319,42 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                         };
                         frame(&epoch, seq, "response", result)
                     } else if hello.op == "request" {
-                        let result = if hello
+                        let result = if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some(
+                                    "team_person_action_prepare"
+                                        | "team_person_action_result"
+                                        | "team_person_task_prepare"
+                                )
+                            )
+                        }) {
+                            match person_actions.query(
+                                hello.request.as_ref().unwrap(),
+                                queue.clone(),
+                                seq,
+                            ) {
+                                Ok(()) => {
+                                    activation_waiting = true;
+                                    streaming = true;
+                                    Value::Null
+                                }
+                                Err(problem) => {
+                                    frontend_refused(hello.request.as_ref(), &problem.code)
+                                }
+                            }
+                        } else if hello.request.as_ref().is_some_and(|v| {
+                            matches!(
+                                v["op"].as_str(),
+                                Some("team_person_prepare" | "team_person_result")
+                            )
+                        }) {
+                            teams::person_gesture::query(
+                                config,
+                                &store,
+                                hello.request.as_ref().unwrap(),
+                            )
+                        } else if hello
                             .request
                             .as_ref()
                             .is_some_and(|v| v["op"] == "termination_outcome_status")
@@ -1263,6 +1373,8 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 hello.request.as_ref(),
                                 "frontend_authentication_required",
                             )
+                        } else if hello.request.as_ref().is_some_and(|v| v["op"] == "input_acknowledge_result") {
+                            input_acknowledgment::query(hello.request.as_ref().unwrap())
                         } else if hello.request.as_ref().is_some_and(|v| {
                             matches!(
                                 v["op"].as_str(),
@@ -1434,6 +1546,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                                 v["op"].as_str(),
                                 Some(
                                     "creation_clone"
+                                        | "input_acknowledge"
                                         | "creation_worktree"
                                         | "creation_launch"
                                         | "task_message"
@@ -1704,18 +1817,13 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
                 )?;
                 value["frontend_read_delivery"] = frontend.status();
                 value["notification_controls"] = notification_controls.projection(&store);
-                value["lifecycle"]["mode"] = if background_mode {
-                    "background"
-                } else {
-                    "passive"
-                }
-                .into();
                 value["attention_counts"] = attention_counts(&store, &epoch, seq, &feed);
                 if let Some(runtime) = &background {
                     runtime.decorate(&mut value);
                 } else if background_blocked {
                     value["background_start"] = json!({"admitted":false,"code":"explicit_handoff_required","durably_blocked":true});
                 }
+                lifecycle::decorate_mode(&mut value, background_mode);
                 upgrade.decorate(&mut value);
                 fanout.publish(protocol::encode(&frame(&epoch, seq, "heartbeat", value))?.into());
                 heartbeat = Instant::now() + HEARTBEAT;
@@ -1751,6 +1859,7 @@ fn serve(config: &Config, location: Location, background_mode: bool) -> Result<(
     if let Some(runtime) = task_runtime.as_mut() {
         runtime.drain();
     }
+    drop(person_actions);
     let drained = if replaced {
         // Even an unrelated listener/store error during replacement must not
         // turn the normal four-second shutdown wait into abandonment. An

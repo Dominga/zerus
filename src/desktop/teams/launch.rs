@@ -30,6 +30,7 @@ pub(super) struct Runtime {
 mod branch;
 mod budget;
 mod card;
+mod edits;
 mod effects;
 mod member;
 mod retry;
@@ -90,7 +91,7 @@ impl Runtime {
         let Some(team) = store.team(id)? else {
             return Ok(false);
         };
-        if team.status != TeamStatus::Running || team.home != self.machine {
+        if !store.launch_allowed(&team, &team.lead)? || team.home != self.machine {
             if matches!(team.status, TeamStatus::Stopped | TeamStatus::Archived) {
                 self.note_late(&team, now)?;
             }
@@ -103,7 +104,8 @@ impl Runtime {
         if !self.budget_due(store, &team, now)? {
             return Ok(false);
         }
-        if team.settings.integration == Integration::Branch
+        if team.status == TeamStatus::Running
+            && team.settings.integration == Integration::Branch
             && !self.branch(store, effects, &team, now)?
         {
             return Ok(self
@@ -117,6 +119,9 @@ impl Runtime {
             .ok_or_else(|| invalid("Lead member is missing"))?;
         if lead.session.is_none() {
             return self.member(store, effects, &team, &lead, None, now);
+        }
+        if team.status == TeamStatus::Planning {
+            return Ok(false);
         }
         // Caps bound the roster at 201 including the lead. Read pages rather
         // than a journal, session catalog or a serialized whole-team value.

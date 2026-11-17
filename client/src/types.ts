@@ -423,6 +423,9 @@ export interface ActivityEvent {
   type?: string;
   source?: string;
   detail?: string;
+  /** Activity-only body; detail remains the bounded list/journal preview. */
+  message_text?: string;
+  message_text_truncated?: boolean;
   at?: number;
   tool?: string;
   agent_id?: string;

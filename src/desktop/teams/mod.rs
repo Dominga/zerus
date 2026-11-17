@@ -7,6 +7,8 @@ mod child;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use child::adopt_custody;
 mod actor;
+pub(crate) mod person_actions;
+pub(crate) mod person_gesture;
 pub(crate) use actor::presence;
 pub(crate) use actor::Ledger as ActorLedger;
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -33,6 +35,7 @@ pub(in crate::desktop::teams) fn reason_text(raw: &str) -> String {
 mod confirm;
 mod health;
 mod items;
+pub(crate) use items::blocked_teams as blocked_service_teams;
 #[cfg(test)]
 pub(crate) use items::Item as ServiceItem;
 pub(crate) use items::Items as ServiceItems;
@@ -60,6 +63,7 @@ pub(crate) use items::{put as put_service_item, Failure as ServiceFailure};
 mod kept;
 mod launch;
 mod ledger;
+pub(crate) mod member_swap;
 pub(crate) use health::Health;
 /// Last launch-worker fault, read without creating a launch ledger.
 pub(crate) fn health(state: &std::path::Path) -> Option<Health> {
@@ -68,6 +72,18 @@ pub(crate) fn health(state: &std::path::Path) -> Option<Health> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) use native::repository;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn repository(
+    _config: &crate::config::Config,
+    _team: &zerus_team_plan::model::Team,
+) -> Result<crate::teams::integrate::Repo, zerus_team_plan::Problem> {
+    Err(zerus_team_plan::Problem::new(
+        zerus_team_plan::problem::code::INVALID_STATE,
+        "Local Teams repository placement is unavailable on this computer.",
+    ))
+}
 mod ports;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod timers;

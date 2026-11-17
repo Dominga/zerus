@@ -116,9 +116,17 @@ pub fn decode(query: &str, value: Value) -> Result<Reply, ReadError> {
     let mut reply = decode_channel(query, value)?;
     reply.index_state = state;
     reply.truncated |= incomplete;
-    reply.contents_unavailable |= value_coverage_incomplete;
+    let mut complete_fallback = false;
     if !fallback.is_null() {
+        let discovered = fallback["discovery"]["complete"] == true;
         let fallback = decode_channel(query, fallback)?;
+        complete_fallback = discovered
+            && !fallback.truncated
+            && fallback.unavailable_sessions == 0
+            && !fallback.contents_unavailable;
+        if complete_fallback && !reply.contents_unavailable && reply.unavailable_sessions == 0 {
+            reply.truncated = has_cursor;
+        }
         reply.truncated |= fallback.truncated;
         reply.unavailable_sessions = reply
             .unavailable_sessions
@@ -144,6 +152,7 @@ pub fn decode(query: &str, value: Value) -> Result<Reply, ReadError> {
             reply.truncated = true;
         }
     }
+    reply.contents_unavailable |= value_coverage_incomplete && !complete_fallback;
     Ok(reply)
 }
 fn same_hit(a: &Hit, b: &Hit) -> bool {
@@ -354,6 +363,32 @@ mod tests {
     fn indexed(results: Vec<Value>, fallback: Value) -> Value {
         json!({"abi":INDEX_MARKER,"query":"needle","results":results,
             "next_cursor":null,"index_coverage":{"state":"indexing"},"fallback":fallback})
+    }
+    #[test]
+    fn a_complete_fresh_fallback_does_not_mean_contents_are_unavailable() {
+        let reply = decode(
+            "needle",
+            indexed(
+                Vec::new(),
+                json!({"query":"needle",
+            "results":[], "truncated":false, "unavailable_sessions":0,
+            "discovery":{"complete":true}}),
+            ),
+        )
+        .unwrap();
+        assert!(!reply.contents_unavailable);
+        assert!(!reply.truncated);
+        let reply = decode(
+            "needle",
+            indexed(
+                Vec::new(),
+                json!({"query":"needle",
+            "results":[], "truncated":true, "unavailable_sessions":0,
+            "discovery":{"complete":false}}),
+            ),
+        )
+        .unwrap();
+        assert!(reply.contents_unavailable);
     }
     #[test]
     fn indexed_channels_are_validated_independently_and_keep_one_bounded_sorted_page() {

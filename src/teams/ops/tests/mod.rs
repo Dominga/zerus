@@ -1,19 +1,26 @@
 use super::*;
 mod apply;
 mod authority;
+pub(crate) mod base_advance;
+mod base_engines;
+mod base_fence;
 mod cards;
 mod decisions;
 mod delegation;
+mod dependencies;
 mod handout;
 mod integration;
 mod members;
 mod observations;
+mod person_gesture;
+mod person_gesture_context;
 mod pipeline;
 mod queue;
 mod readiness;
 mod removed_handout;
 mod replace;
 mod roster;
+mod settings_fields;
 mod storage;
 mod talk;
 mod team;
@@ -125,7 +132,7 @@ impl Harness {
         let rev = self.store.team(team)?.map_or(0, |t| t.revision);
         let mut r = request(rev, op);
         r.team = team.into();
-        super::apply(&mut self.store, actor, &r, 1234)
+        apply_fixture(&mut self.store, actor, &r, 1234)
     }
     pub fn bind(&mut self, id: &str) -> Actor {
         let m = fixture().members.into_iter().find(|m| m.id == id).unwrap();
@@ -337,4 +344,44 @@ impl Harness {
             .unwrap();
     }
 }
+
+/// Product writers create all rows; only native admission is modeled here.
+/// No production actor/origin value supplies this permit.
+pub(crate) fn apply_fixture(
+    store: &mut Store,
+    actor: &Actor,
+    request: &Request,
+    now: i64,
+) -> Result<Reply> {
+    if matches!(actor, Actor::Person { .. })
+        && !matches!(request.operation, Operation::DecideCard { .. })
+    {
+        return super::apply_with_native(
+            store,
+            actor,
+            request,
+            now,
+            Some(crate::desktop::teams::person_actions::kernel::Permit::fixture(actor, request)),
+        );
+    }
+    let admission = if matches!(
+        actor,
+        Actor::Person {
+            origin: PersonOrigin::DesktopUi,
+            ..
+        }
+    ) && matches!(request.operation, Operation::DecideCard { .. })
+    {
+        Some(crate::desktop::teams::person_gesture::Admission::fixture(
+            store, request,
+        ))
+    } else {
+        None
+    };
+    super::apply_with_gesture(store, actor, request, now, admission)
+}
 mod names74;
+
+mod editing;
+
+mod cutover_delivery;

@@ -16,6 +16,7 @@ import type { TerminalStatus } from "../../types";
 import { Icon } from "../lib/icons";
 import { ActivityView, columnStyle } from "./Activity";
 import { KeepWarmChip } from "./KeepWarmChip";
+import { ShowInListButton } from "./ShowInList";
 import { AgentBadge, MachineBadge, StatusBadge, captionText, headerState, statusOf, folderOf } from "./SessionCard";
 import { detailTab, page, selected, setDetailTab, setMenu, subagentOpen, type MenuEntry } from "../../store/ui";
 import { fallbackTab } from "./fallbackTab";
@@ -147,6 +148,7 @@ function Header() {
       <div class="dh-row1">
         <h1 class="ell" title={s().name}>{s().project} / {s().title}<Show when={subagentOpen()}> / {s().subagents?.find((k) => k.id === subagentOpen())?.name}</Show></h1>
         <LazyBoundary><LeadTitleBadge /></LazyBoundary>
+        <ShowInListButton />
         <Show when={s().computer !== "" && statusOf(s()) === "working" && !activity.loaded()}><span class="busy-arc" title={tr("Waiting for the remote read")} /></Show>
         <span class="grow" />
         {/* Task 315 (F3): the host's state, as the card shows it (Qt's header pill). */}

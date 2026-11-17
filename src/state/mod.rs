@@ -25,6 +25,7 @@ mod interrupt;
 mod clear_context;
 mod codex_clear_recovery;
 mod codex_sqlite;
+mod codex_tasks;
 mod compact_context;
 mod continuations;
 mod cache_hint;
@@ -53,12 +54,14 @@ pub(crate) use input::dialog_clause;
 // Its only callers are the Teams actor's tests, which run on Linux and macOS.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 pub(crate) mod listing_fixture;
+#[cfg(all(test, unix))]
+pub(crate) mod fresh_member_fixture;
 pub(crate) use input::task_refusal;
 pub(crate) use input::{Lookup as ReceiptLookup, Submission};
 // The session resume actor's readiness rule (zerus-5wmh.66.4.9), on its
 // platforms only.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) use input::{resumed_readiness, Readiness as ResumedReadiness};
+pub(crate) use input::{first_message_ready, resumed_readiness, Readiness as ResumedReadiness};
 mod input_queue;
 mod journal;
 mod keep_warm;
@@ -82,8 +85,28 @@ mod service_worker;
 mod session_limits;
 pub(crate) mod session_id;
 mod session_index;
+mod task_binding_index;
+pub(crate) use task_binding_index::rows as task_binding_rows;
 // Process projection data. The advisory writer never grants caller authority.
 mod process_index;
+// Advisory display data only; no production reader uses it in this slice.
+mod listing_metadata;
+pub(crate) use listing_metadata::control::MARKER as LISTING_METADATA_MARKER;
+pub(crate) use listing_metadata::listing::Query as ListingQuery;
+pub(crate) fn display_name(row: &Value) -> &str {
+    string(row, "name")
+}
+pub(crate) fn merge_ordinary_listing(
+    value: Value,
+    ids: &BTreeMap<String, String>,
+    archives: bool,
+    query: &ListingQuery,
+) -> Result<Value> {
+    listing_metadata::listing::merge(value, ids, archives, query)
+}
+pub(crate) fn listing_index(args: &[String]) -> Result<Value> {
+    listing_metadata::control::dispatch(args)
+}
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod process_index_writer;
 mod labels;
@@ -99,6 +122,7 @@ mod provider_binding;
 mod processes;
 mod services;
 mod prompt_suggestion;
+mod public_listing;
 mod question_terminal;
 mod questions;
 mod codex_questions;
@@ -163,6 +187,7 @@ mod shown_path;
 mod startup_choice;
 mod claude_theme;
 mod terminal;
+pub(crate) use terminal::acknowledgment as input_acknowledgment;
 mod conversation_history;
 mod usage;
 mod usage_samples;
@@ -803,15 +828,25 @@ fn label_row(session: &mut Value, record: &Value) {
 }
 
 fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &mut processes::WorkSample) -> Result<()> {
-    // Task 193: a listing's per-session cost, named in slow-calls when a row
-    // takes 100 ms or more (the rows a listing cannot afford).
-    let mut phases = slow_calls::Phases::start();
     // An approval answered in Terminal sends no hook.
     let record = kimi_completion::reconcile(claude_approval::reconcile(record));
+    live_display_row(session, record, shared, process_work)
+}
+
+// Display-only inputs must never enter the canonical reconciliation above.
+fn live_display_row(
+    session: &mut Value,
+    record: Value,
+    shared: &Shared,
+    process_work: &mut processes::WorkSample,
+) -> Result<()> {
     session["resumable"] = json!(
         !string(&record, "conversation_id").is_empty()
             && string(&record, "error").is_empty()
     );
+    // Task 193: a listing's per-session cost, named in slow-calls when a row
+    // takes 100 ms or more (the rows a listing cannot afford).
+    let mut phases = slow_calls::Phases::start();
     let summary = journal::summary(&record, true);
     phases.mark("summary");
     session["process_work"] = process_work.summary(&record, summary["activity"] == "idle" && summary["phase"] == "idle");
@@ -848,6 +883,10 @@ fn live_row(session: &mut Value, record: Value, shared: &Shared, process_work: &
 fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, String>) {
     // Task 234: the parts of the listing's last pass, named in slow-calls.
     let mut phases = slow_calls::Phases::start();
+    if sessions.iter().any(|row| row.get("question_routing").is_none()) {
+        let routing = question_routing::load();
+        question_routing::enrich_missing(sessions, routing.as_ref());
+    }
     // DeepSeek and untracked live sessions are owned by their names.
     for session in sessions.iter_mut() {
         if session.get("attention_signature").is_none() {
@@ -891,6 +930,7 @@ fn finish_rows(sessions: &mut [Value], marks: &Value, names: &BTreeMap<String, S
     session_state::decorate(sessions);
     phases.mark("session_state");
     phases.finish_at("ls-finish", "", 100);
+    public_listing::project(sessions);
 }
 
 /// The rows a terminal listing starts from, before `merge_listing` adds what
@@ -1734,32 +1774,75 @@ pub(crate) fn sandbox_read(args: &[String]) -> Option<Result<i32>> {
 }
 
 pub fn dispatch(args: &[String]) -> Result<i32> {
+    // Every private send, including guarded mobile entries, passes here
+    // before provider routing or a native writer. A host never sends for its launcher.
+    if args
+        .first()
+        .is_some_and(|verb| matches!(verb.as_str(), "send" | "send-now"))
+        && dsh::host_check() == dsh::HostCheck::Unregistered
+    {
+        return Err(dsh::UNREGISTERED_HOST.into());
+    }
     // Fixed self-image owner, before any provider lookup or local writer. Its
     // inherited endpoint/frame are synchronization and cancellation only; the
     // fixed Effort/Settings operation preserves its original native authority.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if args.first().map(String::as_str)==Some("native-picker-custodian-v1") {
-        if args.len()!=1 {return Err("Unexpected picker custodian arguments".into());}
+    if args.first().map(String::as_str) == Some("native-picker-custodian-v1") {
+        if args.len() != 1 {
+            return Err("Unexpected picker custodian arguments".into());
+        }
         return effort::picker_custodian_entry();
     }
-    if args.first().map(String::as_str)==Some("receipt-index-worker") {
-        if args.len()!=1 {return Err("Unexpected receipt worker arguments".into());}
+    if args.first().map(String::as_str) == Some("receipt-index-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected receipt worker arguments".into());
+        }
         return receipt_index::worker();
     }
-    if args.first().map(String::as_str)==Some("receipt-index-page") {
+    if args.first().map(String::as_str) == Some("content-search-worker") {
+        if args.len() != 1 {
+            return Err("usage: __state content-search-worker".into());
+        }
+        return search_index::run_worker();
+    }
+    if args.first().map(String::as_str) == Some("archive-catalog-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected archive catalog worker arguments".into());
+        }
+        return archive_catalog::worker();
+    }
+    if args.first().map(String::as_str) == Some("listing-metadata-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected listing metadata worker arguments".into());
+        }
+        return listing_metadata::worker::entry();
+    }
+    if args.first().map(String::as_str) == Some("task-binding-index-worker") {
+        if args.len() != 1 {
+            return Err("Unexpected task routing worker arguments".into());
+        }
+        return task_binding_index::worker();
+    }
+    if args.first().map(String::as_str) == Some("receipt-index-page") {
         return attachments::page_dispatch(&args[1..]);
     }
     if args.first().map(String::as_str)==Some("rules") { return iron_rules::dispatch(&args[1..]); }
     // Receipt observation needs neither a native host nor a state writer.
-    if args.first().map(String::as_str)==Some("session-action-status") { return session_action::status_dispatch(&args[1..]); }
-    if args.first().map(String::as_str)==Some("delivery") { return delivery::dispatch(&args[1..]); }
+    if args.first().map(String::as_str) == Some("session-action-status") {
+        return session_action::status_dispatch(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("delivery") {
+        return delivery::dispatch(&args[1..]);
+    }
     // Coordination metadata never starts or controls a native session host.
     if args.first().map(String::as_str)==Some("wait") { return waits::dispatch(&args[1..]); }
     // WhiteWh fork: agent teams.
     if args.first().map(String::as_str)==Some("team") { return teams::commands::dispatch(&args[1..]); }
     if args.first().map(String::as_str)==Some("repository") { return repositories::dispatch(&args[1..]); }
     #[cfg(unix)]
-    if args.first().map(String::as_str)==Some("repository-git-worker") { return repositories::git_worker(&args[1..]); }
+    if args.first().map(String::as_str) == Some("repository-git-worker") {
+        return repositories::git_worker(&args[1..]);
+    }
     #[cfg(unix)]
     if args.first().map(String::as_str)==Some("worktree-request-worker") { return worktree_requests::worker(&args[1..]); }
     // Settings this computer keeps for its hooks (U19, U22): a control console
@@ -1777,7 +1860,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     // Only this explicit flag ends a parent's live child sessions after it
     // (zerus-sa9qn.17). Before provider routing, so a DeepSeek or OpenCode
     // parent refuses with its own message and no child is touched.
-    if matches!(command.as_str(), "terminate" | "archive") && args.iter().any(|arg| arg == end_children::FLAG) {
+    if matches!(command.as_str(), "terminate" | "archive")
+        && args.iter().any(|arg| arg == end_children::FLAG)
+    {
         return end_children::dispatch(command, args);
     }
     if command == "worktrees" { return worktrees::dispatch(args); }
@@ -1797,8 +1882,8 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             println!("{}", create_directory(path, id)?);
             return Ok(0);
         }
-        let creation=args.first().map(String::as_str)==Some("--creation");
-        let args=if creation { &args[1..] }else{args};
+        let creation = args.first().map(String::as_str) == Some("--creation");
+        let args = if creation { &args[1..] } else { args };
         let hidden = args.first().map(String::as_str) == Some("--hidden");
         let paths = if hidden { &args[1..] } else { args };
         if paths.len() > 1 {
@@ -1806,7 +1891,11 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
         }
         println!(
             "{}",
-            directories(paths.first().map(String::as_str).unwrap_or("~"), hidden, creation)?
+            directories(
+                paths.first().map(String::as_str).unwrap_or("~"),
+                hidden,
+                creation
+            )?
         );
         return Ok(0);
     }
@@ -1824,31 +1913,63 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
     if command == "answer-channel" {
         return answer_channel::run();
     }
-    if command == "graph" { return session_graph::dispatch(args); }
+    if command == "graph" {
+        return session_graph::dispatch(args);
+    }
     if command == "statusline" {
         return claude_statusline::run();
     }
-    if command == "voice" { return voice::dispatch(args); }
-    if command == "file-read" { return computer_files::dispatch(args); }
+    if command == "voice" {
+        return voice::dispatch(args);
+    }
+    if command == "file-read" {
+        return computer_files::dispatch(args);
+    }
     if command == "attachment" {
         return attachments::dispatch(args);
     }
     if command == "recovery" {
         return recovery::dispatch(args);
     }
-    if command == "read" { return read_marks::dispatch(args); }
-    if command == "notifications" { return notifications::dispatch(args); }
-    if command == "keep-warm" { return keep_warm::dispatch(args); }
-    if command == "question-routing" { return question_routing::dispatch(args); }
-    if command == "history" { return conversation_history::dispatch(args); }
-    if command == "history-projection" { return conversation_history::projection_dispatch(args); }
-    if command == "terminal" { return terminal::dispatch(args); }
-    if command == "session-action" { return session_action::dispatch(args); }
-    if command == "compact-context" { return compact_context::dispatch(args); }
-    if command == "clear-context" { return clear_context::dispatch(args); }
-    if command == "interrupt" { return interrupt::dispatch(args); }
-    if command == "processes" { return processes::dispatch(args); }
-    if command == "parent" { return parent_link::dispatch(args); }
+    if command == "read" {
+        return read_marks::dispatch(args);
+    }
+    if command == "notifications" {
+        return notifications::dispatch(args);
+    }
+    if command == "keep-warm" {
+        return keep_warm::dispatch(args);
+    }
+    if command == "question-routing" {
+        return question_routing::dispatch(args);
+    }
+    if command == "history" {
+        return conversation_history::dispatch(args);
+    }
+    if command == "history-projection" {
+        return conversation_history::projection_dispatch(args);
+    }
+    if command == "terminal" {
+        return terminal::dispatch(args);
+    }
+    if command == "session-action" {
+        return session_action::dispatch(args);
+    }
+    if command == "compact-context" {
+        return compact_context::dispatch(args);
+    }
+    if command == "clear-context" {
+        return clear_context::dispatch(args);
+    }
+    if command == "interrupt" {
+        return interrupt::dispatch(args);
+    }
+    if command == "processes" {
+        return processes::dispatch(args);
+    }
+    if command == "parent" {
+        return parent_link::dispatch(args);
+    }
     // The send's effect-free observation is taken only by the CLI's own
     // first disposition (`cli::observe_gate`), never here: a send carrying
     // --observe by another route (the private `__state` ABI, a caller of
@@ -1860,7 +1981,9 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 .into(),
         );
     }
-    if args.first().is_some_and(|name| opencode::exists(name)) { return opencode::dispatch(command,args); }
+    if args.first().is_some_and(|name| opencode::exists(name)) {
+        return opencode::dispatch(command, args);
+    }
     if args.first().is_some_and(|name| dsh::exists(name)) {
         return dsh::dispatch(command, args);
     }
@@ -1905,9 +2028,21 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
             let mut current_read = false;
             let mut index = 1;
             while index < args.len() {
-                if args[index] == "--skip-processes" { include_processes = false; index += 1; continue; }
-                if args[index] == "--read-observation" { read_observation = true; index += 1; continue; }
-                if args[index] == "--current-read" { current_read = true; index += 1; continue; }
+                if args[index] == "--skip-processes" {
+                    include_processes = false;
+                    index += 1;
+                    continue;
+                }
+                if args[index] == "--read-observation" {
+                    read_observation = true;
+                    index += 1;
+                    continue;
+                }
+                if args[index] == "--current-read" {
+                    current_read = true;
+                    index += 1;
+                    continue;
+                }
                 let value = args.get(index + 1).ok_or("missing inspect option value")?;
                 match args[index].as_str() {
                     "--after" => {
@@ -1987,7 +2122,10 @@ pub fn dispatch(args: &[String]) -> Result<i32> {
                 return Ok(0);
             }
             let _guard = lock(None)?;
-            let forgotten = record_path(&args[0]).exists().then(|| read(&args[0])).transpose()?;
+            let forgotten = record_path(&args[0])
+                .exists()
+                .then(|| read(&args[0]))
+                .transpose()?;
             if let Some(record) = &forgotten {
                 // Its own record, never its label's holder (P3a).
                 storage::remove_record(record)?;

@@ -66,7 +66,7 @@ impl Fixture {
         self.task.uuid = doc.uuid().into();
         tasks.save(&mut doc).unwrap();
         drop(tasks);
-        self.node = crate::teams::tasks::send(
+        self.node = crate::teams::tasks::models::send(
             &crate::teams::tasks::Caller {
                 state: &self.config.state,
                 machine,

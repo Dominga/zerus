@@ -22,6 +22,7 @@ use zerus_file_lock::OwnedLock;
 
 mod change_reader;
 mod copy_review;
+mod cutover;
 pub use copy_review::{CopyReview, CopyReviewOutcome};
 #[cfg(all(test, unix))]
 mod fork_tests;
@@ -156,6 +157,10 @@ pub enum TaskFile {
     Updates,
     /// `<uuid>.managed`
     Mark,
+    /// The immutable locally admitted schema-8 seal, including a pin-only cut.
+    Cutover,
+    /// A task-local frozen proposal, including a not-yet-present task.
+    Prepare,
 }
 
 /// The task an entry of the task folder named `name` belongs to, and which
@@ -167,6 +172,8 @@ pub fn task_file(name: &std::ffi::OsStr) -> Option<(&str, TaskFile)> {
         "loro" => TaskFile::Snapshot,
         "updates" => TaskFile::Updates,
         "managed" => TaskFile::Mark,
+        "cutover" => TaskFile::Cutover,
+        "prepare" => TaskFile::Prepare,
         _ => return None,
     };
     let uuid = path
@@ -435,6 +442,10 @@ impl Admitted<'_> {
         self.store.save_locked(task)
     }
 
+    pub(crate) fn save_received(&mut self, task: &mut TaskDoc) -> Result<()> {
+        self.store.save_checked(task, true)
+    }
+
     /// The project's directory, for a record kept beside its tasks under
     /// this admission and the project lock.
     pub fn dir(&self) -> &Path {
@@ -467,6 +478,9 @@ impl Admitted<'_> {
 }
 
 pub struct ProjectStore {
+    pub(crate) upload: crate::phone::upload::Directory,
+    /// Mobile projection cache: never native pin/admission authority.
+    pub(crate) phone: bool,
     dir: PathBuf,
     project: String,
     _lock: OwnedLock,
@@ -886,6 +900,20 @@ impl ProjectStore {
         Ok(Self::opening(root, project, None)?.expect("open waits for the lock"))
     }
 
+    /// Mobile cache receipt is read-only for sealed native tasks. It can
+    /// never construct a native cutover pin or dispatch authority.
+    pub fn open_phone(root: &Path, project: &str) -> Result<Self> {
+        let mut store = Self::open(root, project)?;
+        store.phone = true;
+        Ok(store)
+    }
+    pub fn open_phone_within(root: &Path, project: &str, wait: Duration) -> Result<Option<Self>> {
+        Ok(Self::open_within(root, project, wait)?.map(|mut store| {
+            store.phone = true;
+            store
+        }))
+    }
+
     /// Opens the project like `open`, but gives up after `wait` while another
     /// process holds its lock.
     pub fn open_within(root: &Path, project: &str, wait: Duration) -> Result<Option<Self>> {
@@ -939,7 +967,10 @@ impl ProjectStore {
         if !name.exists() {
             write_atomic(&name, project.as_bytes())?;
         }
+        let upload = crate::phone::upload::Directory::new(&dir)?;
         Ok(Some(Self {
+            upload,
+            phone: false,
             dir,
             project: project.into(),
             _lock: lock,
@@ -1083,7 +1114,7 @@ impl ProjectStore {
         !matches!(
             fs::symlink_metadata(self.managed_path(uuid)),
             Err(error) if error.kind() == ErrorKind::NotFound
-        )
+        ) || !matches!(fs::symlink_metadata(self.cutover_path(uuid)), Err(error) if error.kind() == ErrorKind::NotFound)
     }
 
     /// The task's mark; none when it is missing or cannot be read.
@@ -1223,7 +1254,11 @@ impl ProjectStore {
     /// every file of it read whole (`read_regular`), and a copy that holds
     /// less than its mark is damaged. It writes nothing (no mark is raised).
     fn counted(&self, uuid: &str) -> Result<TaskDoc> {
-        self.counted_with(uuid, read_regular)
+        let task = self.counted_with(uuid, read_regular)?;
+        if !self.phone {
+            self.check_cutover_pin(&task)?;
+        }
+        Ok(task)
     }
 
     fn counted_with(
@@ -1232,6 +1267,7 @@ impl ProjectStore {
         read: impl Fn(&Path) -> std::io::Result<Vec<u8>>,
     ) -> Result<TaskDoc> {
         let mut task = TaskDoc::from_bytes(&read(&self.snapshot_path(uuid))?)?;
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
@@ -1244,7 +1280,7 @@ impl ProjectStore {
                     return Err(Error::failed("the task's updates are not whole"));
                 }
                 for (payload, _) in found {
-                    if !task.import_block(payload) {
+                    if !task.import_block(payload)? {
                         return Err(Error::failed("an update of the task cannot be read"));
                     }
                 }
@@ -1266,6 +1302,7 @@ impl ProjectStore {
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         task.view()?;
         Ok(task)
     }
@@ -1274,6 +1311,7 @@ impl ProjectStore {
         #[cfg(any(test, feature = "test-support"))]
         LOADS.with(|n| n.set(n.get() + 1));
         let mut task = TaskDoc::from_bytes(&read_regular(&self.snapshot_path(uuid))?)?;
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
         if task.uuid() != uuid {
             return Err(Error::failed("the task file does not match its name"));
         }
@@ -1284,7 +1322,7 @@ impl ProjectStore {
                 task.needs_fold = !intact;
                 first = found.first().map(|(_, end)| bytes[..*end].to_vec());
                 for (payload, end) in found {
-                    if !task.import_block(payload) {
+                    if !task.import_block(payload)? {
                         task.needs_fold = true;
                         break;
                     }
@@ -1293,6 +1331,13 @@ impl ProjectStore {
             }
             Err(error) if error.kind() == ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
+        }
+        task.projection_only = self.phone && task.schema() >= crate::task::cutover_schema();
+        if !self.phone {
+            self.check_cutover_pin(&task)?;
+        }
+        if !self.phone && task.cutover_seal()?.is_some() {
+            task.validate_cutover_history()?;
         }
         // A copy this store cut over holds at least what its mark says was
         // saved (one small read); less is files cut short, a save that never
@@ -1325,7 +1370,7 @@ impl ProjectStore {
                         ..Mark::new(&task.current_vv(), &[])
                     },
                 };
-                if self.mark(uuid).as_ref() != Some(&raised) {
+                if !self.phone && self.mark(uuid).as_ref() != Some(&raised) {
                     self.write_mark(uuid, &raised)?;
                 }
             }
@@ -1354,6 +1399,24 @@ impl ProjectStore {
         self.save_locked(task)
     }
 
+    pub(crate) fn save_received(&self, task: &mut TaskDoc) -> Result<()> {
+        let _turn = self.admission.enter();
+        self.save_checked(task, true)
+    }
+
+    pub(crate) fn save_mobile_received(&self, task: &mut TaskDoc) -> Result<()> {
+        let _turn = self.admission.enter();
+        self.check_mobile_received(task)?;
+        self.save_checked(task, true)
+    }
+
+    pub(crate) fn check_mobile_received(&self, task: &TaskDoc) -> Result<()> {
+        if !self.phone && task.schema() >= crate::task::cutover_schema() {
+            return Err(Error::new("This sealed task needs an authenticated mobile edit receipt; its draft is kept for review on its computer"));
+        }
+        Ok(())
+    }
+
     /// Reads a task, saves it when its execution schema needs the repair, and
     /// stamps its files with `stamp`, all in one admission: the version read
     /// and the stamps taken are one observation, which no save of this store
@@ -1363,7 +1426,7 @@ impl ProjectStore {
         let _turn = self.admission.enter();
         let loaded = self.load_admitted(uuid).and_then(|mut task| {
             if task.repair_schema()? {
-                self.save_locked(&mut task)?;
+                self.save_checked(&mut task, true)?;
             }
             Ok(task)
         });
@@ -1377,6 +1440,11 @@ impl ProjectStore {
     }
 
     fn save_locked(&self, task: &mut TaskDoc) -> Result<()> {
+        self.save_checked(task, false)
+    }
+
+    fn save_checked(&self, task: &mut TaskDoc, received: bool) -> Result<()> {
+        self.check_cutover_save(task, received)?;
         let durable = self
             .durable
             .lock()
@@ -1387,7 +1455,7 @@ impl ProjectStore {
             if base != durable {
                 let changes = task.export_since_vv(&base)?;
                 let mut current = self.load_admitted(task.uuid())?;
-                if !current.import_block(&changes) {
+                if !current.import_block(&changes)? {
                     return Err(Error::new(
                         "this task changed here meanwhile and these changes do not apply to it; \
                          read it again",
@@ -1417,6 +1485,7 @@ impl ProjectStore {
                 }
             }
         }
+        self.check_cutover_save(task, received)?;
         self.save_admitted(task)?;
         self.durable(task.uuid(), task.current_vv());
         Ok(())
@@ -1499,6 +1568,7 @@ impl ProjectStore {
         for uuid in self.uuids()? {
             match self.load(&uuid) {
                 Ok(task) => tasks.push(task),
+                Err(error) if error.kind() == crate::ErrorKind::Busy => return Err(error),
                 Err(error) => damaged.push(self.damaged(&uuid, error.to_string())),
             }
         }
@@ -1853,13 +1923,13 @@ mod tests {
         };
         let store = open();
         let mut good = new_task(&store, "U");
-        store.save(&mut good).unwrap();
+        store.save_legacy_for_test(&mut good).unwrap();
         let mut updated = new_task(&store, "V");
-        store.save(&mut updated).unwrap();
+        store.save_legacy_for_test(&mut updated).unwrap();
         updated.comment("an update", &Actor::Person, 2).unwrap();
-        store.save(&mut updated).unwrap();
+        store.save_legacy_for_test(&mut updated).unwrap();
         let mut marked = new_task(&store, "W");
-        store.save(&mut marked).unwrap();
+        store.save_legacy_for_test(&mut marked).unwrap();
         let lone = "11111111-1111-4111-8111-111111111111";
         fifo(&store.snapshot_path(lone));
         let updates = store.updates_path(updated.uuid());
@@ -2170,10 +2240,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = ProjectStore::open(root.path(), "p1").unwrap();
         let mut good = new_task(&store, "V");
-        store.save(&mut good).unwrap();
+        store.save_legacy_for_test(&mut good).unwrap();
         let mut bad = new_task(&store, "W");
         bad.set_raw_field("target", "{\"kind\":\"team\"}");
-        store.save(&mut bad).unwrap();
+        store.save_legacy_for_test(&mut bad).unwrap();
         let (tasks, damaged) = store.tasks().unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(damaged.len(), 1);

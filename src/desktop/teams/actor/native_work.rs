@@ -151,11 +151,16 @@ impl Native {
             },
         }
     }
-    fn merge_admission(
-        &self,
-        plan: &MergePlan,
-    ) -> Result<crate::teams::store::actor_reads::Admission> {
-        let store = Store::open(&self.config.state)?.admission()?;
+    fn merge_admission(&self, plan: &MergePlan) -> Result<MergeAdmission> {
+        let store = Store::open(&self.config.state)?;
+        // The accepted task's project lock first, its current state read
+        // under it, and then the store's writer fence: every path that takes
+        // both takes them in this order (project locks precede team
+        // operations), so this never waits for a project lock while it holds
+        // the fence. Its error is the last refusal below (zerus-63rru.37
+        // rounds 4 and 5).
+        let current = self.accepted_task_revision(&store, plan);
+        let store = store.admission()?;
         let team = store
             .team(&plan.team)?
             .ok_or_else(|| problem("Integration team disappeared"))?;
@@ -165,7 +170,6 @@ impl Native {
             || team.owner != plan.owner
             || team.project != plan.project
             || team.integration_branch != plan.branch
-            || team.base_commit != plan.base
             || team.settings.integration != Integration::Branch
         {
             return Err(problem("Integration admission changed"));
@@ -173,8 +177,24 @@ impl Native {
         if store.generation(&plan.team, plan.node)? != Some(plan.generation) {
             return Err(problem("Integration generation changed"));
         }
+        if store
+            .attempt_base(&plan.team, plan.node, plan.generation)?
+            .as_deref()
+            != Some(plan.base.as_str())
+        {
+            return Err(problem("Integration admission changed"));
+        }
         if !store.accepted_task_current(&plan.team, plan.node, plan.generation)? {
             return Err(problem("The accepted task's reviewed attempt changed"));
+        }
+        // Git write authority belongs only to the node's latest decision
+        // (zerus-63rru.37 round 3): the person's review's own durable row
+        // revokes the older Ready acceptance, independent of the supersede.
+        if store
+            .latest_decision(&plan.team, plan.node)?
+            .is_some_and(|latest| latest > plan.decision)
+        {
+            return Err(problem("A later decision owns this node's integration"));
         }
         let report = store
             .report(&plan.team, plan.node, plan.generation)?
@@ -194,7 +214,30 @@ impl Native {
                 if self.stop.load(Ordering::Acquire) || !crate::teams::enabled(&self.config.state) {
                     return Err(problem("Integration did not start"));
                 }
-                return Ok(store);
+                // Git write authority also needs a store that has applied
+                // the accepted task's current state (zerus-63rru.37 round
+                // 4): a failed ObserveTask, its supersede included, leaves
+                // the node's revision behind the replica, and the merge
+                // waits for the observation that applies it. A missing or
+                // unreadable task admits nothing. The project lock the
+                // revision was read under stays held with the fence until the
+                // ref update has returned (round 5): no task write can come
+                // between this comparison and the Git write.
+                let (task, held, current) = current?;
+                if !store
+                    .applied_task(&plan.team, plan.node)?
+                    .is_some_and(|(applied, revision)| {
+                        applied.as_ref() == Some(&task) && revision == current
+                    })
+                {
+                    return Err(problem(
+                        "The team store has not applied the accepted task's current state",
+                    ));
+                }
+                return Ok(MergeAdmission {
+                    _store: store,
+                    _task: held,
+                });
             }
             cursor = page.next;
             if cursor.is_none() {
@@ -203,7 +246,52 @@ impl Native {
         }
         Err(problem("The exact Ready acceptance is no longer current"))
     }
+    /// The accepted node's task, its project lock, and its current revision
+    /// in the replica read under that lock, through the reader that builds
+    /// ObserveTask, waiting for the lock no longer than the admission's own
+    /// short bound.
+    fn accepted_task_revision(
+        &self,
+        store: &Store,
+        plan: &MergePlan,
+    ) -> Result<(
+        zerus_team_plan::model::TaskRef,
+        zerus_replica::ProjectStore,
+        String,
+    )> {
+        let task = store
+            .applied_task(&plan.team, plan.node)?
+            .and_then(|(task, _)| task)
+            .ok_or_else(|| problem("The accepted task is missing"))?;
+        let (held, revision) = crate::teams::tasks::held_revision(
+            &self.config.state,
+            &task,
+            &plan.team,
+            &plan.machine,
+            TASK_READ_WAIT,
+        )
+        .map_err(|error| {
+            problem(&format!(
+                "The accepted task cannot be read: {}",
+                cut(&error.message, 512)
+            ))
+        })?;
+        Ok((task, held, revision))
+    }
 }
+/// A merge admission's boundary (zerus-63rru.37 round 5): the store's writer
+/// fence and the accepted task's project lock, under which the task's
+/// current revision was read and found applied. The ref update holds it
+/// until update-ref has returned, within the ref deadline. Fields drop in
+/// order: the fence first, then the project lock, the reverse of taking.
+pub(super) struct MergeAdmission {
+    _store: crate::teams::store::actor_reads::Admission,
+    _task: zerus_replica::ProjectStore,
+}
+/// The merge admission's wait for the accepted task's project lock. The
+/// second admission runs inside the process spawn turn, so it stays short; a
+/// busy task refuses this attempt and the merge is tried again later.
+const TASK_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
 #[cfg(test)]
 mod tests {
     use super::*;

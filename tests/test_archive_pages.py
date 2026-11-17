@@ -11,6 +11,9 @@ import sys
 import tempfile
 import unittest
 import uuid
+import time
+if os.name == 'posix':
+    import fcntl
 
 REPO=Path(__file__).resolve().parents[1]
 HGS=Path(os.environ.get('HGS_TEST_BIN',REPO/'target/debug/hgs')).resolve()
@@ -24,19 +27,73 @@ class ArchivePages(unittest.TestCase):
         self.env.update(HOME=str(self.root),HGS_STATE_DIR=str(self.state),HGS_CONFIG_DIR=str(self.root/'config'),HGS_SELF='archive-fixture',HGS_PEERS='',TMUX_TMPDIR=str(socket))
         # Metadata commands need the ordinary explicit local-session opt-in on Windows.
         (self.root/'config').mkdir();(self.root/'config'/'local-sessions').touch()
+        # Existing projection/cursor controls assert ready data. Bootstrap is
+        # asynchronous now: hold only the launch gate, then explicitly drain the
+        # private worker before those assertions. The native bootstrap control
+        # below releases this gate and exercises the real detached helper.
+        self.launch=None
+        if os.name=='posix':
+            aux=self.state/'archive-catalog-v2';aux.mkdir(mode=0o700)
+            self.launch=open(aux/'launch.lock','a+b',opener=lambda path,flags:os.open(path,flags,0o600))
+            self.addCleanup(self.launch.close)
+            fcntl.flock(self.launch,fcntl.LOCK_EX)
+    def refresh(self):
+        result=subprocess.run([str(HGS),'__state','archive-catalog-worker'],env=self.env,capture_output=True,text=True,timeout=90)
+        self.assertEqual(result.returncode,0,result.stderr)
     def record(self,index,at=100,**extra):
         ident=str(uuid.UUID(int=index+1));value=dict(version=1,name=f'codex/example/archived-{index}',agent='codex',run_id=f'run-{index}',conversation_id=f'conversation-{index}',state='archived',archive_id=ident,archived_at=at,created=1,cwd='/synthetic/project',**extra)
         path=self.archives/(ident+'.json');temp=path.with_suffix('.tmp');temp.write_text(json.dumps(value),encoding='utf-8');temp.replace(path)
         return value
     def run_query(self,query=None,fail=False,bounded=False):
+        self.refresh()
         r=subprocess.run([str(HGS),'archives','--json']+(['--bounded'] if bounded else []),input=json.dumps(query or {}),capture_output=True,text=True,env=self.env,timeout=30)
         if fail:self.assertNotEqual(r.returncode,0,r.stdout);return r
         self.assertEqual(r.returncode,0,r.stderr);return json.loads(r.stdout)
+    @unittest.skipUnless(os.name=='posix','Private native worker exclusion uses flock')
+    def test_cold_requests_report_unknown_and_a_detached_worker_publishes_ready_coverage(self):
+        records=[self.record(i,100+i) for i in range(128)]
+        originals={path:path.read_bytes() for path in self.archives.glob('*.json')}
+        command=[str(HGS),'archives','--json','--bounded']
+        # A contended worker proves the first read cannot fall back to an
+        # inline rebuild or manufacture an empty/complete result.
+        lock=self.state/'archive-catalog-v2/worker.lock'
+        with open(lock,'a+b',opener=lambda path,flags:os.open(path,flags,0o600)) as worker:
+            fcntl.flock(worker,fcntl.LOCK_EX)
+            result=subprocess.run(command,input='{}',env=self.env,capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('coverage is incomplete',result.stderr)
+            self.assertFalse((self.state/'archive-catalog-v1.sqlite3').exists())
+            preview=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,capture_output=True,text=True,timeout=5)
+            self.assertEqual(preview.returncode,0,preview.stderr)
+            descriptor=json.loads(preview.stdout)['archive_page']
+            self.assertTrue(descriptor['partial']);self.assertTrue(descriptor['total_capped'])
+            self.assertFalse(descriptor['catalog_complete'])
+            self.assertIn('coverage is incomplete',descriptor['error'])
+        fcntl.flock(self.launch,fcntl.LOCK_UN)
+        try:
+            result=subprocess.run(command,input='{}',env=self.env,capture_output=True,text=True,timeout=5)
+            self.assertNotEqual(result.returncode,0,'The cold request must leave bootstrap to its helper')
+            deadline=time.monotonic()+15
+            while time.monotonic()<deadline:
+                result=subprocess.run(command,input='{}',env=self.env,capture_output=True,text=True,timeout=5)
+                if result.returncode==0:break
+                self.assertIn('coverage is incomplete',result.stderr)
+                time.sleep(.02)
+            self.assertEqual(result.returncode,0,result.stderr)
+            page=json.loads(result.stdout)
+            self.assertFalse(page['partial']);self.assertFalse(page['total_capped'])
+            self.assertEqual(page['total'],len(records));self.assertEqual(len(page['sessions']),50)
+            self.assertEqual(set(originals),set(self.archives.glob('*.json')))
+            for path,raw in originals.items():self.assertEqual(path.read_bytes(),raw)
+        finally:
+            fcntl.flock(self.launch,fcntl.LOCK_EX)
+
     def test_exited_archive_status_is_ended_without_rewriting_the_restore_source(self):
         value=self.record(0,activity='busy',phase='working',pid=0,process_start='exited-fixture',conversation_state='active')
         value.update(agent='kimi',name='kimi/example/completed')
         path=self.archives/(value['archive_id']+'.json')
         path.write_text(json.dumps(value),encoding='utf-8');before=path.read_bytes()
+        self.refresh()
         commands=(['ls','--json','--local'],['archives','--json'],['archives','--json','--bounded'],
                   ['inspect',value['name'],'--archive',value['archive_id']])
         for args in commands:
@@ -166,6 +223,7 @@ class ArchivePages(unittest.TestCase):
             self.assertNotIn('sessions',descriptor)
     def test_default_preview_cursor_continues_without_duplicates_after_an_insert(self):
         for index in range(137):self.record(index,100+index//5)
+        self.refresh()
         result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,capture_output=True,text=True,timeout=30)
         self.assertEqual(result.returncode,0,result.stderr);snapshot=json.loads(result.stdout)
         rows=snapshot['sessions'];self.assertEqual(len(rows),50)
@@ -194,6 +252,7 @@ class ArchivePages(unittest.TestCase):
             original=json.dumps(binding).encode();path.write_bytes(original)
             archive_path.write_text(json.dumps(archived))
             def listing(*extra):
+                self.refresh()
                 result=subprocess.run([str(HGS),'ls','--json','--local',*extra],env=self.env,capture_output=True,text=True,timeout=30)
                 self.assertEqual(result.returncode,0,result.stderr);return json.loads(result.stdout)
             # The original process birth keeps the binding present across the
@@ -226,6 +285,7 @@ class ArchivePages(unittest.TestCase):
         record=self.record(0,journal_name=owner)
         mark=dict(reply_id='read-reply',attention_signature=None,at=123)
         (self.state/'read-marks.json').write_text(json.dumps(dict(version=1,sessions={owner:{record['conversation_id']:mark}})))
+        self.refresh()
         result=subprocess.run([str(HGS),'ls','--json','--local'],env=self.env,capture_output=True,text=True,timeout=30)
         self.assertEqual(result.returncode,0,result.stderr);row=json.loads(result.stdout)['sessions'][0]
         self.assertEqual(row['read'],mark)
@@ -235,6 +295,25 @@ class ArchivePages(unittest.TestCase):
         self.assertNotIn('read',explicit,'Explicit pages retain their existing row projection')
         for key in ('archive_id','archived_at','run_id','conversation_id','state','resumable','allowed_actions','action_reasons','notification_preferences'):
             self.assertEqual(row[key],explicit[key],key)
+
+    def test_selected_archive_keeps_complete_model_choices_and_source(self):
+        home=self.root/'codex-home';home.mkdir()
+        choices=[dict(id='fixture-a',label='Fixture A',effort_options=['low','high'])]
+        cache=dict(models=[dict(
+            slug='fixture-a',display_name='Fixture A',
+            supported_reasoning_levels=[dict(effort='low'),dict(effort='high')])])
+        (home/'models_cache.json').write_text(json.dumps(cache))
+        record=self.record(0,agent_home=str(home),model='fixture-a',effort='high')
+        path=self.archives/(record['archive_id']+'.json');original=path.read_bytes()
+        self.refresh()
+        result=subprocess.run([str(HGS),'inspect',record['name'],'--archive',record['archive_id'],
+                               '--skip-processes'],env=self.env,capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr);selected=json.loads(result.stdout)
+        self.assertEqual(selected.get('model_options'),choices)
+        self.assertEqual(selected['effort_options'],['low','high'])
+        self.assertEqual((selected['model'],selected['effort']),('fixture-a','high'))
+        self.assertEqual(path.read_bytes(),original)
+
     def test_archived_preferences_follow_the_original_journal_and_current_store(self):
         owner='session:00000000-0000-4000-8000-000000000050'
         row=self.record(0,journal_name=owner)

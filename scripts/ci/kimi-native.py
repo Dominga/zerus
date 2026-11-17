@@ -29,9 +29,13 @@ ROOT = Path(__file__).resolve().parents[2]
 # Historical data validation only; native execution always uses stage_latest().
 HISTORICAL_VERSIONS = ('2.1.1', '2.2.0', '2.5.2')
 METHODS = (
+    # a4mub.1.1: genuine native draft refusal, exact spent-UUID proof, no keys
+    # or model request, and a read-only original-only v2 recovery lookup.
+    'test_kimi_native.NativeKimi.test_native_refusal_has_an_opted_in_terminal_outcome',
     'test_kimi_native.NativeKimi.test_declined_initial_prompt_is_cancelled_and_inspection_is_bounded',
     'test_kimi_native.NativeKimi.test_launch_prompt_waits_for_trust_and_is_not_replayed_on_resume',
     'test_kimi_native.NativeKimi.test_exact_input_reaches_the_model_once',
+    'test_kimi_native.NativeKimi.test_exact_native_wire_repairs_a_lost_acceptance_write_without_replay',
     'test_kimi_native.NativeKimi.test_background_task_completion_settles_its_own_main_turn',
     'test_kimi_native.NativeKimi.test_busy_attachment_send_is_typed_once_and_delivered_once',
     'test_kimi_native.NativeKimi.test_clear_input_discards_a_residue_and_kimi_keeps_running',
@@ -49,6 +53,12 @@ METHODS = (
     'test_kimi_questions_native.NativeKimiQuestions.test_tall_question_in_an_unviewed_80x24_pane_grows_until_answerable',
     'test_kimi_questions_native.NativeKimiQuestions.test_tall_question_with_an_attached_client_is_never_resized',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_answers_without_growth',
+    # sa9qn.34: ordinary child questions retain exact native identity and
+    # original answer receipts across choices, multiple parts and duplicates.
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_question_exact_identity_and_receipt_prevent_replay',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_background_question_never_claims_to_be_blocking',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_multiple_choice_question_uses_the_same_native_identity',
+    'test_kimi_questions_native.NativeKimiQuestions.test_short_multi_part_question_uses_the_same_native_identity',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_long_other_is_confirmed_from_the_complete_review',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_explicit_retry_resumes_the_existing_other_editor',
     'test_kimi_questions_native.NativeKimiQuestions.test_short_question_foreign_other_is_preserved_without_submission',

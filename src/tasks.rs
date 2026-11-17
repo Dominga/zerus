@@ -27,6 +27,7 @@ mod cutover;
 mod copy_review;
 mod dispatch;
 mod mobile;
+mod mobile_edits;
 mod phone;
 mod sessions;
 mod messages;
@@ -36,6 +37,8 @@ mod teams;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod person;
 mod team_deliver;
+#[cfg(all(test, unix))]
+pub(crate) use team_deliver::planned::write as create_planned_task_for_test;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use team_deliver::{PROJECT_LIMIT, TERMINAL_WAITING};
 #[cfg(all(test, unix))]
@@ -43,6 +46,10 @@ pub(crate) use team_deliver::{blocked_handout, waiting_handout, Blocked, RealHan
 #[cfg(test)]
 #[allow(unused_imports)] // The Teams actor's isolated CLI fixture supplies native input.
 pub(crate) use team_deliver::FIXTURE_NATIVE_INPUT;
+#[cfg(all(test, unix))]
+pub(crate) use team_deliver::fixture_delivery;
+
+pub(crate) mod native_team;
 
 /// A send that pasted the prompt but could not record it: its outcome is
 /// uncertain, and the phone's receipt says so.
@@ -50,7 +57,9 @@ const SENT_UNRECORDED: &str = "the prompt was sent, but the task could not recor
 
 // The Teams actor's measurement of a removed reviewer's stage (zerus-63rru.77).
 #[cfg(all(test, unix))]
-pub(crate) use team_deliver::{removed_stage_cancel, RealCancel};
+pub(crate) use team_deliver::{
+    fence_delivery_cycle, removed_stage_cancel, with_legacy_cancel, RealCancel,
+};
 
 /// Whether a failed send may have pasted its prompt: it was sent but not
 /// recorded, or its delivery is uncertain (the paste began, Enter or the
@@ -59,7 +68,7 @@ fn paste_uncertain(message: &str) -> bool {
     message.starts_with(SENT_UNRECORDED) || message.starts_with("delivery uncertain")
 }
 
-const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--team TEAM [--role ROLE] [--pipeline PIPELINE]] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent|team TEAM [--role ROLE] [--pipeline PIPELINE] [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | team-deliver REF --json [--recover-only] | team-done REF --json | team-clear REF --json | team-cancel REF --json | team-stage --json | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-attempt REF --attempt UUID [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | report-attempt REF --attempt UUID [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
+const USAGE: &str = "usage: hgs task list --project P [--stage S] | list --project P --stage S --limit 1..200 [--after CURSOR|--before CURSOR] [--if-revision R] [--session ID [--host ALIAS]] [--query TEXT] | get REF [--history-limit 1..80 [--history-before CURSOR] [--attachments metadata]] | attachment REF --file N [--entry ID] | add --project P [--backlog] [--start] [--team TEAM [--role ROLE] [--pipeline PIPELINE]] [--target SESSION|any [--host ALIAS]] [--title TITLE [--request-id UUID]] [--position N] | edit REF | rename REF | move REF --top|--before REF|--after REF|--position N | stage REF backlog|todo|done | target REF SESSION|any|new-session|subagent|team TEAM [--role ROLE] [--pipeline PIPELINE] [--parent SESSION] [--host ALIAS] | send REF [--session SESSION [--host ALIAS]] | team-deliver REF --json [--recover-only] | team-done REF --json | team-clear REF --json | team-cancel REF --json | team-stage --json | team-planned --json | start-plan REF --json | start-deliver REF --json [--recover-only] | cancel REF [--reason TEXT] | cancel-attempt REF --attempt UUID [--reason TEXT] | cancel-execution REF --json (guard JSON on stdin) | handoff REF --session SESSION [--host ALIAS] | start REF | report REF [--progress|--ready] [--considered REV] | report-attempt REF --attempt UUID [--progress|--ready] [--considered REV] | comment REF [--content-json] | message REF --request-id UUID --mode queue|send|reopen|note [--expect-dispatch ID] [--content-json] | worker REF --subagent ID --request-id REQUEST | settings --project P [--set] | review-copy --project P --uuid UUID [--confirm FINGERPRINT] --json | cutover --project P [--hold on|off [--confirm]] | digests --json | exchange --json | mobile-send|mobile-cancel|mobile-done --json
   REF is T-xxxxxx with --project P, or PROJECT/T-xxxxxx; texts and --set settings are read from stdin;
   a change an agent makes prints one line, and --json prints the task";
 
@@ -337,11 +346,24 @@ fn machines(config: &Config) -> Result<Machines> {
 }
 
 fn machines_for(config: &Config, here: String) -> Result<Machines> {
+    let mut machines = machine_routes(config, here);
+    machines.bindings = crate::state::task_bindings().map_err(fail)?;
+    Ok(machines)
+}
+
+/// Machine names need no session inventory. List admission and paging happen
+/// before the selected rows ask for their local routing metadata.
+fn machine_routes(config: &Config, here: String) -> Machines {
     #[cfg(unix)]
     let peers = crate::swarm::verified_bindings(config, &here);
     #[cfg(not(unix))]
     let peers = BTreeMap::new();
-    Ok(Machines { here, selves: config.selves.clone(), peers, bindings: crate::state::task_bindings().map_err(fail)? })
+    Machines {
+        here,
+        selves: config.selves.clone(),
+        peers,
+        bindings: Vec::new(),
+    }
 }
 
 impl Machines {
@@ -386,6 +408,9 @@ const UNPROVEN_HOSTED_AGENT: &str = "a DeepSeek agent's tool call (HGS_AGENT=dsh
 /// to the session's current name. A send or cancel another computer forwards
 /// (`forwardable`) names its agent with `--agent NODE/SESSION`.
 fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
+    if crate::state::dsh::host_check() == crate::state::dsh::HostCheck::Unregistered {
+        return Err(fail(crate::state::dsh::UNREGISTERED_HOST));
+    }
     let var = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
     if let Some(agent) = option(args, "--agent")? {
         if !forwardable {
@@ -394,7 +419,9 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         if var("HGS_SESSION").is_some() && var("HGS_RUN_ID").is_some()
             || crate::state::session_graph::hosted_agent_call()
         {
-            return Err(fail("--agent is for commands another computer forwards; an agent acts as its own session"));
+            return Err(fail(
+                "--agent is for commands another computer forwards; an agent acts as its own session",
+            ));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -405,12 +432,16 @@ fn actor(here: &str, args: &[String], forwardable: bool) -> Result<Actor> {
         }
         let (machine, session) = agent
             .split_once('/')
-            .filter(|(machine, session)| uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty())
+            .filter(|(machine, session)| {
+                uuid::Uuid::parse_str(machine).is_ok() && !session.is_empty()
+            })
             .ok_or_else(|| fail("--agent is NODE/SESSION, NODE being a computer's identity"))?;
         return Ok(Actor::Agent(SessionKey {
             machine: machine.to_owned(),
             session: session.to_owned(),
-            session_id: option(args, "--agent-session-id")?.unwrap_or_default().into(),
+            session_id: option(args, "--agent-session-id")?
+                .unwrap_or_default()
+                .into(),
         }));
     }
     // A resident DeepSeek host's tool call is an agent's even without markers
@@ -620,6 +651,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
     if dry {
         return Err(fail("task commands do not support --dry-run"));
     }
+    if args.first().is_some_and(|action| action == "team-planned") {
+        return team_deliver::planned::dispatch(config, &args[1..]);
+    }
     if args.first().is_some_and(|action| action == "team-stage") {
         return team_deliver::stage::dispatch(config, &args[1..]);
     }
@@ -633,7 +667,13 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
         return controls::dispatch(config, args);
     }
     // The phone's commands refuse in JSON, which the connector passes on.
-    let phone = ["exchange", "mobile-send", "mobile-cancel", "mobile-done"];
+    let phone = [
+        "exchange",
+        "mobile-edit",
+        "mobile-send",
+        "mobile-cancel",
+        "mobile-done",
+    ];
     if args.first().is_some_and(|action| phone.contains(&action.as_str())) && flag(args, "--json") {
         return Ok(match execute(config, args) {
             Ok(out) => {
@@ -668,6 +708,15 @@ fn refusal(message: &str) -> Value {
 /// `hgs task list --project PROJECT --json`, for `hgs watch`.
 pub(crate) fn listing(config: &Config, project: &str) -> Result<Value> {
     list(config, &["--project".to_owned(), project.to_owned()])
+}
+
+/// Derived cursor only; a cached row is never cutover/adoption authority.
+pub(crate) fn cutover_candidate(store:&ProjectStore)->Option<String> {
+    let mut index=index::Index::open(store)?;
+    match index.cutover_candidate() {
+        Ok(candidate)=>candidate,
+        Err(error)=>{index.discard(&error);None},
+    }
 }
 
 /// The folder whose files hold a project's tasks: a change below it changes
@@ -725,6 +774,7 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
                 phone::exchange(config)
             }
         }
+        "mobile-edit" if args.len() == 1 && args[0] == "--json" => mobile_edits::entry(config),
         // The phone's Send now, Cancel and Done list; each takes exactly --json.
         "mobile-send" | "mobile-cancel" | "mobile-done" if args.len() == 1 && args[0] == "--json" => {
             match action.as_str() {
@@ -738,8 +788,9 @@ fn execute(config: &Config, args: &[String]) -> Result<Value> {
 }
 
 fn list(config: &Config, args: &[String]) -> Result<Value> {
-    let machines = machines(config)?;
-    let who = actor(&machines.here, args, false)?;
+    let here = crate::swarm::local_node_id(config).map_err(fail)?;
+    let who = actor(&here, args, false)?;
+    let mut machines = machine_routes(config, here);
     let (id, name) = project_arg(config, args, &who)?;
     let only = option(args, "--stage")?
         .map(Stage::parse)
@@ -747,9 +798,15 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
         .map_err(fail)?;
     if let Some(limit) = option(args, "--limit")? {
         let stage = only.ok_or_else(|| fail("--limit needs --stage"))?;
-        return paged(config, args, (&id, &name), stage, limit, &machines);
+        return paged(config, args, (&id, &name), stage, limit, &mut machines);
     }
-    for paging in ["--after", "--before", "--if-revision", "--session"] {
+    for paging in [
+        "--after",
+        "--before",
+        "--if-revision",
+        "--session",
+        "--query",
+    ] {
         if option(args, paging)?.is_some() {
             return Err(fail(format!("{paging} needs --stage and --limit")));
         }
@@ -768,33 +825,37 @@ fn list(config: &Config, args: &[String]) -> Result<Value> {
             continue;
         }
         for task in tasks.iter().filter(|t| t.stage().ok() == Some(stage)) {
-            out.push(view(task, &name, false, &machines)?);
+            out.push(row(task.view().map_err(fail)?, task.revision())?);
         }
+    }
+    sessions::for_rows(config, &mut machines, &out)?;
+    for value in &mut out {
+        *value = label_view(std::mem::take(value), &name, false, &[], &machines)?;
     }
     Ok(json!({"project": {"id": id, "name": name}, "tasks": out, "damaged": damaged}))
 }
 
 /// `task list --stage S --limit N`: one page of a stage, from the task index
 /// or, when it cannot answer, from the documents, in the same form.
-fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, limit: &str, machines: &Machines) -> Result<Value> {
+fn paged(
+    config: &Config,
+    args: &[String],
+    project: (&str, &str),
+    stage: Stage,
+    limit: &str,
+    machines: &mut Machines,
+) -> Result<Value> {
     let (id, name) = project;
     let limit = limit
         .parse::<usize>()
         .ok()
         .filter(|n| (1..=index::MAX_LIMIT).contains(n))
-        .ok_or_else(|| fail(format!("--limit must be between 1 and {}", index::MAX_LIMIT)))?;
-    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
-        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
-        (Some(cursor), None) => {
-            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
-            index::Anchor::After(rank, uuid)
-        }
-        (None, Some(cursor)) => {
-            let (rank, uuid) = index::parse_cursor(id, stage, cursor)?;
-            index::Anchor::Before(rank, uuid)
-        }
-        (None, None) => index::Anchor::Start,
-    };
+        .ok_or_else(|| {
+            fail(format!(
+                "--limit must be between 1 and {}",
+                index::MAX_LIMIT
+            ))
+        })?;
     let wanted = option(args, "--if-revision")?;
     // One session's view, by its identity (zerus-cg5h.26): never its name.
     let session = match (option(args, "--session")?, option(args, "--host")?) {
@@ -810,7 +871,37 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
         (None, Some(_)) => return Err(fail("--host needs --session")),
         (None, None) => None,
     };
-    let filter = session.as_ref().map(|(scope, _)| scope);
+    let query = option(args, "--query")?
+        .map(str::trim)
+        .filter(|q| !q.is_empty());
+    if query.is_some_and(|q| q.len() > 1024 || q.chars().any(char::is_control)) {
+        return Err(fail(
+            "--query must be at most 1024 bytes without control characters",
+        ));
+    }
+    let searched = query.map(|query| {
+        index::Scope::searched(
+            session.as_ref().map(|(scope, _)| scope.clone()),
+            query,
+            name,
+        )
+    });
+    let filter = searched
+        .as_ref()
+        .or_else(|| session.as_ref().map(|(scope, _)| scope));
+    let cursor_project = filter.map_or_else(|| id.to_owned(), |scope| scope.cursor_project(id));
+    let anchor = match (option(args, "--after")?, option(args, "--before")?) {
+        (Some(_), Some(_)) => return Err(fail("use --after or --before, not both")),
+        (Some(cursor), None) => {
+            let (rank, uuid) = index::parse_cursor(&cursor_project, stage, cursor)?;
+            index::Anchor::After(rank, uuid)
+        }
+        (None, Some(cursor)) => {
+            let (rank, uuid) = index::parse_cursor(&cursor_project, stage, cursor)?;
+            index::Anchor::Before(rank, uuid)
+        }
+        (None, None) => index::Anchor::Start,
+    };
     let store = store(config, id)?;
     let indexed = index::Index::open(&store).and_then(|mut index| {
         match indexed_page_in(&mut index, stage, limit, &anchor, wanted, filter) {
@@ -830,7 +921,11 @@ fn paged(config: &Config, args: &[String], project: (&str, &str), stage: Stage, 
             out["session"] = echo;
         }
     }
+    if let Some(query) = query {
+        out["query"] = json!(query);
+    }
     if let Some(rows) = out.get_mut("tasks").and_then(Value::as_array_mut) {
+        sessions::for_rows(config, machines, rows)?;
         for row in rows {
             *row = label_view(std::mem::take(row), name, false, &[], machines)?;
         }
@@ -886,23 +981,12 @@ fn documents_page(store: &ProjectStore, stage: Stage, limit: usize, anchor: &ind
 
 /// `documents_page`, of one session's view when `filter` is set.
 fn documents_page_in(store: &ProjectStore, stage: Stage, limit: usize, anchor: &index::Anchor, wanted: Option<&str>, filter: Option<&index::Scope>) -> Result<Value> {
-    let docs = documents(store)?;
-    Ok(match filter {
-        None => page_of(&docs, store.project_id(), stage, limit, anchor, wanted),
-        Some(scope) => page_of(&docs.only(scope), store.project_id(), stage, limit, anchor, wanted),
-    })
-}
-
-impl Documents {
-    /// The rows and counts of one session's view; damage and revision stay
-    /// the project's.
-    fn only(&self, scope: &index::Scope) -> Documents {
-        let rows: BTreeMap<&'static str, Vec<(String, String, Value)>> = self.rows.iter()
-            .map(|(stage, rows)| (*stage, rows.iter().filter(|row| scope.includes(&row.2)).cloned().collect::<Vec<_>>()))
-            .collect();
-        let counts = rows.iter().filter(|(_, rows)| !rows.is_empty()).map(|(stage, rows)| ((*stage).to_owned(), rows.len())).collect();
-        Documents { rows, counts, damaged: self.damaged.clone(), revision: self.revision.clone() }
-    }
+    let docs = documents_in(store, filter)?;
+    let project = filter.map_or_else(
+        || store.project_id().to_owned(),
+        |s| s.cursor_project(store.project_id()),
+    );
+    Ok(page_of(&docs, &project, stage, limit, anchor, wanted))
 }
 
 /// Every task document read once, for pages built without the index: each
@@ -915,6 +999,10 @@ struct Documents {
 }
 
 fn documents(store: &ProjectStore) -> Result<Documents> {
+    documents_in(store, None)
+}
+
+fn documents_in(store: &ProjectStore, filter: Option<&index::Scope>) -> Result<Documents> {
     use sha2::Digest;
     let (tasks, damaged) = store.listing().map_err(fail)?;
     let mut hash = sha2::Sha256::new();
@@ -923,8 +1011,13 @@ fn documents(store: &ProjectStore) -> Result<Documents> {
     for task in &tasks {
         let view = task.view().map_err(fail)?;
         let (this, rank, uuid) = (view.stage, view.rank.clone(), view.uuid.clone());
-        let listed = index::capped(row(view, task.revision())?);
+        let listed = row(view, task.revision())?;
+        let included = filter.is_none_or(|scope| scope.includes(&listed));
+        let listed = index::capped(listed);
         hash.update(listed.to_string());
+        if !included {
+            continue;
+        }
         *counts.entry(this.as_str().to_owned()).or_insert(0) += 1;
         rows.entry(this.as_str()).or_default().push((rank, uuid, listed));
     }
@@ -1042,21 +1135,25 @@ pub(crate) fn window(config: &Config, wanted: &str, limit: usize) -> Result<Valu
     if !(1..=index::MAX_LIMIT).contains(&limit) {
         return Err(fail(format!("a tasks window is between 1 and {}", index::MAX_LIMIT)));
     }
-    let machines = machines(config)?;
     let (id, name) = project(config, wanted)?;
     let pages = window_pages(&store(config, &id)?, limit)?;
+    let mut machines = machine_routes(config, crate::swarm::local_node_id(config).map_err(fail)?);
     // Every page has the same revision, counts and damaged tasks.
     let last = pages.last().cloned().unwrap_or_default();
     let mut tasks = Vec::new();
     let mut stages = serde_json::Map::new();
     for (stage, page) in LIST_STAGES.iter().zip(&pages) {
         for row in page["tasks"].as_array().cloned().unwrap_or_default() {
-            tasks.push(label_view(row, &name, false, &[], &machines)?);
+            tasks.push(row);
         }
         stages.insert(
             stage.as_str().to_owned(),
             json!({"total": last["counts"][stage.as_str()], "next": page["page"]["next"]}),
         );
+    }
+    sessions::for_rows(config, &mut machines, &tasks)?;
+    for row in &mut tasks {
+        *row = label_view(std::mem::take(row), &name, false, &[], &machines)?;
     }
     Ok(json!({
         "project": {"id": id, "name": name},
@@ -1151,18 +1248,31 @@ fn change_within(config: &Config, action: &str, args: &[String], wait: Option<st
     change_guarded(config, action, args, wait, None)
 }
 
-fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<std::time::Duration>, guard: Option<&cancellation::Guard>) -> Result<Value> {
+fn change_guarded(
+    config: &Config,
+    action: &str,
+    args: &[String],
+    wait: Option<std::time::Duration>,
+    guard: Option<&cancellation::Guard>,
+) -> Result<Value> {
     let team = teams::target(config, action, args)?;
-    // A send's or handoff's attempt has one budget from here (C3 A3).
-    let deadline = std::time::Instant::now() + attempts::BUDGET;
-    let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) { Some(stdin_content(args)?) } else { None };
+    let content = if action == "edit" || (action == "comment" && flag(args, "--content-json")) {
+        Some(stdin_content(args)?)
+    } else {
+        None
+    };
     let text = match action {
         "edit" => Some(content.as_ref().expect("edit content").text.clone()),
-        "comment" => Some(match &content { Some(content) => content.text.clone(), None => stdin_text("comment")? }),
+        "comment" => Some(match &content {
+            Some(content) => content.text.clone(),
+            None => stdin_text("comment")?,
+        }),
         "report" | "report-attempt" => Some(stdin_text("report")?),
         "rename" => Some(stdin_text("title")?.trim().to_owned()),
         _ => None,
     };
+    // The immutable command input is read before its one writer budget.
+    let deadline = std::time::Instant::now() + attempts::BUDGET;
     // A send or handoff reads the catalog and waits for the project within
     // its one budget, from here (#1519 review, zerus-9gzdp).
     let attempted = matches!(action, "send" | "handoff");
@@ -1173,13 +1283,26 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         (machines(config)?, None)
     };
     let here = machines.here.as_str();
-    let mut who = teams::actor(config, &machines, args, matches!(action, "send" | "handoff" | "cancel"), team.is_some())?;
+    let mut who = teams::actor(
+        config,
+        &machines,
+        args,
+        matches!(action, "send" | "handoff" | "cancel"),
+        team.is_some(),
+    )?;
     if let Some(text) = &text {
-        if action != "edit" || !text.is_empty() { agent_text(text, action, &who)?; }
+        if action != "edit" || !text.is_empty() {
+            agent_text(text, action, &who)?;
+        }
     }
-    let r = reference_by(config, args, &who, projects.as_deref().map(|p| (p, deadline)))?;
+    let r = reference_by(
+        config,
+        args,
+        &who,
+        projects.as_deref().map(|p| (p, deadline)),
+    )?;
     let (project_id, project_name) = (&r.project.0, &r.project.1);
-    let store = match wait {
+    let mut store = match wait {
         None if attempted => store_until(config, project_id, deadline)?,
         None => store(config, project_id)?,
         Some(wait) => {
@@ -1194,7 +1317,46 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     };
     let mut task = find(&store, &r.task)?;
-    if let Some(actor) = teams::actor_for_marked_task(config, &machines, args, matches!(action, "send" | "handoff" | "cancel"), &task)? { who = actor; }
+    if (!attempted || team.is_some())
+        && action != "start"
+        && task.cutover_seal().map_err(fail)?.is_none()
+    {
+        let uuid = task.uuid().to_owned();
+        drop(store);
+        // The same root migration as Start, before any ordinary edit. No
+        // project/catalog lock spans the network; the task is read afresh.
+        let migration_deadline = wait.map_or(deadline, |wait| {
+            deadline.min(std::time::Instant::now() + wait)
+        });
+        match crate::swarm::fence::prepare_write(
+            config,
+            &crate::swarm::fence::Ssh(config),
+            project_id,
+            &uuid,
+            migration_deadline,
+        )
+        .map_err(fail)?
+        {
+            Ok(()) => (),
+            Err(closed) => {
+                return Err(fail(format!(
+                    "The task's migration is pending ({}). The edit was not applied.",
+                    closed.reason
+                )))
+            }
+        }
+        store = store_until(config, project_id, migration_deadline)?;
+        task = store.load(&uuid).map_err(fail)?;
+    }
+    if let Some(actor) = teams::actor_for_marked_task(
+        config,
+        &machines,
+        args,
+        matches!(action, "send" | "handoff" | "cancel"),
+        &task,
+    )? {
+        who = actor;
+    }
     // An agent reads a refused send as "SESSION cannot take it now: …"; a paste
     // that happened is never reworded. A command another computer forwards
     // (`--agent`) leaves the wording to that computer, where the agent reads it.
@@ -1211,13 +1373,18 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         }
     };
 
-    if let Some(guard) = guard { guard.check(&task)?; }
+    if let Some(guard) = guard {
+        guard.check(&task)?;
+    }
     {
         let mut meeting = crate::teams::tasks::Meeting::Projects(&store);
         teams::guard(config, &machines, &task, action, args, &mut meeting)?;
     }
     if let Some(team) = &team {
-        let task_ref = zerus_team_plan::model::TaskRef { project:project_id.clone(), uuid:task.uuid().into() };
+        let task_ref = zerus_team_plan::model::TaskRef {
+            project: project_id.clone(),
+            uuid: task.uuid().into(),
+        };
         drop(store);
         let mut reply = teams::send(config, &machines, &task_ref, team, args)?;
         let store = self::store(config, project_id)?;
@@ -1228,38 +1395,58 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     // Explicit worker registration inspects the native roster once, after the
     // team guard under the project lock. Normal task listings never query providers for every row.
     let worker_proof = if action == "worker" {
-        let Actor::Agent(own) = &who else { return Err(fail("worker is for the task's coordinator")); };
+        let Actor::Agent(own) = &who else {
+            return Err(fail("worker is for the task's coordinator"));
+        };
         let id = option(args, "--subagent")?.ok_or_else(|| fail("worker needs --subagent ID"))?;
-        let request = option(args, "--request-id")?.ok_or_else(|| fail("worker needs the current --request-id"))?;
-        let caller = crate::state::session_graph::caller_record().ok_or_else(|| fail("the coordinator run is no longer live"))?;
+        let request = option(args, "--request-id")?
+            .ok_or_else(|| fail("worker needs the current --request-id"))?;
+        let caller = crate::state::session_graph::caller_record()
+            .ok_or_else(|| fail("the coordinator run is no longer live"))?;
         let details = crate::state::reference_details(&own.session, "", "").map_err(fail)?;
         let worker = observed_worker(own, &caller, &details, id, request)?;
         Some(worker)
-    } else { None };
-    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() { agent_text("", action, &who)?; }
+    } else {
+        None
+    };
+    if action == "edit" && text.as_deref() == Some("") && task.title().is_empty() {
+        agent_text("", action, &who)?;
+    }
     enrich(&mut task, &machines)?;
     if let Some(expected) = option(args, "--expect-new-session-parent")? {
-        if action != "send" || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected) {
-            return Err(fail("task assignment changed while the new executor was starting; nothing was sent"));
+        if action != "send"
+            || !matches!(task.view().map_err(fail)?.target, Target::NewSession { parent } if format!("{}/{}", parent.machine, parent.session_id) == expected)
+        {
+            return Err(fail(
+                "task assignment changed while the new executor was starting; nothing was sent",
+            ));
         }
     }
     // A send or cancel for a session another computer runs happens there.
     let session = match action {
         "handoff" => {
             handoff_check(&task, &who)?;
-            let name = option(args, "--session")?.ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
+            let name = option(args, "--session")?
+                .ok_or_else(|| fail("handoff needs --session SESSION [--host ALIAS]"))?;
             let to = machines.target(machines.node(option(args, "--host")?)?, name, args)?;
-            if task.session().as_ref() == Some(&to) { return Err(fail("choose another session for the handoff")); }
+            if task.session().as_ref() == Some(&to) {
+                return Err(fail("choose another session for the handoff"));
+            }
             Some((to, false))
         }
         "send" => Some(send_session(&task, args, &who, &machines)?),
         // Only a task In progress is cancelled; this computer refuses anything else.
-        "cancel" if task.stage().map_err(fail)? == Stage::Active => {
-            task.view().map_err(fail)?.session.map(|session| (machines.resolve(&session).unwrap_or(session), false))
-        }
+        "cancel" if task.stage().map_err(fail)? == Stage::Active => task
+            .view()
+            .map_err(fail)?
+            .session
+            .map(|session| (machines.resolve(&session).unwrap_or(session), false)),
         _ => None,
     };
-    if let Some((session, _)) = session.as_ref().filter(|(session, _)| session.machine != here) {
+    if let Some((session, _)) = session
+        .as_ref()
+        .filter(|(session, _)| session.machine != here)
+    {
         // An agent reads the session with its computer: "codex/api on mac".
         let to = match machines.alias(&session.machine) {
             Some(alias) => format!("{} on {alias}", session.session),
@@ -1274,10 +1461,14 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
         drop(store);
         let out = match reach(config, &machines, project_id, session) {
             // That computer words its own refusals (see `forwarded`).
-            Ok(alias) => forwarded(config, &machines, &r.project, &uuid, action, args, session, &alias, &who, guard)?,
+            Ok(alias) => forwarded(
+                config, &machines, &r.project, &uuid, action, args, session, &alias, &who, guard,
+            )?,
             // A cancel goes through while that computer is out of reach: the task
             // moves to In review here and its session is not told.
-            Err(reason) if action == "cancel" => cancel_here(config, &machines, &r.project, &uuid, args, &who, reason, guard)?,
+            Err(reason) if action == "cancel" => cancel_here(
+                config, &machines, &r.project, &uuid, args, &who, reason, guard,
+            )?,
             Err(reason) => return Err(refuse(fail(reason), &to)),
         };
         return Ok(with_answer(&who, action, out, 0, &to));
@@ -1333,37 +1524,72 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
     let mut destination = String::new();
     let mut minimal_report_reply = false;
     match action {
-        "worker" => { task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now()).map_err(fail)?; task.record_start(&who, now()).map_err(fail)?; },
+        "worker" => {
+            task.record_worker(worker_proof.as_ref().expect("worker proof"), &who, now())
+                .map_err(fail)?;
+            task.record_start(&who, now()).map_err(fail)?;
+        }
         "start" => task.record_start(&who, now()).map_err(fail)?,
-        "rename" => { task.set_title(&text, &who, now()).map_err(fail)?; store.check_prompt(&task, project_name).map_err(fail)?; },
+        "rename" => {
+            task.set_title(&text, &who, now()).map_err(fail)?;
+            store.check_prompt(&task, project_name).map_err(fail)?;
+        }
         "edit" => {
             store
                 .edit_task(&mut task, &text, &who, project_name, now())
                 .map_err(fail)?;
-            if let Some(files) = content.and_then(|content| content.attachments) { task.set_attachments(&files, &who, now()).map_err(fail)?; }
+            if let Some(files) = content.and_then(|content| content.attachments) {
+                task.set_attachments(&files, &who, now()).map_err(fail)?;
+            }
         }
-        "comment" => task.comment_with_attachments(&text, &content.and_then(|content| content.attachments).unwrap_or_default(), &who, now()).map_err(fail)?,
+        "comment" => task
+            .comment_with_attachments(
+                &text,
+                &content
+                    .and_then(|content| content.attachments)
+                    .unwrap_or_default(),
+                &who,
+                now(),
+            )
+            .map_err(fail)?,
         "report" | "report-attempt" => {
             let progress = flag(args, "--progress");
             if progress && flag(args, "--ready") {
                 return Err(fail("choose --progress or --ready"));
             }
             let considered = option(args, "--considered")?
-                .map(|value| value.parse::<u64>().ok().filter(|n| *n >= 1)
-                    .ok_or_else(|| fail("--considered is a requirement revision from 1")))
+                .map(|value| {
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|n| *n >= 1)
+                        .ok_or_else(|| fail("--considered is a requirement revision from 1"))
+                })
                 .transpose()?;
-            let kind = if progress { ReportKind::Progress } else { ReportKind::Ready };
-            let origin = if action == "report-attempt" { option(args, "--attempt")? } else { None };
+            let kind = if progress {
+                ReportKind::Progress
+            } else {
+                ReportKind::Ready
+            };
+            let origin = if action == "report-attempt" {
+                option(args, "--attempt")?
+            } else {
+                None
+            };
             let managed_agent = task.execution_managed() && matches!(&who, Actor::Agent(_));
             let decision = match origin {
                 Some(id) => task.report_attempt(id, &text, kind, considered, &who, now()),
                 None => task.report(&text, kind, considered, &who, now()),
-            }.map_err(fail)?;
+            }
+            .map_err(fail)?;
             extra = json!({"moved_to_review": decision.moves, "report": if progress { "progress" } else { "ready" }});
-            if let Some(stale) = decision.stale { extra["stale"] = json!(stale); }
+            if let Some(stale) = decision.stale {
+                extra["stale"] = json!(stale);
+            }
             if managed_agent || origin.is_some() {
                 let applied = decision.stale.is_none()
-                    && (decision.moves || (progress && task.stage().map_err(fail)? == Stage::Active));
+                    && (decision.moves
+                        || (progress && task.stage().map_err(fail)? == Stage::Active));
                 extra["outcome"] = json!(if applied { "applied" } else { "not_applied" });
                 extra["history_saved"] = json!(true);
                 if !applied {
@@ -1389,11 +1615,19 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             } else {
                 return Err(fail(USAGE));
             };
-            placed(&store, |placement| store.reorder_placed(placement, &mut task, &position).map_err(fail))?;
+            placed(&store, |placement| {
+                store
+                    .reorder_placed(placement, &mut task, &position)
+                    .map_err(fail)
+            })?;
         }
         "stage" => {
             let to = Stage::parse(args.get(1).ok_or_else(|| fail(USAGE))?).map_err(fail)?;
-            placed(&store, |placement| store.change_stage_placed(placement, &mut task, to, &who, now()).map_err(fail))?;
+            placed(&store, |placement| {
+                store
+                    .change_stage_placed(placement, &mut task, to, &who, now())
+                    .map_err(fail)
+            })?;
         }
         "target" => {
             let value = args.get(1).ok_or_else(|| fail(USAGE))?;
@@ -1401,13 +1635,23 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
                 return Err(fail("--host needs a --target session"));
             }
             let target = if matches!(value.as_str(), "new-session" | "subagent") {
-                let parent = option(args, "--parent")?.ok_or_else(|| fail("choose --parent SESSION for a new executor"))?;
-                let parent = machines.target(machines.node(option(args, "--host")?)?, parent, args)?;
-                if value == "new-session" { Target::NewSession { parent } } else { Target::Subagent { parent } }
+                let parent = option(args, "--parent")?
+                    .ok_or_else(|| fail("choose --parent SESSION for a new executor"))?;
+                let parent =
+                    machines.target(machines.node(option(args, "--host")?)?, parent, args)?;
+                if value == "new-session" {
+                    Target::NewSession { parent }
+                } else {
+                    Target::Subagent { parent }
+                }
             } else if value == "any" {
                 Target::Any
             } else {
-                Target::Session(machines.target(machines.node(option(args, "--host")?)?, value, args)? )
+                Target::Session(machines.target(
+                    machines.node(option(args, "--host")?)?,
+                    value,
+                    args,
+                )?)
             };
             task.set_target(&target, &who, now()).map_err(fail)?;
             teams::clear(config, here, &mut task, &who)?;
@@ -1427,7 +1671,17 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             )
             .map_err(|e| refuse(e, &destination))?;
         }
-        "cancel" => extra = cancel(&store, &machines, &mut task, project_name, cancellation::reason(args, guard)?, &who, None)?,
+        "cancel" => {
+            extra = cancel(
+                &store,
+                &machines,
+                &mut task,
+                project_name,
+                cancellation::reason(args, guard)?,
+                &who,
+                None,
+            )?
+        }
         _ => return Err(fail(USAGE)),
     }
     store.save(&mut task).map_err(|e| {
@@ -1438,16 +1692,34 @@ fn change_guarded(config: &Config, action: &str, args: &[String], wait: Option<s
             fail(e)
         }
     })?;
-    let at = if action == "move" { place(&store, &task)? } else { 0 };
+    let at = if action == "move" {
+        place(&store, &task)?
+    } else {
+        0
+    };
     let reply_task = if minimal_report_reply {
         json!({"ref":format!("{project_name}/{}",task.id()),"id":task.id(),"uuid":task.uuid(),"stage":task.stage().map_err(fail)?.as_str()})
-    } else { view(&task, project_name, guard.is_none(), &machines)? };
+    } else {
+        view(&task, project_name, guard.is_none(), &machines)?
+    };
     let mut out = json!({"task": reply_task});
     for (key, value) in extra.as_object().expect("object") {
         out[key] = value.clone();
     }
-    if action == "start" { reports::started(&mut out, &task, project_name)?; }
-    let out = with_answer(&who, if action == "report-attempt" { "report" } else { action }, out, at, &destination);
+    if action == "start" {
+        reports::started(&mut out, &task, project_name)?;
+    }
+    let out = with_answer(
+        &who,
+        if action == "report-attempt" {
+            "report"
+        } else {
+            action
+        },
+        out,
+        at,
+        &destination,
+    );
     drop(store);
     Ok(out)
 }

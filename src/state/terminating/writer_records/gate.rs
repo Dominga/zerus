@@ -98,6 +98,12 @@ impl RunWriterGate {
             .check_writer(&self.run.state_lock, &self.writer)?;
         current(self.run.until)
     }
+    /// Borrow only the SAME original state writer; this grants no operation
+    /// authority and never duplicates an explicitly unlocking guard.
+    pub(super) fn writer(&self) -> Result<&storage::Guard> {
+        self.recheck()?;
+        Ok(&self.writer)
+    }
     /// For the future host, ONLY after its own durable marker/source checks.
     /// This function does not inspect, create, repair or retire a marker.
     pub(super) fn release_writer(self) -> RunGate {
@@ -108,7 +114,8 @@ impl RunWriterGate {
 }
 
 #[cfg(test)]
-static CONTENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub(super) static CONTENDED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 pub(super) fn contended() {
     CONTENDED.store(true, std::sync::atomic::Ordering::SeqCst);

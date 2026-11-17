@@ -10,6 +10,7 @@ mod existing;
 #[cfg(unix)]
 pub(crate) use existing::bind_existing;
 mod forms;
+mod answers;
 mod history;
 #[cfg_attr(not(unix), allow(dead_code))]
 mod providers;
@@ -274,7 +275,7 @@ fn legacy_decision(
 }
 /// `migration` is fetched at most once per caller and only when needed.
 fn legacy_state(
-    service: &service::Service,
+    service: &dyn Native,
     record: &Value,
     migration: &mut Option<Reply>,
 ) -> Result<(Legacy, bool)> {
@@ -453,6 +454,13 @@ pub(crate) fn launch(
     if present && new_only {
         return Err("This OpenCode session name already exists".into());
     }
+    if !present {
+        if let Some(tag) = name.split('/').nth(2) {
+            if let Some(problem) = zerus_client_core::actions::tag_problem(tag) {
+                return Err(problem.into());
+            }
+        }
+    }
     let cwd = if present {
         None
     } else {
@@ -604,6 +612,7 @@ struct Observed {
     inbox: Value,
     forms: Value,
     permissions: Value,
+    native_questions: std::collections::HashMap<String, Value>,
     /// The Zerus request that sent each of the newest user messages, from the
     /// receipt index (message ID to request ID).
     requests: std::collections::HashMap<String, String>,
@@ -616,7 +625,17 @@ fn normalize(record: &Value, observed: Option<&Observed>) -> Value {
     let session = observed.map_or(&null, |o| &o.session);
     let active = observed.is_some_and(|o| o.active);
     let messages: &[Value] = observed.map_or(&[], |o| &o.page.messages);
-    let pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
+    let mut pending = observed.map_or_else(Vec::new, |o| forms::cards(record, &o.forms, &o.permissions));
+    if let Some(observed) = observed {
+        for card in &mut pending {
+            if card["kind"] == "opencode_form" && card["can_answer"] == true {
+                if let Some(proof) = observed.native_questions.get(string(card, "question_id")) {
+                    card["blocking"] = json!(true);
+                    card["native_question"] = proof.clone();
+                }
+            }
+        }
+    }
     let failure = history::last_error(messages);
     let phase = if !available {
         "unknown"
@@ -820,6 +839,11 @@ fn observe(
         return Err("Invalid OpenCode inbox".into());
     }
     let page = history()?;
+    let native_questions = if active.get(string(record, "conversation_id")).is_some() {
+        forms::qualify(native, record, &forms)
+    } else {
+        Default::default()
+    };
     // Only a full inspection shows events; listings and actions drop them.
     let requests = if requests {
         sent_requests(&Ledger::current(), record, &page.messages, &inbox)
@@ -833,6 +857,7 @@ fn observe(
         inbox,
         forms,
         permissions,
+        native_questions,
         requests,
     })
 }
@@ -895,7 +920,7 @@ fn processes() -> Value {
     json!({"items":[],"complete":false,"source":"opencode_native","reason":"Individual OpenCode shell process controls are not yet qualified"})
 }
 fn parent_view(
-    service: &service::Service,
+    service: &dyn Native,
     record: &Value,
     active: &Value,
     detail: Detail,
@@ -1038,6 +1063,8 @@ struct Inspector {
     verdicts_changed: bool,
     /// The cached home short list; tests stand in for the cache.
     cached_options: CachedOptions,
+    deadline: Option<Instant>,
+    observe_only: bool,
 }
 impl Inspector {
     /// Never starts the service.
@@ -1050,6 +1077,28 @@ impl Inspector {
             verdicts: None,
             verdicts_changed: false,
             cached_options: catalog::stopped_options,
+            deadline: None,
+            observe_only: false,
+        }
+    }
+    fn listing(deadline: Instant) -> Self {
+        let mut value = Self::connect_without_io();
+        value.service = service::connect_within(deadline);
+        value.deadline = Some(deadline);
+        value.observe_only = true;
+        value
+    }
+    fn connect_without_io() -> Self {
+        Self {
+            service: Err(service::Unavailable::NotRunning),
+            computer: None,
+            active: None,
+            migration: None,
+            verdicts: None,
+            verdicts_changed: false,
+            cached_options: catalog::stopped_options,
+            deadline: None,
+            observe_only: true,
         }
     }
     fn row(&mut self, record: &Value, detail: Detail) -> Value {
@@ -1069,6 +1118,17 @@ impl Inspector {
             }
             Ok(service) => service,
         };
+        let bounded = Bounded {
+            service,
+            deadline: self
+                .deadline
+                .unwrap_or_else(|| Instant::now() + Duration::from_secs(10)),
+        };
+        let native: &dyn Native = if self.deadline.is_some() {
+            &bounded
+        } else {
+            service
+        };
         let key = verdict_key(record, &service.reg);
         let known = record["service"] != "opencode2"
             && self
@@ -1078,7 +1138,7 @@ impl Inspector {
         let state = if known {
             Ok((Legacy::Unsupported, false))
         } else {
-            legacy_state(service, record, &mut self.migration)
+            legacy_state(native, record, &mut self.migration)
         };
         let mut current = record.clone();
         // A failed read keeps the cached short list, like a stopped service.
@@ -1100,16 +1160,18 @@ impl Inspector {
                 return legacy_row(record);
             }
             Ok((Legacy::Adopted, _)) => {
-                adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                if !self.observe_only {
+                    adopt_binding(string(record, "name"), string(record, "conversation_id"));
+                }
                 modernize(&mut current);
             }
             Ok((Legacy::Current, _)) => {}
         }
-        let active = match self.active.get_or_insert_with(|| active_sessions(service)) {
+        let active = match self.active.get_or_insert_with(|| active_sessions(native)) {
             Ok(active) => active,
             Err(reason) => return failed(reason.clone()),
         };
-        parent_view(service, &current, active, detail).unwrap_or_else(failed)
+        parent_view(native, &current, active, detail).unwrap_or_else(failed)
     }
     fn finish(self) {
         if self.verdicts_changed {
@@ -1125,6 +1187,7 @@ pub(crate) fn inspect(name: &str, agent_id: Option<&str>) -> Result<Value> {
     let mut inspector = Inspector::connect();
     let mut value = inspector.row(&record, Detail::Full);
     notifications::enrich(&mut value, notifications::load().as_ref(), journal::journal_name(&record));
+    question_routing::enrich(&mut value, question_routing::load().as_ref());
     inspector.finish();
     waits::decorate(std::slice::from_mut(&mut value));
     session_state::decorate(std::slice::from_mut(&mut value));
@@ -1189,7 +1252,55 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     phases.finish_at("ls-opencode", "", 100);
     Ok(rows)
 }
+/// Same row normalizer over bounded caller-supplied metadata, without inventories or adoption effects.
+pub(in crate::state) fn listing_records(
+    records: &[Value],
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut inspector = Inspector::listing(deadline);
+    let preferences = notifications::load();
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for record in records {
+        let mut row = inspector.row(record, Detail::Listing);
+        notifications::enrich(
+            &mut row,
+            preferences.as_ref(),
+            journal::journal_name(record),
+        );
+        if let Some(map) = row.as_object_mut() {
+            for key in [
+                "events",
+                "voice_messages",
+                "attachment_messages",
+                "processes",
+                "model_options",
+                "model_options_truncated",
+            ] {
+                map.remove(key);
+            }
+        }
+        bytes += serde_json::to_vec(&row)
+            .map_err(|error| error.to_string())?
+            .len();
+        if bytes > 512 << 10 {
+            return Err("Native listing response budget exceeded; use a smaller page".into());
+        }
+        rows.push(row);
+    }
+    inspector.finish();
+    Ok(rows)
+}
+
 fn checked_request(record: &Value) -> Result<Value> {
+    let request = read_request()?;
+    check_request_identity(record, &request)?;
+    Ok(request)
+}
+fn read_request() -> Result<Value> {
     let mut bytes = Vec::new();
     io::stdin()
         .take(30 * 1024 * 1024 + 1)
@@ -1201,14 +1312,18 @@ fn checked_request(record: &Value) -> Result<Value> {
     let request: Value = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| e.to_string())?;
     let id =
         uuid::Uuid::parse_str(string(&request, "request_id")).map_err(|_| "Invalid request ID")?;
-    if id.is_nil()
-        || id.to_string() != string(&request, "request_id")
-        || request["expected_run_id"] != record["run_id"]
+    if id.is_nil() || id.to_string() != string(&request, "request_id") {
+        return Err("Invalid request ID".into());
+    }
+    Ok(request)
+}
+fn check_request_identity(record: &Value, request: &Value) -> Result<()> {
+    if request["expected_run_id"] != record["run_id"]
         || request["expected_conversation_id"] != record["conversation_id"]
     {
         return Err("Session changed; refresh before trying again".into());
     }
-    Ok(request)
+    Ok(())
 }
 /// The native OpenCode 2 operations that delivery needs.
 trait Native {
@@ -1718,6 +1833,13 @@ fn clip_text(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).take(200).collect()
 }
 fn answer(record: &Value, request: &Value) -> Result<Value> {
+    let path = root()
+        .join("opencode/answers")
+        .join(format!("{}.json", string(request, "request_id")));
+    if let Some(prior) = answers::prior(string(record, "name"), request, &path)? {
+        return Ok(prior);
+    }
+    check_request_identity(record, request)?;
     let current = own_state(string(record, "name"))?;
     let card = current["pending_questions"]
         .as_array()
@@ -1728,9 +1850,6 @@ fn answer(record: &Value, request: &Value) -> Result<Value> {
                 && q["question_hash"] == request["expected_question_hash"]
         })
         .ok_or(CHANGED)?;
-    let path = root()
-        .join("opencode/answers")
-        .join(format!("{}.json", string(request, "request_id")));
     answer_with(&running_service()?, record, request, card, &path)
 }
 /// Core of `answer`: the journal, the exact native request and the reply.
@@ -1741,8 +1860,8 @@ fn answer_with(
     card: &Value,
     path: &Path,
 ) -> Result<Value> {
-    if path.exists() {
-        return Err("This answer was already attempted; refresh its native acknowledgement".into());
+    if let Some(prior) = answers::prior(string(record, "name"), request, path)? {
+        return Ok(prior);
     }
     let raw = request["answers"]
         .as_array()
@@ -1771,7 +1890,7 @@ fn answer_with(
         return Err(CHANGED.into());
     }
     let (route, body) = reply_for(card, found, raw)?;
-    let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"status":"pending"});
+    let mut receipt = json!({"request_id":request["request_id"],"name":record["name"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"digest":answers::digest(string(record,"name"),request),"status":"pending"});
     atomic(path, &receipt.to_string())?;
     // A 4xx is a definite refusal; anything else leaves the delivery unknown
     // and the pending journal blocks a replay.
@@ -1996,6 +2115,7 @@ fn validate_rename(old: &str, new: &str) -> Result<()> {
     {
         return Err("Rename must preserve provider and project".into());
     }
+    rename::validate_new_tag(new)?;
     Ok(())
 }
 
@@ -2230,7 +2350,7 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             println!("{}", send(&record, &request)?);
         }
         "answer" => {
-            let request = checked_request(&record)?;
+            let request = read_request()?;
             println!("{}", answer(&record, &request)?);
         }
         "settings" => {
@@ -2302,6 +2422,14 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn new_session_tags_reject_shell_syntax() {
+        assert!(validate_rename("opencode/project/old$tag", "opencode/project/safe name").is_ok());
+        assert!(validate_rename("opencode/project/old.tag", "opencode/project/safe name").is_ok());
+        for tag in ["bad$tag", "bad;tag", "bad\u{200b}tag"] {
+            assert!(validate_rename("opencode/project/old", &format!("opencode/project/{tag}")).is_err());
+        }
+    }
     #[test]
     fn a_claim_check_never_waits_past_its_bound_or_counts_silence_as_live() {
         // zerus-p24ce: a service that accepts and never answers is busy.
@@ -3851,6 +3979,7 @@ mod tests {
             inbox,
             forms: json!([]),
             permissions: json!([]),
+            native_questions: Default::default(),
             requests: Default::default(),
         }
     }
@@ -4144,7 +4273,7 @@ mod tests {
     fn answering(reply: Result<Response>) -> (Answering, Value, Value) {
         let form = json!({"id":"frm_1","sessionID":"ses_A","title":"Q","fields":[{"key":"q0","title":"C","type":"string"}]});
         let card = forms::cards(&session_record(), &json!([form.clone()]), &json!([])).remove(0);
-        let request = json!({"request_id":"r1","question_id":"frm_1","expected_question_hash":card["question_hash"],
+        let request = json!({"request_id":"r1","expected_run_id":"r1","expected_conversation_id":"ses_A","question_id":"frm_1","expected_question_hash":card["question_hash"],
             "answers":[{"question_id":"q0","selected_option_ids":[],"text":"hi"}]});
         let native = Answering { forms: json!([form]).into(), reply, posted: Default::default() };
         (native, card, request)
@@ -4214,6 +4343,21 @@ mod tests {
         let receipt = answer_with(&native, &session_record(), &request, &card, &path).unwrap();
         assert_eq!(receipt["status"], "answered");
         assert_eq!(native.posted.borrow()[0].1, json!({"answer":{"q0":"hi"}}));
+    }
+    #[test]
+    fn an_exact_duplicate_answer_returns_its_receipt_without_a_native_read_or_post() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("r1.json");
+        let (native, card, request) = answering(status(204, json!({})));
+        let mut record = session_record();
+        let first = answer_with(&native, &record, &request, &card, &path).unwrap();
+        *native.forms.borrow_mut() = json!([]);
+        record["run_id"] = json!("new-run");
+        assert_eq!(answer_with(&native, &record, &request, &card, &path).unwrap(), first);
+        let mut changed = request.clone();
+        changed["answers"] = json!([]);
+        assert!(answer_with(&native, &record, &changed, &card, &path).is_err());
+        assert_eq!(native.posted.borrow().len(), 1);
     }
     #[test]
     fn pending_forms_or_permissions_need_attention_before_work() {
@@ -4822,6 +4966,8 @@ mod tests {
             verdicts: Some(Vec::new()),
             verdicts_changed: false,
             cached_options: cached_stub,
+            deadline: None,
+            observe_only: false,
         }
     }
     /// A registered service that refuses every connection before a byte is sent.

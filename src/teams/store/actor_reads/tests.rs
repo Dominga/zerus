@@ -153,7 +153,7 @@ fn change_token_sees_other_connections_only_and_missing_store_is_read_only() {
         expected_revision: team.revision,
         operation: crate::teams::ops::Operation::Pause,
     };
-    crate::teams::ops::apply(&mut other, &person(), &r, 1234).unwrap();
+    crate::teams::ops::tests::apply_fixture(&mut other, &person(), &r, 1234).unwrap();
     assert_ne!(before, h.store.change_token().unwrap());
     let missing = Harness::empty();
     assert!(missing.store.change_token().unwrap().is_none());
@@ -248,11 +248,11 @@ fn only_the_named_teams_saved_refusal_proves_no_intent_started() {
         },
     );
     assert!(!h.store.request_refused(TEAM, &r.request_id).unwrap());
-    assert!(crate::teams::ops::apply(&mut h.store, &service(), &r, 100).is_err());
+    assert!(crate::teams::ops::tests::apply_fixture(&mut h.store, &service(), &r, 100).is_err());
     assert!(h.store.request_refused(TEAM, &r.request_id).unwrap());
     assert!(!h.store.request_refused(TEAM_B, &r.request_id).unwrap());
     let r = request(revision, crate::teams::ops::Operation::Pause);
-    crate::teams::ops::apply(&mut h.store, &person(), &r, 101).unwrap();
+    crate::teams::ops::tests::apply_fixture(&mut h.store, &person(), &r, 101).unwrap();
     assert!(!h.store.request_refused(TEAM, &r.request_id).unwrap());
 }
 

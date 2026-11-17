@@ -1,5 +1,14 @@
 # Zerus iOS
 
+Main Claude, Codex and Kimi sends opt into `send_outcome` only when the relay and
+computer advertise both outcome operations. The encrypted outbox saves the exact
+bounded original binding before the first POST, including the digest of text and
+attachment bytes. A matching closed `native_input_lock` negative becomes **Not
+sent**; Review prepares an editable draft whose next explicit send gets a new
+UUID. Missing, legacy, malformed or foreign proof stays unknown with the original
+UUID. Recovery uses a fresh read UUID and never reposts the message. The existing
+Not sent actions and translations are reused.
+
 Native Swift and SwiftUI companion for the Zerus gateway protocol in
 [the mobile architecture](../../docs/mobile-architecture.md). It targets full
 feature parity with the [Android client](../android/README.md) and keeps the same
@@ -14,6 +23,22 @@ never sent to the relay. The phone durably saves its identity, service bearer
 and exact signed candidate before enrollment. **Resume pairing** reuses that
 saved candidate, including CryptoKit's randomized Ed25519 signature. Refresh
 only checks receipts and signed membership history.
+
+Ordinary message and answer sends acquire their submission and original receipt within one
+45-second deadline, matching Android's acquisition bound. Expiry or a lost
+response keeps the original message and request identity unconfirmed; nothing is
+resent. A refusal during submission stays distinct from an error while reading
+its later receipt. Durable settlement runs after the transport clock ends and
+keeps the delivery flight until the accepted write finishes. Attachment preparation
+has a separate 45-second budget before transport, forwarding cancellation to the
+file worker while it waits for the store or reads and encodes the bounded sealed
+files. Preparation failure keeps the saved original as Not sent; transport expiry
+keeps it unconfirmed. Preparation performs no submission. Android uses the same
+answer acquisition bound and cancellation checks during attachment reads; its
+ordinary-send clock also includes preparation, while iOS bounds these phases
+separately. Neither phone times out an accepted durable settlement.
+Answer receipt checks also use one 45-second read deadline and retain the
+original saved answer on failure; repeated checks never submit it again.
 
 CryptoKit provides RFC 9180 HPKE and Ed25519. A native SQLite journal stores the
 protected identity under a per-connection ThisDeviceOnly Keychain wrapping key,

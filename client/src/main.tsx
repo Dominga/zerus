@@ -1,4 +1,5 @@
 import { installTextEditingKeys } from "./ui/lib/text-edit";
+import { installNativeMenuGuard } from "./ui/lib/native-menu";
 import { render } from "solid-js/web";
 import { createSignal } from "solid-js";
 import "./ui/styles/base.css";
@@ -46,6 +47,7 @@ exitFlush.register(composer.flushForExit);
 void exitFlush.start().catch((error) => console.warn("Zerus Next: exit flush listener did not start", error));
 startMotion();
 installTextEditingKeys(window, platform === "macos");
+installNativeMenuGuard(window);
 // The Markdown parser is its own chunk; Activity waits for it before placing rows.
 void loadMarkdown();
 render(() => <App mode={mode} />, document.getElementById("root")!);

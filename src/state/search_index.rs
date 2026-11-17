@@ -1,6 +1,6 @@
-//! On-demand, bounded public-history ingestion. No worker, service, discovery
-//! scan or provider RPC is started here. Exact targets come from the caller's
-//! current catalog; every target is re-read from its authoritative private file.
+//! Bounded public-history ingestion and freshly verified display-only queries.
+//! A search requests a finite private catch-up helper; exact source versions,
+//! persistent cursors and incomplete coverage survive independently of the UI.
 use super::*;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -15,11 +15,18 @@ use zerus_content_search::{
     Index, Message, Part, Role, Target, DEFAULT_FILE_BYTES, DOCUMENT_BYTES,
 };
 mod catalog;
+mod discovery;
 mod metadata;
+mod metadata_cache;
+mod worker;
 mod query;
 mod wire;
 pub(crate) use catalog::{DiscoveryBudget, DiscoveryProgress};
+pub(super) use discovery::legacy_sources;
 pub(super) use query::read as indexed;
+pub(super) use worker::request as request_worker;
+pub(super) use worker::run as run_worker;
+pub(super) use worker::wait_small;
 
 const ABI: &str = "content-search-index-v1";
 const INPUT_BYTES: usize = 64 << 10;
@@ -87,6 +94,7 @@ pub(crate) struct Progress {
     locator_probes: usize,
     records: usize,
     bytes: usize,
+    metadata_io: usize,
     targets: usize,
     stopped: bool,
     errors: Vec<String>,
@@ -134,6 +142,7 @@ pub(crate) struct Store {
     wire_roots: std::collections::BTreeMap<PathBuf, std::sync::Arc<wire::Snapshot>>,
     /// An owned source-step transaction is open (see `begin_step`).
     step: bool,
+    census: std::cell::RefCell<Option<catalog::Census>>,
 }
 impl Store {
     pub fn open(directory: &Path) -> Result<Self> {
@@ -243,6 +252,7 @@ impl Store {
             index,
             wire_roots: Default::default(),
             step: false,
+            census: Default::default(),
         })
     }
 
@@ -260,7 +270,7 @@ impl Store {
             targets,
             budget,
             cancel,
-            &mut metadata::Reader::default(),
+            &mut metadata::Reader::cached(state),
         )
     }
 
@@ -867,9 +877,14 @@ impl Store {
     }
 
     pub fn status(&self) -> Result<Value> {
-        let coverage = self.index.status().map_err(|e| e.to_string())?;
+        let mut coverage = serde_json::to_value(self.index.status().map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        let catalog = self.catalog_status()?;
+        if catalog["unsupported_native"] == true {
+            coverage["state"] = json!("partial");
+        }
         Ok(
-            json!({"abi":ABI,"coverage":coverage,"disposable":true,"worker":"on_demand","catalog":self.catalog_status()?}),
+            json!({"abi":ABI,"coverage":coverage,"disposable":true,"worker":"background_on_demand","catalog":catalog}),
         )
     }
 
@@ -1052,41 +1067,150 @@ fn record_target(record: &Value) -> Target {
 /// The record of an ID-layout session (zerus-ucck P3a) whose label has no
 /// first holder: the file in `sessions/` with this identity's label and run.
 /// The scan reads at most 2,000 files.
+#[cfg(all(test, unix))]
 pub(super) fn id_layout_path(state: &Path, identity: &Identity, label: &Path) -> Option<PathBuf> {
-    // The label index names the candidates when its manifest proves it; a
-    // label it proves has no session in the ID layout is never scanned, and
-    // only a label path with no record falls back to a bounded scan.
+    let mut progress = Progress::default();
+    let mut reader = metadata::Reader::cached(state);
+    match locate_id(
+        state,
+        identity,
+        label,
+        &mut progress,
+        &Budget::interactive(),
+        &mut reader,
+        0,
+    ) {
+        Located::Found(path) => Some(path),
+        Located::Current(record) if storage::in_id_layout(&record) => Some(
+            state
+                .join("sessions")
+                .join(format!("{}.json", string(&record, "session_id"))),
+        ),
+        _ => None,
+    }
+}
+enum Located {
+    Found(PathBuf),
+    Current(Value),
+    Missing,
+    Deferred,
+    OverBudget,
+}
+fn locate_id(
+    state: &Path,
+    identity: &Identity,
+    label: &Path,
+    progress: &mut Progress,
+    budget: &Budget,
+    reader: &mut metadata::Reader,
+    reserve: usize,
+) -> Located {
+    if progress.files >= budget.files
+        || progress.bytes >= budget.bytes
+        || Instant::now() >= budget.deadline
+    {
+        return Located::Deferred;
+    }
+    if let Some(path) = reader.id_path(state, identity) {
+        return Located::Found(path);
+    }
     let sessions = state.join("sessions");
-    let candidates: Vec<PathBuf> = match super::labels::listed_in(state, &identity.name) {
-        Some(ids) => ids.iter().map(|id| sessions.join(format!("{id}.json"))).collect(),
-        None if !label.exists() => std::fs::read_dir(&sessions)
-            .ok()?
-            .take(2_000)
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(super::session_id::canonical)
-            })
-            .collect(),
-        None => Vec::new(),
+    let indexed = super::labels::listed_in(state, &identity.name);
+    if let Some(ids) = indexed {
+        let mut unknown = false;
+        for id in ids {
+            if progress.directory_entries >= budget.directory_entries
+                || Instant::now() >= budget.deadline
+            {
+                return Located::Deferred;
+            }
+            progress.directory_entries += 1;
+            let path = sessions.join(format!("{id}.json"));
+            match reader.read(&path, progress, budget, reserve) {
+                Ok(metadata::Record::Ready(record))
+                    if storage::is_id_layout_record(&record, &id)
+                        && record["name"] == identity.name
+                        && record["run_id"] == identity.run_id
+                        && record["conversation_id"] == identity.conversation_id =>
+                {
+                    return Located::Current(record)
+                }
+                Ok(metadata::Record::Ready(_)) => (),
+                _ => unknown = true,
+            }
+            if progress.files >= budget.files {
+                return Located::Deferred;
+            }
+        }
+        return if unknown {
+            Located::Deferred
+        } else {
+            Located::Missing
+        };
+    }
+    // Prefer an exact legacy binding before a bounded namespace fallback.
+    if label.exists() {
+        match reader.read(label, progress, budget, reserve) {
+            Ok(metadata::Record::Ready(record))
+                if record["name"] == identity.name
+                    && record["run_id"] == identity.run_id
+                    && record["conversation_id"] == identity.conversation_id
+                    && !storage::in_id_layout(&record) =>
+            {
+                return Located::Current(record)
+            }
+            Ok(metadata::Record::Deferred) => return Located::Deferred,
+            Ok(metadata::Record::OverBudget) => return Located::OverBudget,
+            _ => (),
+        }
+    }
+    let entries = match fs::read_dir(&sessions) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Located::Missing,
+        Err(_) => return Located::Deferred,
     };
-    // Each read is bounded, never follows a final link and never blocks on a
-    // FIFO (#1437 review); the whole search stops at its deadline.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    candidates.into_iter().find(|path| {
-        std::time::Instant::now() < deadline
-            && super::labels::read_file(path, super::storage::ID_RECORD_BYTES)
-                .ok()
-                .flatten()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .is_some_and(|record| {
-                    string(&record, "name") == identity.name
-                        && string(&record, "run_id") == identity.run_id
-                        && record["layout"] == "id"
-                })
-    })
+    let mut unknown = false;
+    for entry in entries {
+        if progress.directory_entries >= budget.directory_entries
+            || progress.files >= budget.files
+            || Instant::now() >= budget.deadline
+        {
+            return Located::Deferred;
+        }
+        progress.directory_entries += 1;
+        let Ok(entry) = entry else {
+            unknown = true;
+            continue;
+        };
+        let path = entry.path();
+        let Some(id) = path
+            .file_stem()
+            .and_then(|v| v.to_str())
+            .filter(|id| session_id::canonical(id))
+        else {
+            continue;
+        };
+        if path.extension().is_none_or(|v| v != "json") {
+            continue;
+        }
+        match reader.read(&path, progress, budget, reserve) {
+            Ok(metadata::Record::Ready(record))
+                if storage::is_id_layout_record(&record, id)
+                    && record["name"] == identity.name
+                    && record["run_id"] == identity.run_id
+                    && record["conversation_id"] == identity.conversation_id =>
+            {
+                return Located::Current(record)
+            }
+            Ok(metadata::Record::Ready(_)) => (),
+            _ => unknown = true,
+        }
+    }
+    if unknown {
+        Located::Deferred
+    } else {
+        Located::Missing
+    }
 }
 
 fn binding(
@@ -1106,17 +1230,27 @@ fn binding(
         };
         // A session in the ID layout (zerus-ucck P3a): found by its run, also
         // when the label's own path holds its first holder.
-        id_layout_path(state, identity, &label).unwrap_or(label)
+        match locate_id(state, identity, &label, progress, budget, reader, reserve) {
+            Located::Found(path) => path,
+            Located::Current(record) => return validate_binding(identity, record),
+            Located::OverBudget => return Ok(metadata::Record::OverBudget),
+            Located::Missing => label,
+            Located::Deferred => return Ok(metadata::Record::Deferred),
+        }
     } else {
         uuid::Uuid::parse_str(&identity.archive_id).map_err(|_| "Invalid archive identity")?;
         state
             .join("archives")
             .join(format!("{}.json", identity.archive_id))
     };
-    let mut record = match reader.read(&path, progress, budget, reserve)? {
+    let record = match reader.read(&path, progress, budget, reserve)? {
         metadata::Record::Ready(record) => record,
         other => return Ok(other),
     };
+    validate_binding(identity, record)
+}
+
+fn validate_binding(identity: &Identity, mut record: Value) -> Result<metadata::Record> {
     if !identity.archive_id.is_empty() {
         rename::normalize_archive(&mut record)?;
     }
@@ -1169,7 +1303,7 @@ pub(super) fn dispatch(args: &[String]) -> Option<Result<i32>> {
         if mode == "--index-status" && !directory.exists() {
             println!(
                 "{}",
-                json!({"abi":ABI,"coverage":{"state":"cold","file_bytes":0},"worker":"on_demand","disposable":true})
+                json!({"abi":ABI,"coverage":{"state":"cold","file_bytes":0},"worker":"background_on_demand","disposable":true})
             );
             return Ok(0);
         }

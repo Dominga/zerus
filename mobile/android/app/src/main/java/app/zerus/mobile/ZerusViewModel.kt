@@ -172,7 +172,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var projectWarnings by mutableStateOf<List<String>>(emptyList()); private set
     // The phone's task replicas and their sync (TaskSync.kt); tasks have no screen yet.
     private val taskReplicas by lazy { TaskReplicas(java.io.File(getApplication<Application>().noBackupFilesDir, "task-replicas-v1")) }
-    private val taskSync by lazy { TaskSync({ api }, taskReplicas) }
+    private val taskSync by lazy { TaskSync({ api }, taskReplicas, mediaUnavailable = getApplication<Application>().getString(R.string.task_media_exchange_update), heldSend = getApplication<Application>().getString(R.string.task_send_unknown_hold), capabilities = { machineFeatures }) }
     private var taskDigests: Map<ProjectKey, Map<String, String>> = emptyMap()
     private var taskDigestsAt = 0L
     private var taskSyncRunning = false
@@ -967,6 +967,140 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         { id -> connections.find { it.id == id } }) { target ->
         AttachmentIdentity.access(relayOperations[target.connectionId], machineOperations[MachineKey(target.connectionId, target.computerId)],
             machines.find { it.connectionId == target.connectionId && it.id == target.computerId }?.online)
+    }
+    private val taskEditor by lazy {
+        TaskEditorModel(getApplication(), viewModelScope, { api }, taskReplicas, store.taskEditDrafts, attachmentStore, ::refreshEditedTask)
+    }
+    private val taskContent by lazy {
+        TaskContentModel({ getApplication<Application>().getString(it) }, viewModelScope, taskReplicas, store.taskContentDrafts,
+            read = { java.util.Base64.getDecoder().decode(attachmentStore.readForWire(it).getString("data_base64")) },
+            remove = { id, protected -> attachmentStore.remove(id, protected); Unit }, upload = ::taskContentUpload,
+            changed = { context, _ ->
+                if (tasksKey == context.key) refreshTasks()
+                launchProjectSync(context.key)
+            })
+    }
+    internal val taskContentState get() = taskContent.state
+    internal fun closeTaskContent() = taskContent.dismiss()
+    internal fun changeTaskContent(token: String, change: (TaskEditForm) -> TaskEditForm) = taskContent.change(token, change)
+    internal fun removeTaskContentFile(token: String, id: String) = taskContent.removeFile(token, id)
+    internal fun saveTaskContent(token: String) = taskContent.save(token)
+    internal fun discardTaskContent(token: String) = taskContent.discard(token)
+    internal fun taskContentPicker(token: String, ready: (TaskContentPicker) -> Unit) = taskContent.picker(token, ready)
+    internal fun taskContentPicked(ticket: TaskContentPicker, uris: List<Uri>) {
+        val imports = uris.map { uri ->
+            val importer: suspend (List<Attachment>) -> Attachment = { current -> attachmentStore.importDocument(uri, current) }
+            importer
+        }
+        taskContent.picked(ticket, imports)
+    }
+    private fun taskContentUpload(context: TaskEditContext, target: TaskTarget) =
+        TaskContentCapabilities.upload(context, target, connections, machines, machineFeatures)
+    private fun taskContentContext(key: ProjectKey, target: TaskTarget): TaskEditContext? {
+        val connection = connections.singleOrNull { it.id == key.connectionId } ?: return null
+        val bound = (target as? TaskTarget.Session)?.session?.machine
+        val computer = machines.singleOrNull { it.connectionId == key.connectionId &&
+            (if (bound != null) it.machineId == bound else it.id == tasksChosen?.computerId) } ?: return null
+        return TaskEditContext(connection, key, taskProjectName(key), computer, machineFeatures.toMap())
+    }
+    internal fun openTaskContent(key: ProjectKey, task: TaskInfo) {
+        if (tasksKey != key || !task.writable || task.schema > 2 || task.stage !in setOf(TaskStage.TODO, TaskStage.BACKLOG)) return
+        val context = taskContentContext(key, task.target) ?: run { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }
+        taskContent.open(context, TaskContentDraft.existing(key, context.computer.id, context.computer.machineId, task))
+    }
+    internal fun newTaskContent() {
+        val key = tasksKey ?: return
+        val chosen = tasksChosen
+        TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
+        val context = taskContentContext(key, target) ?: return
+        if (!taskContentUpload(context, target)) { taskNotice = getApplication<Application>().getString(R.string.task_content_upload); return }
+        taskContent.open(context, TaskContentDraft.new(key, context.computer.id, context.computer.machineId,
+            if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO, target))
+    }
+    internal fun taskContentTargetLabel(state: TaskContentState): String {
+        val target = state.draft?.form?.let { it.target ?: it.originalTarget } as? TaskTarget.Session
+            ?: return getApplication<Application>().getString(R.string.task_edit_any)
+        return TasksPresentation.resolve(target.session, machines, state.context.key.connectionId, projectSessions(state.context.key))
+            ?.target?.session ?: target.session.session
+    }
+    internal fun chooseTaskContentSession(token: String, session: Session) {
+        val state = taskContent.state?.takeIf { it.token == token } ?: return
+        if (session !in taskEditorSessions(state.context.key)) return
+        val machine = machines.singleOrNull { it.connectionId == state.context.key.connectionId && it.id == session.target.computerId } ?: return
+        changeTaskContent(token) { it.copy(target = TaskTarget.Session(SessionRef(machine.machineId, session.target.session, taskSessionIdentity(session)))) }
+    }
+    internal suspend fun taskCommentFiles(key: ProjectKey, uuid: String, entry: String) = withContext(Dispatchers.IO) {
+        require(entry.isNotEmpty())
+        taskReplicas.store(key, taskProjectName(key)).use { it.media(uuid, entry) }
+    }
+    /** Completion reads the exact edited host despite an unchanged heartbeat; it never repeats the edit. */
+    private fun refreshEditedTask(context: TaskEditContext, task: String, token: String) {
+        val job = viewModelScope.launch {
+            try {
+                taskSync.exchangeNow(context.connection, context.key, context.projectName, context.computer.id, fetch = listOf(task))
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                val shown = taskEditor.state
+                if (shown?.token == token && shown.context.key == context.key && shown.task.uuid == task)
+                    taskEditor.reportError(shown.token, getApplication<Application>().getString(R.string.task_edit_refresh_failed))
+            }
+            if (tasksKey == context.key) refreshTasks()
+        }
+        projectSyncs += job
+        job.invokeOnCompletion { projectSyncs -= job }
+    }
+    internal val taskEditorState get() = taskEditor.state
+    internal fun closeTaskEditor() = taskEditor.dismiss()
+    internal fun changeTaskEditor(token: String, change: (TaskEditForm) -> TaskEditForm) = taskEditor.change(token, change)
+    internal fun saveTaskEditor(token: String) = taskEditor.save(token)
+    internal fun discardTaskEditor(token: String) = taskEditor.discard(token)
+    internal fun taskEditorPicker(token: String, comment: Boolean, ready: (TaskEditorPicker) -> Unit) = taskEditor.picker(token, comment, ready)
+    internal fun taskEditorPicked(ticket: TaskEditorPicker, uris: List<Uri>) = taskEditor.picked(ticket, uris)
+    internal fun taskEditorSessions(key: ProjectKey) = projectSessions(key).filter { session ->
+        val machine = machines.singleOrNull { it.connectionId == key.connectionId && it.id == session.target.computerId }
+        machine?.machineId?.isNotEmpty() == true && taskSessionIdentity(session).isNotEmpty()
+    }
+    private fun taskSessionIdentity(session: Session) = TasksPresentation.nativeIdentity(session)
+
+    internal fun chooseTaskEditorAny(token: String) = changeTaskEditor(token) { it.copy(target = TaskTarget.AnySession) }
+    internal fun chooseTaskEditorSession(token: String, session: Session) {
+        val state = taskEditor.state?.takeIf { it.token == token } ?: return
+        if (session !in taskEditorSessions(state.context.key)) return
+        val machine = machines.singleOrNull { it.connectionId == state.context.key.connectionId && it.id == session.target.computerId } ?: return
+        val identity = taskSessionIdentity(session).takeIf { it.isNotEmpty() } ?: return
+        changeTaskEditor(token) { it.copy(target = TaskTarget.Session(SessionRef(machine.machineId, session.target.session, identity))) }
+    }
+    internal fun moveTaskEditorTop(token: String) {
+        val state = taskEditor.state?.takeIf { it.token == token } ?: return
+        try {
+            val rank = TaskEditOrdering.top(state.context.key, tasksKey, state.task.uuid,
+                taskListing.filter { it.stage == TaskStage.TODO }.map { it.uuid to it.rank }) ?: return
+            changeTaskEditor(token) { it.copy(rank = rank) }
+        } catch (error: Exception) { taskEditor.reportError(token, error.message.orEmpty()) }
+    }
+    internal fun openTaskEditor(key: ProjectKey, task: TaskInfo) {
+        if (task.schema != 8L || tasksKey != key) return
+        val connection = connections.singleOrNull { it.id == key.connectionId } ?: return
+        val targetMachine = (task.target as? TaskTarget.Session)?.session?.machine
+        val bound = if (task.stage in setOf(TaskStage.TODO, TaskStage.BACKLOG)) targetMachine else task.session?.machine ?: targetMachine
+        val computer = if (bound != null) machines.singleOrNull { it.connectionId == key.connectionId && it.machineId == bound }
+            else machines.singleOrNull { it.connectionId == key.connectionId && it.id == tasksChosen?.computerId }
+        if (computer == null) { taskNotice = getApplication<Application>().getString(R.string.task_edit_unavailable); return }
+        taskEditor.open(TaskEditContext(connection, key, taskProjectName(key), computer, machineFeatures.toMap()), task)
+    }
+    internal fun previewTaskDraftMedia(file: Attachment) = attachments.open(null,
+        DisplayedAttachment(file.name, file.mime, file.bytes, localId = file.id, sha256 = file.sha256))
+    internal fun taskMediaKey(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) =
+        org.json.JSONArray(listOf(key.connectionId, key.swarmId, key.id, task, entry.orEmpty(), file.token)).toString()
+    internal fun taskMediaState(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) = attachments.taskState(taskMediaKey(key, task, file, entry))
+    internal fun previewTaskMedia(key: ProjectKey, task: String, file: app.zerus.mobile.replica.TaskMediaInfo, entry: String? = null) {
+        val name = taskProjectName(key)
+        attachments.openTask(taskMediaKey(key, task, file, entry), file) {
+            withContext(Dispatchers.IO) { taskReplicas.store(key, name).use { store ->
+                TaskMediaSelection(task, entry, file.token).read(store)
+            } }
+        }
     }
     internal val computerFiles = ComputerFiles(application, api, viewModelScope,
         { id -> connections.find { it.id == id } }) { target ->
@@ -2703,6 +2837,8 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     var tasksKey by mutableStateOf<ProjectKey?>(null); private set
     var tasksChosen by mutableStateOf<ChosenSession?>(null); private set
     var taskListing by mutableStateOf<List<TaskInfo>>(emptyList()); private set
+    /** The selected project's retained local listing failed its latest refresh. Never native freshness. */
+    var taskExecutionStale by mutableStateOf(false); private set
     var taskTab by mutableStateOf(TaskTab.TODO)
     var tasksOnlyThisSession by mutableStateOf(false); private set
     /** The snackbar's next message on the Tasks screen. */
@@ -2725,6 +2861,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun taskProject(session: Session) = session.projectKey?.takeIf { key -> projects.any { it.key == key && it.catalogued } }
     fun projectSessions(key: ProjectKey) = sessions.filter { it.projectKey == key && it.target.archiveId.isBlank() && it.target.agentId.isBlank() }
     fun taskChips(key: ProjectKey) = TasksPresentation.chips(projectSessions(key), machines)
+    fun taskCurrentSession(ref: SessionRef): String? {
+        val key = tasksKey ?: return null
+        return TasksPresentation.resolve(ref, machines, key.connectionId, projectSessions(key))?.target?.session
+    }
+    fun displayedTaskChosen(): ChosenSession? {
+        val chosen = tasksChosen ?: return null
+        return chosen.copy(name = taskCurrentSession(SessionRef(chosen.machineId, chosen.name, chosen.sessionId)) ?: chosen.name)
+    }
+    fun taskSessionLabel(task: TaskInfo) = TasksPresentation.sessionLabel(task, displayedTaskChosen(), ::taskCurrentSession)
+
     /** An operation counts when both the relay and the computer offer it. */
     private fun taskOperations(machine: Machine) =
         machineOperations[MachineKey(machine.connectionId, machine.id)].orEmpty() intersect relayOperations[machine.connectionId].orEmpty()
@@ -2736,7 +2882,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun sendRoute(task: TaskInfo): RouteState {
         val key = tasksKey ?: return RouteState.Blocked("No project")
         if (taskBusy) return RouteState.Blocked("Another task action is running")
-        if (task.uuid in heldSends) return RouteState.Blocked("It may have been sent already; its stage arrives with the next sync")
+        if (task.uuid in heldSends) return RouteState.Blocked(getApplication<Application>().getString(R.string.task_send_unknown_hold))
         return TasksPresentation.route(task, tasksChosen, machines, key.connectionId, ::taskOperations, projectSessions(key))
     }
     fun cancelRoute(task: TaskInfo): RouteState {
@@ -2748,7 +2894,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
     fun openTasks(session: Session) {
         val key = taskProject(session) ?: return
         val machine = machines.firstOrNull { it.connectionId == session.target.connectionId && it.id == session.target.computerId }
-        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()))
+        showTasks(key, ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty(), taskSessionIdentity(session)))
     }
     /** Another session for Tasks only, keeping the tab; one of another project shows that project's tasks. */
     fun chooseTaskSession(key: ProjectKey, chosen: ChosenSession) {
@@ -2761,13 +2907,13 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         loadDone(more = false)
     }
     private fun showTasks(key: ProjectKey, chosen: ChosenSession, selectDefault: Boolean = true) {
-        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); doneRows = emptyList(); doneNext = null
+        tasksKey = key; tasksChosen = chosen; taskListing = emptyList(); taskExecutionStale = false; doneRows = emptyList(); doneNext = null
         doneTotal = 0; doneRecent = 0; doneExpanded = false; doneError = ""; doneLoaded = false; taskNotice = null
         refreshTasks(selectDefault)
         loadDone(more = false)
         launchProjectSync(key)
     }
-    fun closeTasks() { tasksKey = null; taskNotice = null }
+    fun closeTasks() { tasksKey = null; taskNotice = null; taskExecutionStale = false }
     /** Done lists from a computer each time it is opened, so tasks accepted since show. */
     fun selectTaskTab(tab: TaskTab) {
         taskTab = tab
@@ -2788,10 +2934,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
                 catch (e: Exception) { failure = e.message.orEmpty(); if (attempt == 0) delay(500) }
             }
             val listing = read ?: run {
+                if (tasksKey == key) taskExecutionStale = true
                 if (tasksKey == key && (selectDefault || taskListing.isEmpty())) taskNotice = failure.ifBlank { "The tasks could not be read." }
                 return@launch
             }
             if (tasksKey != key) return@launch
+            taskExecutionStale = false
             taskListing = listing.tasks
             reviewCounts = reviewCounts + (key to listing.tasks.count { it.stage == TaskStage.REVIEW })
             if (selectDefault) taskTab = TasksPresentation.defaultTab(TasksPresentation.counts(listing.tasks, tasksChosen, tasksOnlyThisSession))
@@ -2837,7 +2985,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         val chosen = tasksChosen
         TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { taskNotice = it; return }
         val stage = if (taskTab == TaskTab.BACKLOG) TaskStage.BACKLOG else TaskStage.TODO
-        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name))
+        val target = TaskTarget.Session(SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId))
         editTasks { it.add(text, stage, target, TaskPosition.End) }
     }
     private fun computerName(key: ProjectKey, computerId: String) =
@@ -2902,7 +3050,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 taskNotice = when (val outcome = taskSync.send(connection, key, taskProjectName(key), route.computerId, task.uuid, route.session,
-                    computerName(key, route.computerId))) {
+                    computerName(key, route.computerId), sessionId = route.sessionId)) {
                     TaskOutcome.Done -> "Sent to ${route.session}"
                     is TaskOutcome.Refused -> outcome.reason
                     is TaskOutcome.Uncertain -> "It may have been sent: ${outcome.reason}"
@@ -2951,10 +3099,10 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         // The first page may already hold older tasks; showing them needs no read.
         if (more && (!doneExpanded && doneRows.size > doneRecent || doneNext == null)) { doneExpanded = true; return }
         doneExpanded = more || keepExpanded && doneExpanded
-        val chosen = tasksChosen
+        val chosen = displayedTaskChosen()
         val session = if (!tasksOnlyThisSession) null else {
             TasksPresentation.addReason(chosen).takeIf { it.isNotEmpty() }?.let { doneError = it; return }
-            SessionRef(chosen!!.machineId, chosen.name)
+            SessionRef(chosen!!.machineId, chosen.name, chosen.sessionId)
         }
         val machine = doneComputer(key) ?: run { doneError = "No computer of this project lists Done tasks now"; return }
         val connection = connections.find { it.id == key.connectionId } ?: return
@@ -2981,8 +3129,7 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 taskSync.exchangeNow(connection, key, taskProjectName(key), machine.id, fetch = listOf(row.uuid))
                 val task = withContext(Dispatchers.IO) { taskReplicas.store(key, taskProjectName(key)).use { it.get(row.uuid) } }
-                refreshTasks()
-                opened(task)
+                if (tasksKey == key) { refreshTasks(); opened(task) }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { taskNotice = e.message.orEmpty().ifBlank { "The task could not be opened." } }
             finally { taskBusy = false }
@@ -3364,26 +3511,41 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         if (intent != null) continuationEnqueuing = intent.requestId
         val id = UUID.randomUUID().toString(); val at = System.currentTimeMillis() / 1000.0
         preparingTargets += target.key; deliveryFlights += id
-        val frozen=if(original.attachments.isEmpty()) captureSendIntent(target,id,original.text,expectedCompactionId.takeIf { it.isNotBlank() }) else null
-        val written = try { durable({ state -> state.enqueue(original, id, at, frozen) }, { state, committed -> MessageChanges.enqueueAcknowledged(state, original, committed, id) }) }
+        var preparedPayload:JSONObject?=null
+        var nativeIntent:NativeSendIntent?=null
+        if(nativeOutcomeSupported(target) && target.agentId.isEmpty() && target.archiveId.isEmpty() && sessions.singleOrNull { it.target==target }?.agent in setOf("claude","codex","kimi")) {
+            try {
+                val payload=target.json().put("request_id",id).put("text",original.text).put("attachments",attachmentStore.payload(original.attachments))
+                if(expectedCompactionId.isNotEmpty()) payload.put("expected_compaction_id",expectedCompactionId)
+                val row=OutgoingMessage(id,target,original.text,original.attachments,at)
+                nativeIntent=captureNativeSendIntent(row,payload)
+                if(nativeIntent!=null) preparedPayload=payload
+            } catch(e:Exception) {
+                error=SendSettlement.localReason(e) ?: "The saved message was not sent. Review it before trying again."
+                deliveryFlights-=id;preparingTargets-=target.key;continuationEnqueuing="";cancelCompactContinuation();return@launch
+            }
+        }
+        val frozen=if(nativeIntent==null && original.attachments.isEmpty()) captureSendIntent(target,id,original.text,expectedCompactionId.takeIf { it.isNotBlank() }) else null
+        val written = try { durable({ state -> state.enqueue(original, id, at, frozen, nativeIntent) }, { state, committed -> MessageChanges.enqueueAcknowledged(state, original, committed, id) }) }
         catch (e: Exception) { error = "Could not save the outgoing message. It was not sent. Your composition is preserved."; deliveryFlights -= id; syncOutgoing(); preparingTargets -= target.key; continuationEnqueuing = ""; cancelCompactContinuation(); return@launch }
         preparingTargets -= target.key
         val message = written.outgoing.first { it.requestId == id }
         lastOwnSend = target to id
         val send = OutgoingSend(SendAttempt(),
             submit = { evidence ->
-                val files = attachmentStore.payload(message.attachments)
+                val files = if(preparedPayload==null) attachmentStore.payload(message.attachments) else JSONArray()
                 check(fresh(target) && connections.any { it.id == connection.id }) { "The session changed before transport. Review the saved message." }
                 if (intent != null) {
                     val cleared = written.drafts.first { it.key == original.key }
                     check(continuation?.requestId == intent.requestId && intent.permitsTransport(selected?.target, navigationId, android.os.SystemClock.elapsedRealtime(), cleared, draft(target)) &&
                         ContextPolicies.compactStatus(messageState.contextOperations.first { it.requestId == intent.requestId }, activity!!) == "completed") { "Compact continuation was canceled. The captured message was not sent and remains recoverable." }
                 }
-                val payload = message.sendIntent?.let { saved -> saved.value()?.getJSONObject("payload") ?: throw IllegalStateException("The saved message details are unavailable. Review this message.") }
+                val payload = preparedPayload ?: message.sendIntent?.let { saved -> saved.value()?.getJSONObject("payload") ?: throw IllegalStateException("The saved message details are unavailable. Review this message.") }
                     ?: target.json().put("request_id", id).put("text", message.text).put("attachments", files).also {
                         if (expectedCompactionId.isNotBlank()) it.put("expected_compaction_id", expectedCompactionId)
                     }
-                submitOutgoing(api, connection, target, payload, id, evidence)
+                check(message.nativeSendIntent==null || message.nativeSendIntent.matches(message)) { "The saved message details are unavailable. Review this message." }
+                submitOutgoing(api, connection, target, payload, id, evidence, message.nativeSendIntent)
             },
             await = { initial -> api.await(connection, initial) },
             settle = { receipt -> settleOutgoing(message, receipt) },
@@ -3394,6 +3556,16 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
             release = { api.releaseReservedOutgoing(connection, id) })
         try { send.run() } finally { if (intent != null) { continuationEnqueuing = ""; continuation = null }; deliveryFlights -= id; syncOutgoing() }
     }
+    private fun nativeOutcomeSupported(target:Target)=NativeSendOutcome.supported(relayOperations[target.connectionId],machineOperations[MachineKey(target.connectionId,target.computerId)])
+    private fun captureNativeSendIntent(row:OutgoingMessage,payload:JSONObject):NativeSendIntent? {
+        val target=row.target
+        if(!fresh(target)) return null
+        val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
+        val machine=SendReceiptRecovery.machine(machines,target) ?: return null
+        val source=sessions.singleOrNull { it.target==target } ?: return null
+        val encoding=SendReceiptRecovery.encoding(connection.protocolVersion,machine.route) ?: return null
+        return NativeSendOutcome.freeze(row,payload,source.agent,machine.machineId,source.raw.string("session_id"),encoding)
+    }
     private fun captureSendIntent(target:Target,id:String,text:String,compactionId:String?=null):SendIntent? {
         val connection=connections.singleOrNull { it.id==target.connectionId } ?: return null
         val machine=SendReceiptRecovery.machine(machines,target) ?: return null
@@ -3402,6 +3574,12 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         return SendReceiptRecovery.freeze(target,id,text,source.agent,machine.machineId,source.raw.string("session_id"),encoding,compactionId)
     }
     private suspend fun settleOutgoing(message: OutgoingMessage, receipt: JSONObject, deadlineMs:Long?=null) {
+        if(message.nativeSendIntent!=null) {
+            try { durable({ NativeSendOutcome.settleReceipt(it,message,receipt,deadlineMs ?: Long.MAX_VALUE,SendReceiptRecovery.nowMs()) }) }
+            catch(_:Exception) { error="Could not save the delivery result. Check its receipt; the outgoing message remains recoverable." }
+            if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
+            return
+        }
         val result = receipt.optJSONObject("result"); val state = receipt.string("state")
         val proof=if(result!=null) message.originalSendIntent()?.let { SendReceiptRecovery.acknowledgement(it,result) } else null
         val strict=message.hasOriginalSendIdentity && SendReceiptRecovery.supported(relayOperations[message.target.connectionId],machineOperations[MachineKey(message.target.connectionId,message.target.computerId)])
@@ -3422,11 +3600,15 @@ class ZerusViewModel(application: Application) : AndroidViewModel(application) {
         receiptFlights += flight
         try {
             val supported=SendReceiptRecovery.supported(relayOperations[message.target.connectionId],machineOperations[MachineKey(message.target.connectionId,message.target.computerId)])
-            val intent=if(!supported) null else if(message.hasOriginalSendIdentity) message.originalSendIntent() else captureSendIntent(message.target,message.requestId,message.text)
-            when(val checked=api.checkDelivery(connection,message,intent)) {
+            val intent=if(message.nativeSendIntent!=null || !supported) null else if(message.hasOriginalSendIdentity) message.originalSendIntent() else captureSendIntent(message.target,message.requestId,message.text)
+            when(val checked=api.checkDelivery(connection,message,intent,nativeOutcomeSupported=nativeOutcomeSupported(message.target))) {
                 is SendReceiptCheck.Original -> settleOutgoing(message,checked.receipt,checked.deadlineMs)
                 is SendReceiptCheck.Native -> {
                     durable({ current -> SendReceiptRecovery.settle(current,message,checked.intent,checked.proof,checked.deadlineMs,SendReceiptRecovery.nowMs()) })
+                    if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
+                }
+                is SendReceiptCheck.Outcome -> {
+                    durable({ NativeSendOutcome.settle(it,message,checked.proof,checked.deadlineMs,SendReceiptRecovery.nowMs()) })
                     if(selected?.target?.let(message::belongsTo)==true) refreshActivity()
                 }
                 SendReceiptCheck.Unconfirmed -> if(!automatic) error="Delivery is still unconfirmed. The original message remains saved."

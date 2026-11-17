@@ -91,197 +91,191 @@ fn sql<T>(r: rusqlite::Result<T>) -> Result<T> {
     r.map_err(|e| format!("archive metadata index: {e}"))
 }
 
-/// Task 193: a fresh catalog connection opened read-only, for a listing that
-/// must not write (owner decision, 2026-11-07). None when the index is missing
-/// or stale: the reader then lists the record instead of rebuilding the index.
-pub(super) fn existing() -> Result<Option<Connection>> {
-    let directory = root().join("archives");
-    let path = root().join("archive-catalog-v1.sqlite3");
-    if !directory.exists() || !path.exists() {
-        return Ok(None);
+/// Task 193: one read-only catalog for a listing that must not write (owner
+/// decision, 2026-11-07), pinned once for the whole listing. None when the
+/// index is absent or not current: the reader then lists the record instead of
+/// rebuilding the index.
+pub(super) fn existing() -> Option<Catalog> {
+    if refresh::directory().ok()? == "absent" {
+        return None;
     }
-    let db = sql(Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY))?;
-    let current = stamp(&directory)?;
-    let prior: String = sql(db.query_row("SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='stamp'),'')", [], |r| r.get(0)))?;
-    Ok((current == prior).then_some(db))
+    pin(refresh::existing().ok()?).ok()
 }
 
 #[cfg(all(test, unix))]
 std::thread_local! {
     pub(super) static BEFORE_METADATA_READ: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
+    static AFTER_PAGE_COUNT: std::cell::Cell<Option<fn()>> = const { std::cell::Cell::new(None) };
 }
 
-pub(super) fn catalog() -> Result<Connection> {
-    private_dir(&root())?;
-    let mut db = sql(Connection::open(root().join("archive-catalog-v1.sqlite3")))?;
-    sql(db.execute_batch("CREATE TABLE IF NOT EXISTS catalog_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS archive_rows(id TEXT PRIMARY KEY,name TEXT NOT NULL,run TEXT NOT NULL,conversation TEXT NOT NULL,at REAL NOT NULL,search TEXT NOT NULL,stamp TEXT NOT NULL,seen TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS archive_by_date ON archive_rows(at DESC,id DESC);
-        CREATE INDEX IF NOT EXISTS archive_identity ON archive_rows(name,run,conversation);"))?;
-    let reference_schema = archive_references::schema(&db)?;
-    sql(db.execute(
-        "INSERT OR IGNORE INTO catalog_meta VALUES('id',?)",
-        [uuid::Uuid::new_v4().to_string()],
-    ))?;
-    let directory = root().join("archives");
-    let current = if directory.exists() {
-        stamp(&directory)?
-    } else {
-        "absent".into()
-    };
-    let prior: String = sql(db.query_row(
-        "SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='stamp'),'')",
-        [],
-        |r| r.get(0),
-    ))?;
-    // Older executables update only the search stamp. Keep our reconciliation
-    // stamp separate so their refresh cannot hide owed reference maintenance.
-    let references: String = sql(db.query_row(
-        "SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='archive_references_stamp'),'')",
-        [],
-        |r| r.get(0),
-    ))?;
-    if current == prior && current == references && reference_schema {
-        return Ok(db);
+mod refresh;
+pub(crate) const INCOMPLETE: &str = refresh::INCOMPLETE;
+pub(super) fn incomplete(error: &str) -> bool {
+    error.starts_with(INCOMPLETE) || error.starts_with("archive metadata index:")
+}
+
+/// One pinned SQLite read view for an identity lookup batch. Exact positives
+/// require native bodies; the first negative verifies complete compact coverage.
+/// Callers hold the state writer lock and reuse that proof for later lookups.
+pub(super) struct Catalog {
+    db: Connection,
+    directory: String,
+    complete: std::cell::Cell<bool>,
+}
+impl std::ops::Deref for Catalog {
+    type Target = Connection;
+    fn deref(&self) -> &Self::Target {
+        &self.db
     }
-    let tx = sql(db.transaction())?;
-    let generation = uuid::Uuid::new_v4().to_string();
-    if directory.exists() {
-        for entry in fs::read_dir(&directory).map_err(|e| e.to_string())? {
-            let entry = entry.map_err(|e| e.to_string())?;
-            if !entry.file_type().map_err(|e| e.to_string())?.is_file() {
-                continue;
-            }
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            let id = path.file_stem().and_then(|e| e.to_str()).unwrap_or("");
-            if uuid::Uuid::parse_str(id).is_err() {
-                continue;
-            }
-            // Restore coverage is independent of the search reader's label/ID
-            // selection and omission policy. Never rebuild it in cleanup.
-            if !archive_references::current(&tx,&path,id) {
-                let _=archive_references::reconcile(&tx,&path);
-            }
-            sql(tx.execute("UPDATE archive_references SET seen=? WHERE id=?",params![generation,id]))?;
-            let file_stamp = stamp(&path)?;
-            let unchanged = sql(tx.execute(
-                "UPDATE archive_rows SET seen=? WHERE id=? AND stamp=?",
-                params![generation, id, file_stamp],
-            ))? > 0;
-            if unchanged {
-                continue;
-            }
-            #[cfg(all(test, unix))]
-            BEFORE_METADATA_READ.with(|slot| {
-                if let Some(hook) = slot.take() {
-                    hook(&path);
-                }
-            });
-            let loaded = (|| -> Result<Value> {
-                let value = archive_references::read_metadata(&path)?;
-                archive::read_archive(string(&value, "name"), id)
-            })();
-            let record = match loaded {
-                Ok(r) => r,
-                Err(e) => {
-                    eprintln!("hgs: archive {id} omitted from catalog: {e}");
-                    continue;
-                }
-            };
-            let at = record["archived_at"]
-                .as_f64()
-                .filter(|n| n.is_finite() && *n >= 0.0 && *n < MAX_DATE as f64)
-                .unwrap_or(0.0);
-            let search = [
-                "name",
-                "archive_id",
-                "agent",
-                "conversation_id",
-                "run_id",
-                "cwd",
-                "launch_dir",
-                "title",
-            ]
-            .iter()
-            .map(|k| {
-                if *k == "title" {
-                    string(&record, k).chars().take(1024).collect::<String>()
-                } else {
-                    string(&record, k).to_owned()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-            sql(tx.execute(
-                "INSERT OR REPLACE INTO archive_rows VALUES(?,?,?,?,?,?,?,?)",
-                params![
-                    id,
-                    string(&record, "name"),
-                    string(&record, "run_id"),
-                    string(&record, "conversation_id"),
-                    at,
-                    search,
-                    file_stamp,
-                    generation
-                ],
-            ))?;
+}
+impl Drop for Catalog {
+    fn drop(&mut self) {
+        let _ = self.db.execute_batch("ROLLBACK");
+    }
+}
+fn pin(db: Connection) -> Result<Catalog> {
+    pin_transaction(db, false)
+}
+fn pin_transaction(db: Connection, writing: bool) -> Result<Catalog> {
+    sql(db.execute_batch(if writing {
+        "BEGIN IMMEDIATE"
+    } else {
+        "BEGIN DEFERRED"
+    }))?;
+    if !refresh::ready(&db)? {
+        return Err(refresh::INCOMPLETE.into());
+    }
+    Ok(Catalog {
+        db,
+        directory: refresh::directory()?,
+        complete: std::cell::Cell::new(false),
+    })
+}
+pub(super) fn catalog() -> Result<Catalog> {
+    let result = refresh::catalog().and_then(pin);
+    if result.is_err() {
+        refresh::request();
+    }
+    result
+}
+pub(super) fn writer_catalog() -> Result<Catalog> {
+    // Acquire SQLite's writer exclusion before publishing the native file,
+    // so a concurrent worker cannot invalidate this transaction's snapshot.
+    refresh::writer_catalog().and_then(|db| pin_transaction(db, true))
+}
+pub(super) fn published(db: Catalog, path: &Path) {
+    if refresh::published(&db, path, db.complete.get()).is_err() {
+        refresh::request();
+    }
+}
+pub(super) fn before_removal(path: &Path) -> Option<Catalog> {
+    if path.parent() != Some(root().join("archives").as_path())
+        || !fs::symlink_metadata(path).ok()?.is_file()
+    {
+        return None;
+    }
+    let db = writer_catalog().ok()?;
+    if refresh::proof(&db).ok()? != db.directory {
+        return None;
+    }
+    db.complete.set(true);
+    Some(db)
+}
+pub(super) fn removed(db: Catalog, path: &Path) {
+    if refresh::removed(&db, path).is_err() {
+        refresh::request();
+    }
+}
+
+/// Exact run lookup with complete native coverage, never an advisory SQL miss.
+/// The selected body is still read through the caller's original native root.
+#[cfg(unix)]
+pub(crate) fn find_run(state: &Path, name: &str, run: &str) -> Result<Option<String>> {
+    if crate::platform::canonical(state).map_err(|e| e.to_string())?
+        != crate::platform::canonical(root()).map_err(|e| e.to_string())?
+    {
+        return Err("Archive lookup belongs to another state root".into());
+    }
+    let _guard = lock(None)?;
+    let db = catalog()?;
+    if refresh::proof(&db)? != db.directory {
+        return Err(INCOMPLETE.into());
+    }
+    let mut query = sql(db.prepare(
+        "SELECT substr(id,1,65) FROM archive_identities WHERE valid=1 AND name=? AND run=? ORDER BY id LIMIT 2",
+    ))?;
+    let ids = sql(query.query_map(params![name, run], |row| row.get::<_, String>(0)))?;
+    let ids = sql(ids.collect::<rusqlite::Result<Vec<_>>>())?;
+    if ids.len() > 1
+        || ids.iter().any(|id| {
+            !uuid::Uuid::parse_str(id).is_ok_and(|uuid| !uuid.is_nil() && uuid.to_string() == *id)
+        })
+    {
+        return Err("No exact unique exit archive".into());
+    }
+    if let Some(id) = ids.first() {
+        let record = archive::read_archive(name, id)?;
+        if record["run_id"] != run {
+            return Err("The exact archive identity changed".into());
         }
     }
-    sql(tx.execute("DELETE FROM archive_rows WHERE seen!=?", [&generation]))?;
-    sql(tx.execute("DELETE FROM archive_references WHERE seen!=?",[&generation]))?;
-    sql(tx.execute("DELETE FROM archive_reference_paths WHERE id NOT IN (SELECT id FROM archive_references)", []))?;
-    // Commit migration completeness with the rows, so an interrupted first
-    // reconciliation cannot leave an initialized-but-empty reference cache.
-    sql(tx.execute("INSERT OR REPLACE INTO catalog_meta VALUES('archive_references_v1','1')",[]))?;
-    sql(tx.execute(
-        "INSERT OR REPLACE INTO catalog_meta VALUES('archive_references_stamp',?)",
-        [&current],
-    ))?;
-    sql(tx.execute(
-        "INSERT OR REPLACE INTO catalog_meta VALUES('stamp',?)",
-        [current],
-    ))?;
-    sql(tx.commit())?;
-    Ok(db)
+    current_proof(&db)?;
+    Ok(ids.into_iter().next())
 }
-pub(super) fn contains(db: &Connection, record: &Value) -> Result<bool> {
-    sql(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM archive_rows WHERE name=? AND run=? AND conversation=?)",
-        params![
-            string(record, "name"),
-            string(record, "run_id"),
-            string(record, "conversation_id")
-        ],
-        |r| r.get(0),
-    ))
+fn current_proof(db: &Catalog) -> Result<()> {
+    if refresh::directory()? != db.directory {
+        return Err(refresh::INCOMPLETE.into());
+    }
+    Ok(())
 }
-/// Notification admission must neither rebuild the catalog nor reconcile an
-/// archive. A stale/missing index is unknown until the next ordinary listing.
+pub(super) fn worker() -> Result<i32> {
+    refresh::worker()
+}
+pub(super) fn contains(db: &Catalog, record: &Value) -> Result<bool> {
+    find(db, record).map(|id| id.is_some())
+}
+/// Notification admission neither rebuilds nor schedules archive maintenance.
+/// A missing or incomplete compact proof remains unknown.
 pub(super) fn contains_existing(record: &Value) -> Result<bool> {
-    let directory = root().join("archives");
-    if !directory.exists() { return Ok(false); }
-    let db = sql(Connection::open_with_flags(root().join("archive-catalog-v1.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY))?;
-    let prior: String = sql(db.query_row("SELECT COALESCE((SELECT value FROM catalog_meta WHERE key='stamp'),'')", [], |row| row.get(0)))?;
-    if prior != stamp(&directory)? { return Err("Archive catalog changed; refresh the session list before changing notifications".into()); }
-    contains(&db, record)
+    if refresh::directory()? == "absent" {
+        return Ok(false);
+    }
+    contains(&pin(refresh::existing()?)?, record)
 }
-pub(super) fn find(db: &Connection, record: &Value) -> Result<Option<String>> {
+pub(super) fn find(db: &Catalog, record: &Value) -> Result<Option<String>> {
+    current_proof(db)?;
     use rusqlite::OptionalExtension;
-    sql(db.query_row("SELECT id FROM archive_rows WHERE name=? AND run=? AND conversation=? ORDER BY id LIMIT 1",params![string(record,"name"),string(record,"run_id"),string(record,"conversation_id")],|r|r.get(0)).optional())
+    let id:Option<String>=sql(db.query_row("SELECT substr(id,1,65) FROM archive_identities WHERE valid=1 AND name=? AND run=? AND conversation=? ORDER BY id LIMIT 1",params![string(record,"name"),string(record,"run_id"),string(record,"conversation_id")],|r|r.get(0)).optional())?;
+    if let Some(id) = id {
+        // A selected positive has an exact native witness even when unrelated
+        // archive metadata is unavailable. The cache alone grants nothing.
+        let archived = archive::read_archive(string(record, "name"), &id)?;
+        if !archive::equivalent(record, std::slice::from_ref(&archived)) {
+            return Err("Archive identity changed; retain the saved binding for review".into());
+        }
+        return Ok(Some(id));
+    }
+    if !db.complete.get() {
+        let directory = refresh::proof(db)?;
+        if directory != db.directory {
+            return Err(refresh::INCOMPLETE.into());
+        }
+        db.complete.set(true);
+    }
+    Ok(None)
 }
 /// Cheap invalidation for a bounded legacy preview; no archive file is opened.
 pub(crate) fn revision() -> Result<String> {
-    let dir = root().join("archives");
-    Ok(query_hash(&if dir.exists() {
-        stamp(&dir)?
-    } else {
-        "absent".into()
-    }))
+    let directory = refresh::directory()?;
+    let publication = root().join("archive-catalog-v1.sqlite3");
+    let published = match fs::symlink_metadata(&publication) {
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => stamp(&publication)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        _ => return Err(INCOMPLETE.into()),
+    };
+    Ok(query_hash(&format!("{directory}\n{published}")))
 }
+
 pub(crate) fn read_query() -> Result<Value> {
     use std::io::Read;
     let mut bytes = Vec::new();
@@ -418,6 +412,12 @@ fn bounded_window(db: &Connection, q: &Query, cursor: Option<&Cursor>, b: Bounds
     let newer = cursor.is_some_and(|c| c.newer);
     let point = cursor.map(|c| (c.at, c.id.clone()));
     let (total, total_capped) = bounded_count(db, q, &needle, None, b)?;
+    #[cfg(all(test, unix))]
+    AFTER_PAGE_COUNT.with(|slot| {
+        if let Some(hook) = slot.take() {
+            hook();
+        }
+    });
     let (clause, order) = match (point.is_some(), newer) {
         (false, _) => ("1", "at DESC,id DESC"),
         (true, true) => ("(at>?3 OR (at=?3 AND id>?4))", "at ASC,id ASC"),
@@ -557,7 +557,21 @@ pub(crate) fn page_with(value: &Value, bounded: bool) -> Result<Value> {
 /// Plain `ls` retains a recent archive window. Even its count reads only one
 /// row past that window; older rows are reached through the ordinary cursor.
 pub(super) fn preview(marks: &Value) -> Result<Value> {
-    let mut page = page_with_bounds(&json!({}), Some(Bounds { count: 50, examine: 51 }), Some(marks))?;
+    let mut page = match page_with_bounds(
+        &json!({}),
+        Some(Bounds {
+            count: 50,
+            examine: 51,
+        }),
+        Some(marks),
+    ) {
+        Ok(page) => page,
+        Err(error) => {
+            json!({"version":1,"sessions":[],"next_cursor":"","previous_cursor":"","position":0,"total":0,
+            "total_capped":true,"position_capped":true,"partial":true,"searched":0,"catalog_complete":false,"error":error,
+            "from":0,"until":MAX_DATE,"query":""})
+        }
+    };
     page["command"] = json!(["archives", "--json", "--bounded"]);
     Ok(page)
 }
@@ -566,6 +580,7 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
     let q = validate(value)?;
     let _guard = lock(None)?;
     let db = catalog()?;
+    let search_complete = refresh::search_complete(&db)?;
     let catalog: String = sql(db.query_row(
         "SELECT value FROM catalog_meta WHERE key='id'",
         [],
@@ -587,12 +602,18 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
         // zerus-m0boz: the byte limit keeps the rows nearest the cursor, the
         // newest going Older and the oldest going Newer, so the next page in
         // the same direction goes on from the last one sent.
-        let nearest: Vec<Listed> = if newer { w.rows.iter().rev().cloned().collect() } else { w.rows.clone() };
+        let nearest: Vec<Listed> = if newer {
+            w.rows.iter().rev().cloned().collect()
+        } else {
+            w.rows.clone()
+        };
         let records = records_of(&nearest, q.limit)?;
+        drop(db);
         drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
         let mut sessions = sessions_of(&nearest, &records, marks)?;
         let encode = |at: f64, id: &str, newer: bool| encode_cursor(&q, &catalog, at, id, newer);
-        let (mut next, mut previous, mut position) = (w.next.clone(), w.previous.clone(), w.position);
+        let (mut next, mut previous, mut position) =
+            (w.next.clone(), w.previous.clone(), w.position);
         if !sessions.is_empty() && sessions.len() < nearest.len() {
             let (id, _, at) = &nearest[sessions.len() - 1];
             if newer {
@@ -606,11 +627,20 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
         if newer {
             sessions.reverse();
         }
-        let next = next.map(|(at, id)| encode(at, &id, false)).transpose()?.unwrap_or_default();
-        let previous = previous.as_ref().map(|(at, id)| encode(*at, id, true)).transpose()?.unwrap_or_default();
-        return Ok(json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":w.total,
-            "total_capped":w.total_capped,"position_capped":w.position_capped,"partial":w.partial,"searched":w.searched,
-            "from":q.from,"until":q.until,"query":q.query}));
+        let next = next
+            .map(|(at, id)| encode(at, &id, false))
+            .transpose()?
+            .unwrap_or_default();
+        let previous = previous
+            .as_ref()
+            .map(|(at, id)| encode(*at, id, true))
+            .transpose()?
+            .unwrap_or_default();
+        return Ok(
+            json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":w.total,
+            "total_capped":w.total_capped || !search_complete,"position_capped":w.position_capped || !search_complete,"partial":w.partial || !search_complete,"searched":w.searched,
+            "from":q.from,"until":q.until,"query":q.query}),
+        );
     }
     let at = cursor.as_ref().map_or(MAX_DATE as f64, |c| c.at);
     let id = cursor.as_ref().map_or("", |c| c.id.as_str());
@@ -620,6 +650,12 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
         params![q.from, q.until, needle],
         |r| r.get(0),
     ))?;
+    #[cfg(all(test, unix))]
+    AFTER_PAGE_COUNT.with(|slot| {
+        if let Some(hook) = slot.take() {
+            hook();
+        }
+    });
     let newer = cursor.as_ref().is_some_and(|c| c.newer);
     let mut stmt=sql(db.prepare(if newer {
         "SELECT id,name,at FROM archive_rows WHERE at>=? AND at<? AND instr(search,?)>0 AND (at>? OR (at=? AND id>?)) ORDER BY at ASC,id ASC LIMIT ?"
@@ -638,6 +674,7 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
     let mut rows = rows
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| e.to_string())?;
+    drop(stmt);
     if newer {
         rows.reverse();
     }
@@ -648,6 +685,7 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
         total
     };
     let records = records_of(&rows, q.limit)?;
+    drop(db);
     drop(_guard); // Journal summaries never block live hooks or lifecycle writers.
     let sessions = sessions_of(&rows, &records, marks)?;
     let encode = |at: f64, id: &str, newer: bool| -> Result<String> {
@@ -682,9 +720,14 @@ fn page_with_bounds(value: &Value, bounds: Option<Bounds>, marks: Option<&Value>
     } else {
         String::new()
     };
-    Ok(
-        json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":total,"from":q.from,"until":q.until,"query":q.query}),
-    )
+    let mut result = json!({"version":1,"sessions":sessions,"next_cursor":next,"previous_cursor":previous,"position":position,"total":total,"from":q.from,"until":q.until,"query":q.query});
+    if !search_complete {
+        result["total_capped"] = json!(true);
+        result["position_capped"] = json!(true);
+        result["partial"] = json!(true);
+        result["catalog_complete"] = json!(false);
+    }
+    Ok(result)
 }
 
 fn supported_provider(provider: &Value) -> bool {
@@ -701,6 +744,9 @@ pub(crate) fn page_scoped(value: &Value, windows_mobile: bool) -> Result<Value> 
     }
     Ok(result)
 }
+
+#[cfg(all(test, unix))]
+mod refresh_tests;
 
 #[cfg(test)]
 mod tests {

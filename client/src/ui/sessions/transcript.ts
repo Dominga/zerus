@@ -7,6 +7,7 @@ import { messageTimeOf } from "../lib/dates";
 import { tr, trNoop } from "../../i18n";
 import { systemNotice } from "./notices";
 import { toolMedia } from "./media";
+import { ownMessageText, ownMessageTruncated, restoreOwnMessages } from "./full-own-text";
 
 // A Symbol cannot arrive from a provider's JSON. Only our own local send
 // supplies these immutable-cache preview paths and oriented dimensions.
@@ -154,23 +155,31 @@ export function mergeAttachmentMessages(given: readonly ActivityEvent[], summary
   const receipts = Array.isArray(summary?.attachment_messages) ? summary.attachment_messages as ActivityEvent[] : [];
   if (!receipts.length) return given;
   const events = [...given];
+  const valid = receipts.filter(receipt => receipt.source === "hgs_delivery" && receipt.attachments?.length
+    && typeof receipt.submitted_text === "string" && receipt.submitted_text.trim() && echoMatchesFiles(receipt.submitted_text, receipt.attachments));
+  const own = (event: ActivityEvent) => event.source !== "hgs_voice" && !childEvent(event) && !event.origin
+    && (!event.turn_origin || event.turn_origin === "user") && !event.inherited_from && PROMPTS.has(event.type ?? "");
+  const requests = (event: ActivityEvent): string[] => [...new Set([
+    event.attachment_request_id, ...(event.source === "hgs_delivery" ? [event.message_id] : []),
+    ...(event.attachments ?? []).map(file => file.request_id),
+  ].filter((id): id is string => typeof id === "string" && !!id))];
   let changed = false;
-  for (const receipt of receipts) {
-    const files = Array.isArray(receipt.attachments) ? receipt.attachments : [];
-    const submitted = typeof receipt.submitted_text === "string" ? receipt.submitted_text.trim() : "";
-    if (receipt.source !== "hgs_delivery" || !files.length || !submitted || !echoMatchesFiles(submitted, files)) continue;
-    if (receipts.filter((other) => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
-    const exact: number[] = [];
-    events.forEach((event, index) => {
-      if (event.source !== "hgs_voice" && !childEvent(event) && !event.attachments?.length && PROMPTS.has(event.type ?? "")
-        && (event.detail ?? "").trim() === submitted) exact.push(index);
-    });
-    if (exact.length !== 1) continue;
-    const at = exact[0];
-    const event = events[at];
+  for (const receipt of valid) {
+    const request = typeof receipt.message_id === "string" ? receipt.message_id : "";
+    const submitted = String(receipt.submitted_text).trim();
+    if (!request || receipts.filter(other => other.message_id === request).length !== 1 || receipts.filter(other => typeof other.submitted_text === "string" && other.submitted_text.trim() === submitted).length !== 1) continue;
+    // Every already bound row reserves its request, including complete rows,
+    // local cards and rows that are no longer eligible for body replacement.
+    const owners = events.flatMap((event, index) => requests(event).includes(request) ? [index] : []);
+    if (owners.length > 1) continue;
+    const exact = owners.length ? owners : events.flatMap((event, index) => own(event) && !ownMessageTruncated(event) && !requests(event).length && !event.attachments?.length
+      && ownMessageText(event).trim() === submitted ? [index] : []);
+    if (exact.length !== 1 || !own(events[exact[0]])) continue;
+    const at = exact[0], event = events[at];
     events[at] = {
-      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: files,
-      attachment_echo: event.detail, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
+      ...event, detail: typeof receipt.detail === "string" ? receipt.detail : "", attachments: receipt.attachments,
+      message_text: typeof receipt.detail === "string" ? receipt.detail : "", message_text_truncated: false,
+      attachment_echo: receipt.submitted_text, attachment_request_id: receipt.message_id, attachment_submitted_text: receipt.submitted_text,
     };
     changed = true;
   }
@@ -337,28 +346,24 @@ export function mergeLocal(events: readonly ActivityEvent[], local: readonly Loc
       && !!(e.message_id || e.attachment_request_id) && [row.id, row.message_id].some(id => !!id && (e.message_id === id || e.attachment_request_id === id)));
     if (sent && match < 0 && row.attachments.length) {
       source.forEach((e, i) => {
-        if (eligible(e, i) && !e.attachments?.length
-          && submitted && (e.detail ?? "").trim() === submitted) exact.push(i);
+        if (eligible(e, i) && !ownMessageTruncated(e) && !e.attachments?.length
+          && submitted && ownMessageText(e).trim() === submitted) exact.push(i);
       });
       const competing = candidates.filter((other) => other.status !== "error" && other.attachments.length && submittedOf(other) === submitted).length;
       // Qt also remembers which of several exact events a row was bound to; with one it is that one.
       if (competing === 1 && exact.length === 1) match = exact[0];
     }
     if (sent && match < 0 && !exact.length) {
-      let nearest = NEAREST;
-      const head = submitted.slice(0, 1000);
-      source.forEach((e, i) => {
-        if (!eligible(e, i)) return;
-        const body = (e.detail ?? "").trim();
-        const distance = Math.abs((e.at ?? NaN) - row.submitted_at);
-        if (e.source !== "hgs_voice" && !e.attachments?.length && distance <= nearest && submitted && body
-          && (body.startsWith(head) || submitted.startsWith(body.slice(0, 1000)))) { match = i; nearest = distance; }
-      });
+      const full = source.flatMap((e, i) => eligible(e, i) && !ownMessageTruncated(e) && !e.attachments?.length
+        && !e.message_id && !e.attachment_request_id && submitted && ownMessageText(e).trim() === submitted
+        && Math.abs((e.at ?? NaN) - row.submitted_at) <= NEAREST ? [i] : []);
+      if (full.length === 1) match = full[0];
     }
     if (match >= 0) {
       claimed.add(match);
       source[match] = {
         ...source[match], activity_journal_key: eventKey(source[match]), activity_key: `local-${row.id}`, activity_display_key: `local-${row.id}`, detail: row.text,
+        message_text: row.text, message_text_truncated: false,
         attachments: source[match].attachments?.length ? source[match].attachments : row.attachments as ActivityEvent["attachments"], attachment_submitted_text: row.submitted_text,
         [LOCAL_FILES]: row.attachments,
       } as DisplayEvent;
@@ -429,8 +434,9 @@ const isExcerpt = (excerpt: string, full: string) => {
  * bounded provider window at render time, including progress between tools.
  */
 export function mergeProvider(given: readonly ActivityEvent[], summary?: Record<string, unknown>): readonly ActivityEvent[] {
-  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return given;
-  const events = [...given];
+  const restored = restoreOwnMessages(given, summary);
+  if (!Array.isArray(summary?.provider_messages) || !summary.provider_messages.length) return restored;
+  const events = [...restored];
   const matchedStops = new Set<number>();
   const identities = new Set<string>();
   const seconds = new Map<number, number[]>();
@@ -673,7 +679,8 @@ function transcriptItems(events: readonly ActivityEvent[], summary?: Record<stri
       // Qt's order: a queued prompt first, then an answer (ActivityView.cpp:1036-1038).
       const label = role !== "user" ? undefined : e.type === "UserPromptQueued" ? tr("You (queued)")
         : e.type === "QuestionAnswered" || replies ? tr("You (answer)") : undefined;
-      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: e.detail ?? "",
+      items.push({ id, kind: role === "user" ? "user" : "agent", at, body: role === "user" ? ownMessageText(e) : e.detail ?? "",
+        ...(role === "user" ? { bodyTruncated: ownMessageTruncated(e) } : {}),
         echoBody: typeof e.attachment_echo === "string" ? e.attachment_echo : undefined,
         attachments: attachments(e), receipt, label, replies, ...(inbox ? { inbox } : {}) });
       i++; continue;

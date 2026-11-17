@@ -40,6 +40,9 @@ pub struct Teams {
     /// watcher (`team_watch`) reuses instead of reading its own.
     waiting: WaitingShare,
     replay: bool,
+    /// Upstream's native team task actions (its Tasks screen's Send to team),
+    /// kept for its task services; the fork's own teams do not use them.
+    actions: Arc<crate::desktop_service::team_person_actions::Actions>,
 }
 
 impl Teams {
@@ -51,7 +54,12 @@ impl Teams {
             hidden: AtomicBool::new(false),
             waiting: WaitingShare::default(),
             replay,
+            actions: Arc::default(),
         }
+    }
+
+    pub(crate) fn native_actions(&self) -> Arc<crate::desktop_service::team_person_actions::Actions> {
+        self.actions.clone()
     }
 
     /// Task #10: the window was hidden or minimized (`true`) or shown again

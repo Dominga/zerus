@@ -1,0 +1,1346 @@
+{
+  "published": {
+    "bar": {
+      "base_commit": "0123456789abcdef0123456789abcdef01234567",
+      "counts": {
+        "cards": 0,
+        "inbox": 1,
+        "members": {
+          "active": 2,
+          "not_created": 2,
+          "paused": 0,
+          "removed": 0,
+          "total": 4
+        },
+        "nodes": {
+          "accepted": 0,
+          "cancelled": 0,
+          "in_progress": 0,
+          "pending": 0,
+          "reported": 0,
+          "waiting": 0
+        }
+      },
+      "goal": "Observe the reviewed fixture phase.",
+      "id": "00000000-0000-4000-8000-00000000beef",
+      "integration_branch": "zerus/team/fixes",
+      "lead": "lead",
+      "name": "Fixes",
+      "project": "example-project",
+      "revision": 18,
+      "status": "running"
+    },
+    "edit_goal": "Observe the reviewed fixture phase.",
+    "groups": [
+      {
+        "cards": [],
+        "state": "draft"
+      },
+      {
+        "cards": [],
+        "state": "waiting"
+      },
+      {
+        "cards": [],
+        "state": "pending"
+      },
+      {
+        "cards": [],
+        "state": "in_progress"
+      },
+      {
+        "cards": [],
+        "state": "reported"
+      },
+      {
+        "cards": [],
+        "state": "accepted"
+      },
+      {
+        "cards": [],
+        "state": "cancelled"
+      }
+    ],
+    "member_roles": [
+      {
+        "account": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "developer",
+        "model": "",
+        "name": "Developer"
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "reviewer",
+        "model": "",
+        "name": "Reviewer"
+      }
+    ],
+    "members": [
+      {
+        "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "id": "lead",
+        "lead": true,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "lead",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "state": "active"
+      },
+      {
+        "account": "account-example",
+        "account_choice": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "id": "m1",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "developer",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+        },
+        "state": "active"
+      },
+      {
+        "account": "",
+        "account_choice": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "id": "m2",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "developer",
+        "session": null,
+        "state": "not_created"
+      },
+      {
+        "account": "",
+        "account_choice": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "id": "m3",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "reviewer",
+        "session": null,
+        "state": "not_created"
+      }
+    ],
+    "next": null,
+    "plan": {
+      "draft": {
+        "accept_available": false,
+        "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": false,
+            "reason": "A retained phase task or pipeline stage has already started or ended."
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 2,
+            "kind": "published",
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-00000000900f",
+            "rework": null
+          },
+          "unstarted": {
+            "allowed": false,
+            "reason": "A retained phase task or pipeline stage has already started or ended."
+          },
+          "version": 1
+        },
+        "editable": false,
+        "generation": 2,
+        "graph": {
+          "complete": true,
+          "edges": [],
+          "nodes": [
+            {
+              "id": 1,
+              "layer": 0,
+              "phase": 1
+            },
+            {
+              "id": 2,
+              "layer": 0,
+              "phase": 1
+            }
+          ]
+        },
+        "live": {
+          "complete": true,
+          "nodes": [
+            {
+              "admitted": true,
+              "estimate_minutes": 30,
+              "id": 1,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "V",
+              "role": "developer",
+              "round": 1,
+              "state": "accepted",
+              "task": {
+                "project": "example-project",
+                "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+              },
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            },
+            {
+              "admitted": true,
+              "estimate_minutes": 30,
+              "id": 2,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "role": "developer",
+              "round": 1,
+              "state": "waiting",
+              "task": {
+                "project": "example-project",
+                "uuid": "d676769f-478e-812e-b03d-6a0e9e315d42"
+              },
+              "title": "Task 2",
+              "writes": [
+                "src/part2.rs"
+              ]
+            }
+          ],
+          "phase": 1,
+          "revision": 19
+        },
+        "metrics": {
+          "average_parallelism_tenths": 20,
+          "critical_path_minutes": 30,
+          "external_dependencies": 0,
+          "known_estimates": 2,
+          "total_nodes": 2,
+          "unavailable": null,
+          "warnings": []
+        },
+        "next_node": 3,
+        "nodes": [
+          {
+            "assignee": null,
+            "criteria": [
+              "The targeted checks pass"
+            ],
+            "deps": [],
+            "estimate_minutes": 30,
+            "id": 2,
+            "kind": "task",
+            "pipeline": "reviewed",
+            "role": "developer",
+            "text": "Implement the reviewed work.",
+            "title": "Task 2",
+            "writes": [
+              "src/part2.rs"
+            ]
+          }
+        ],
+        "phase": {
+          "kind": "plan",
+          "n": 1,
+          "order": 1,
+          "state": "approved",
+          "title": "Foundation"
+        },
+        "previous": null,
+        "publication": {
+          "blocked": 0,
+          "created": 1,
+          "generation": 2,
+          "id": "00000000-0000-4000-8000-00000000900f",
+          "reason": null,
+          "state": "published",
+          "total": 1
+        },
+        "rejection": null,
+        "revision": 19,
+        "rework": {
+          "base_publication": "00000000-0000-4000-8000-000000015350",
+          "comment": "Keep the original observation provenance.",
+          "draft": null,
+          "id": "00000000-0000-4000-8000-00000000900c",
+          "state": "published"
+        },
+        "rework_available": true,
+        "unknown_fields": false
+      },
+      "draft_failure": null,
+      "epoch": 3,
+      "list": {
+        "approval_available": true,
+        "default_pipeline": "reviewed",
+        "drafts_available": true,
+        "next": null,
+        "next_node": 3,
+        "next_phase": 2,
+        "revision": 19,
+        "routes": [
+          {
+            "pipeline": "reviewed",
+            "role": "developer"
+          }
+        ],
+        "rows": [
+          {
+            "kind": "queue",
+            "mode": "free",
+            "n": 0,
+            "state": "approved",
+            "title": "Queue"
+          },
+          {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "approved",
+            "title": "Foundation"
+          }
+        ],
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "list_failure": null,
+      "observed": {
+        "after": null,
+        "coverage": [
+          {
+            "coverage": "sampled",
+            "implementation_observed_ms": null,
+            "key": {
+              "attempt": null,
+              "binding": null,
+              "effect": "00000000-0000-4000-8000-000000015351",
+              "home": "00000000-0000-4000-8000-0000000000aa",
+              "kind": "implementation",
+              "node": 1,
+              "node_generation": 1,
+              "phase": 1,
+              "publication": null,
+              "task": {
+                "project": "example-project",
+                "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+              },
+              "team": "00000000-0000-4000-8000-00000000beef"
+            },
+            "last_verified_ms": 1700000000000,
+            "reasons": [
+              "native_unsupported",
+              "old_data",
+              "missing_attempt",
+              "missing_binding",
+              "publication_unavailable"
+            ],
+            "supported_categories": [
+              "delivery_reserved",
+              "delivery_refused"
+            ],
+            "window": {
+              "from_ms": 1699913600000,
+              "to_ms": 1700000000000,
+              "window_ms": 86400000
+            }
+          }
+        ],
+        "epoch": 2,
+        "page": {
+          "as_of_ms": 1700000000000,
+          "capabilities": {
+            "implementation_work": false,
+            "native_work": false,
+            "service_points": true,
+            "task_points": true
+          },
+          "cohort": {
+            "more": false,
+            "units": [
+              {
+                "id": 11,
+                "key": {
+                  "attempt": null,
+                  "binding": null,
+                  "effect": "00000000-0000-4000-8000-000000015351",
+                  "home": "00000000-0000-4000-8000-0000000000aa",
+                  "kind": "implementation",
+                  "node": 1,
+                  "node_generation": 1,
+                  "phase": 1,
+                  "publication": null,
+                  "task": {
+                    "project": "example-project",
+                    "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                  },
+                  "team": "00000000-0000-4000-8000-00000000beef"
+                }
+              }
+            ]
+          },
+          "fact_ceiling": 12,
+          "last_verified_ms": 1700000000000,
+          "more": false,
+          "next": null,
+          "reasons": [
+            "native_unsupported",
+            "old_data",
+            "missing_attempt",
+            "missing_binding",
+            "publication_unavailable"
+          ],
+          "rows": [
+            {
+              "break_before": true,
+              "category": "delivery_reserved",
+              "event_at_ms": 1700000000000,
+              "implementation_observed_ms": null,
+              "key": {
+                "attempt": null,
+                "binding": null,
+                "effect": "00000000-0000-4000-8000-000000015351",
+                "home": "00000000-0000-4000-8000-0000000000aa",
+                "kind": "implementation",
+                "node": 1,
+                "node_generation": 1,
+                "phase": 1,
+                "publication": null,
+                "task": {
+                  "project": "example-project",
+                  "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                },
+                "team": "00000000-0000-4000-8000-00000000beef"
+              },
+              "last_verified_ms": 1700000000000,
+              "observed_at_ms": 1700000000000,
+              "reasons": [
+                "native_unsupported",
+                "old_data",
+                "missing_attempt",
+                "missing_binding",
+                "publication_unavailable"
+              ],
+              "schema": 1,
+              "seq": 11,
+              "snapshot": {
+                "configured_model": null,
+                "native_model": null,
+                "role": null,
+                "title": ""
+              },
+              "source": {
+                "event_id": "00000000-0000-4000-8000-000000009007",
+                "event_sequence": 9,
+                "identity": "00000000-0000-4000-8000-000000001733",
+                "kind": "team_journal",
+                "observer_epoch": "00000000-0000-4000-8000-00000000970a",
+                "replica_generation": null,
+                "replica_offset": null,
+                "schema": 1,
+                "task_revision": null,
+                "team_revision": 9
+              },
+              "unit": 11
+            },
+            {
+              "break_before": true,
+              "category": "delivery_refused",
+              "event_at_ms": 1700000000000,
+              "implementation_observed_ms": null,
+              "key": {
+                "attempt": null,
+                "binding": null,
+                "effect": "00000000-0000-4000-8000-000000015351",
+                "home": "00000000-0000-4000-8000-0000000000aa",
+                "kind": "implementation",
+                "node": 1,
+                "node_generation": 1,
+                "phase": 1,
+                "publication": null,
+                "task": {
+                  "project": "example-project",
+                  "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                },
+                "team": "00000000-0000-4000-8000-00000000beef"
+              },
+              "last_verified_ms": 1700000000000,
+              "observed_at_ms": 1700000000000,
+              "reasons": [
+                "native_unsupported",
+                "old_data",
+                "missing_attempt",
+                "missing_binding",
+                "publication_unavailable"
+              ],
+              "schema": 1,
+              "seq": 12,
+              "snapshot": {
+                "configured_model": null,
+                "native_model": null,
+                "role": null,
+                "title": ""
+              },
+              "source": {
+                "event_id": "00000000-0000-4000-8000-000000009008",
+                "event_sequence": 10,
+                "identity": "00000000-0000-4000-8000-000000001733",
+                "kind": "team_journal",
+                "observer_epoch": "00000000-0000-4000-8000-00000000970a",
+                "replica_generation": null,
+                "replica_offset": null,
+                "schema": 1,
+                "task_revision": null,
+                "team_revision": 10
+              },
+              "unit": 11
+            }
+          ],
+          "schema": 1,
+          "scope": {
+            "home": "00000000-0000-4000-8000-0000000000aa",
+            "node": null,
+            "phase": 1,
+            "publication": {
+              "draft_generation": 2,
+              "id": "00000000-0000-4000-8000-00000000900f"
+            },
+            "team": "00000000-0000-4000-8000-00000000beef",
+            "window": {
+              "from_ms": 1699913600000,
+              "to_ms": 1700000000000,
+              "window_ms": 86400000
+            }
+          },
+          "source_revision": 19,
+          "stream_id": "00000000-0000-4000-8000-000000001733",
+          "truncated": false
+        }
+      },
+      "selected": 1
+    },
+    "revision": 18,
+    "settings": {
+      "caps": {
+        "max_members": 6,
+        "max_open_questions": 3,
+        "max_open_tasks": 500,
+        "max_phase_tasks": 50
+      },
+      "delegations": {
+        "accept_results": true,
+        "answer_members": true,
+        "confirm_trust": true,
+        "merge_accepted": true,
+        "resume_exited": true
+      },
+      "integration": "none",
+      "land_allowed": false,
+      "phase_acceptance": "lead",
+      "plan_approval": "review",
+      "queue": true,
+      "routing": "direct",
+      "timers": {
+        "answer_escalate_minutes": 10,
+        "inbox_interval_seconds": 120,
+        "lead_stall_minutes": 20,
+        "remind_lead_minutes": 15,
+        "remind_person_minutes": 60,
+        "report_timeout_seconds": 120,
+        "resume_limit_per_hour": 3,
+        "start_timeout_seconds": 180
+      }
+    },
+    "truncated": false
+  },
+  "reserved": {
+    "bar": {
+      "base_commit": "0123456789abcdef0123456789abcdef01234567",
+      "counts": {
+        "cards": 0,
+        "inbox": 1,
+        "members": {
+          "active": 2,
+          "not_created": 2,
+          "paused": 0,
+          "removed": 0,
+          "total": 4
+        },
+        "nodes": {
+          "accepted": 0,
+          "cancelled": 0,
+          "in_progress": 0,
+          "pending": 0,
+          "reported": 0,
+          "waiting": 0
+        }
+      },
+      "goal": "Observe the reviewed fixture phase.",
+      "id": "00000000-0000-4000-8000-00000000beef",
+      "integration_branch": "zerus/team/fixes",
+      "lead": "lead",
+      "name": "Fixes",
+      "project": "example-project",
+      "revision": 18,
+      "status": "running"
+    },
+    "edit_goal": "Observe the reviewed fixture phase.",
+    "groups": [
+      {
+        "cards": [],
+        "state": "draft"
+      },
+      {
+        "cards": [],
+        "state": "waiting"
+      },
+      {
+        "cards": [],
+        "state": "pending"
+      },
+      {
+        "cards": [],
+        "state": "in_progress"
+      },
+      {
+        "cards": [],
+        "state": "reported"
+      },
+      {
+        "cards": [],
+        "state": "accepted"
+      },
+      {
+        "cards": [],
+        "state": "cancelled"
+      }
+    ],
+    "member_roles": [
+      {
+        "account": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "developer",
+        "model": "",
+        "name": "Developer"
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "effort": "",
+        "id": "reviewer",
+        "model": "",
+        "name": "Reviewer"
+      }
+    ],
+    "members": [
+      {
+        "account": "account-example",
+        "account_choice": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "id": "lead",
+        "lead": true,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "lead",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000064"
+        },
+        "state": "active"
+      },
+      {
+        "account": "account-example",
+        "account_choice": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "id": "m1",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "developer",
+        "session": {
+          "machine": "00000000-0000-4000-8000-0000000000aa",
+          "session_id": "launch_id:00000000-0000-4000-8000-000000000031"
+        },
+        "state": "active"
+      },
+      {
+        "account": "",
+        "account_choice": {
+          "account": "example-planning-account",
+          "mode": "named"
+        },
+        "agent": "claude",
+        "id": "m2",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "developer",
+        "session": null,
+        "state": "not_created"
+      },
+      {
+        "account": "",
+        "account_choice": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "id": "m3",
+        "lead": false,
+        "model": null,
+        "open_work": 0,
+        "person_stopped": false,
+        "role": "reviewer",
+        "session": null,
+        "state": "not_created"
+      }
+    ],
+    "next": null,
+    "plan": {
+      "draft": {
+        "accept_available": false,
+        "complete": true,
+        "controls": {
+          "acceptance": {
+            "allowed": false,
+            "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+          },
+          "barrier": {
+            "allowed": true,
+            "reason": null
+          },
+          "earlier": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "later": {
+            "availability": {
+              "allowed": false,
+              "reason": "There is no neighboring planned phase in that direction."
+            },
+            "target": null
+          },
+          "pause": {
+            "state": "running"
+          },
+          "pause_change": {
+            "allowed": true,
+            "reason": null
+          },
+          "resume": {
+            "allowed": false,
+            "reason": "The phase is not paused."
+          },
+          "scope": {
+            "generation": 1,
+            "kind": "published",
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-000000015350",
+            "rework": {
+              "approval": "00000000-0000-4000-8000-00000000900f",
+              "generation": 2,
+              "id": "00000000-0000-4000-8000-00000000900c"
+            }
+          },
+          "unstarted": {
+            "allowed": false,
+            "reason": "Only an unstarted draft, rejected or approved phase can change order or acceptance."
+          },
+          "version": 1
+        },
+        "editable": false,
+        "generation": 1,
+        "graph": {
+          "complete": false,
+          "edges": [],
+          "nodes": [
+            {
+              "id": 1,
+              "layer": 0,
+              "phase": 1
+            }
+          ]
+        },
+        "live": {
+          "complete": false,
+          "nodes": [
+            {
+              "admitted": true,
+              "estimate_minutes": 30,
+              "id": 1,
+              "phase": 1,
+              "pipeline": "reviewed",
+              "rank": "V",
+              "role": "developer",
+              "round": 1,
+              "state": "accepted",
+              "task": {
+                "project": "example-project",
+                "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+              },
+              "title": "Task 1",
+              "writes": [
+                "src/part1.rs"
+              ]
+            }
+          ],
+          "phase": 1,
+          "revision": 18
+        },
+        "metrics": {
+          "average_parallelism_tenths": null,
+          "critical_path_minutes": null,
+          "external_dependencies": 0,
+          "known_estimates": 0,
+          "total_nodes": 0,
+          "unavailable": "incomplete_phase",
+          "warnings": []
+        },
+        "next_node": 3,
+        "nodes": [
+          {
+            "assignee": null,
+            "criteria": [
+              "The targeted checks pass"
+            ],
+            "deps": [],
+            "estimate_minutes": 30,
+            "id": 1,
+            "kind": "task",
+            "pipeline": "reviewed",
+            "role": "developer",
+            "text": "Implement the reviewed work.",
+            "title": "Task 1",
+            "writes": [
+              "src/part1.rs"
+            ]
+          }
+        ],
+        "phase": {
+          "kind": "plan",
+          "n": 1,
+          "order": 1,
+          "state": "awaiting_acceptance",
+          "title": "Foundation"
+        },
+        "previous": null,
+        "publication": {
+          "blocked": 0,
+          "created": 1,
+          "generation": 1,
+          "id": "00000000-0000-4000-8000-000000015350",
+          "reason": null,
+          "state": "published",
+          "total": 1
+        },
+        "rejection": null,
+        "revision": 18,
+        "rework": {
+          "base_publication": "00000000-0000-4000-8000-000000015350",
+          "comment": "Keep the original observation provenance.",
+          "draft": {
+            "accept_available": false,
+            "complete": true,
+            "editable": false,
+            "generation": 2,
+            "graph": {
+              "complete": true,
+              "edges": [],
+              "nodes": [
+                {
+                  "id": 2,
+                  "layer": 0,
+                  "phase": 1
+                }
+              ]
+            },
+            "live": null,
+            "metrics": {
+              "average_parallelism_tenths": 10,
+              "critical_path_minutes": 30,
+              "external_dependencies": 0,
+              "known_estimates": 1,
+              "total_nodes": 1,
+              "unavailable": null,
+              "warnings": []
+            },
+            "next_node": 3,
+            "nodes": [
+              {
+                "assignee": null,
+                "criteria": [
+                  "The targeted checks pass"
+                ],
+                "deps": [],
+                "estimate_minutes": 30,
+                "id": 2,
+                "kind": "task",
+                "pipeline": "reviewed",
+                "role": "developer",
+                "text": "Implement the reviewed work.",
+                "title": "Task 2",
+                "writes": [
+                  "src/part2.rs"
+                ]
+              }
+            ],
+            "phase": {
+              "kind": "plan",
+              "n": 1,
+              "order": 1,
+              "state": "draft",
+              "title": "Foundation"
+            },
+            "previous": null,
+            "publication": {
+              "blocked": 0,
+              "created": 0,
+              "generation": 2,
+              "id": "00000000-0000-4000-8000-00000000900f",
+              "reason": null,
+              "state": "reserved",
+              "total": 1
+            },
+            "rejection": null,
+            "revision": 18,
+            "rework_available": false,
+            "unknown_fields": false
+          },
+          "id": "00000000-0000-4000-8000-00000000900c",
+          "state": "publishing"
+        },
+        "rework_available": true,
+        "unknown_fields": false
+      },
+      "draft_failure": null,
+      "epoch": 2,
+      "estimates": {
+        "cohort_complete": false,
+        "epoch": 1,
+        "rows": [
+          {
+            "estimate_minutes": null,
+            "kind": "task",
+            "node": 1,
+            "task": null,
+            "title": "Task 1",
+            "unknown": "incomplete_live"
+          }
+        ],
+        "scope": {
+          "basis": "frozen_publication",
+          "home": "00000000-0000-4000-8000-0000000000aa",
+          "revision": 18,
+          "team": "00000000-0000-4000-8000-00000000beef",
+          "version": {
+            "draft_generation": 1,
+            "phase": 1,
+            "publication": "00000000-0000-4000-8000-000000015350"
+          }
+        },
+        "units": [
+          {
+            "coverage": {
+              "coverage": "sampled",
+              "implementation_observed_ms": null,
+              "key": {
+                "attempt": null,
+                "binding": null,
+                "effect": "00000000-0000-4000-8000-000000015351",
+                "home": "00000000-0000-4000-8000-0000000000aa",
+                "kind": "implementation",
+                "node": 1,
+                "node_generation": 1,
+                "phase": 1,
+                "publication": null,
+                "task": {
+                  "project": "example-project",
+                  "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                },
+                "team": "00000000-0000-4000-8000-00000000beef"
+              },
+              "last_verified_ms": 1700000000000,
+              "reasons": [
+                "native_unsupported",
+                "old_data",
+                "missing_attempt",
+                "missing_binding",
+                "publication_unavailable"
+              ],
+              "supported_categories": [
+                "delivery_reserved",
+                "delivery_refused"
+              ],
+              "window": {
+                "from_ms": 1699913600000,
+                "to_ms": 1700000000000,
+                "window_ms": 86400000
+              }
+            },
+            "estimate_minutes": null,
+            "node": 1,
+            "unit": 11,
+            "unknown": "estimate_unavailable"
+          }
+        ],
+        "unknown": "incomplete_live",
+        "window": {
+          "from_ms": 1699913600000,
+          "to_ms": 1700000000000,
+          "window_ms": 86400000
+        }
+      },
+      "list": {
+        "approval_available": true,
+        "default_pipeline": "reviewed",
+        "drafts_available": true,
+        "next": null,
+        "next_node": 3,
+        "next_phase": 2,
+        "revision": 18,
+        "routes": [
+          {
+            "pipeline": "reviewed",
+            "role": "developer"
+          }
+        ],
+        "rows": [
+          {
+            "kind": "queue",
+            "mode": "free",
+            "n": 0,
+            "state": "approved",
+            "title": "Queue"
+          },
+          {
+            "kind": "plan",
+            "n": 1,
+            "order": 1,
+            "state": "awaiting_acceptance",
+            "title": "Foundation"
+          }
+        ],
+        "team": "00000000-0000-4000-8000-00000000beef"
+      },
+      "list_failure": null,
+      "observed": {
+        "after": null,
+        "coverage": [
+          {
+            "coverage": "sampled",
+            "implementation_observed_ms": null,
+            "key": {
+              "attempt": null,
+              "binding": null,
+              "effect": "00000000-0000-4000-8000-000000015351",
+              "home": "00000000-0000-4000-8000-0000000000aa",
+              "kind": "implementation",
+              "node": 1,
+              "node_generation": 1,
+              "phase": 1,
+              "publication": null,
+              "task": {
+                "project": "example-project",
+                "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+              },
+              "team": "00000000-0000-4000-8000-00000000beef"
+            },
+            "last_verified_ms": 1700000000000,
+            "reasons": [
+              "native_unsupported",
+              "old_data",
+              "missing_attempt",
+              "missing_binding",
+              "publication_unavailable"
+            ],
+            "supported_categories": [
+              "delivery_reserved",
+              "delivery_refused"
+            ],
+            "window": {
+              "from_ms": 1699913600000,
+              "to_ms": 1700000000000,
+              "window_ms": 86400000
+            }
+          }
+        ],
+        "epoch": 1,
+        "page": {
+          "as_of_ms": 1700000000000,
+          "capabilities": {
+            "implementation_work": false,
+            "native_work": false,
+            "service_points": true,
+            "task_points": true
+          },
+          "cohort": {
+            "more": false,
+            "units": [
+              {
+                "id": 11,
+                "key": {
+                  "attempt": null,
+                  "binding": null,
+                  "effect": "00000000-0000-4000-8000-000000015351",
+                  "home": "00000000-0000-4000-8000-0000000000aa",
+                  "kind": "implementation",
+                  "node": 1,
+                  "node_generation": 1,
+                  "phase": 1,
+                  "publication": null,
+                  "task": {
+                    "project": "example-project",
+                    "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                  },
+                  "team": "00000000-0000-4000-8000-00000000beef"
+                }
+              }
+            ]
+          },
+          "fact_ceiling": 12,
+          "last_verified_ms": 1700000000000,
+          "more": false,
+          "next": null,
+          "reasons": [
+            "native_unsupported",
+            "old_data",
+            "missing_attempt",
+            "missing_binding",
+            "publication_unavailable"
+          ],
+          "rows": [
+            {
+              "break_before": true,
+              "category": "delivery_reserved",
+              "event_at_ms": 1700000000000,
+              "implementation_observed_ms": null,
+              "key": {
+                "attempt": null,
+                "binding": null,
+                "effect": "00000000-0000-4000-8000-000000015351",
+                "home": "00000000-0000-4000-8000-0000000000aa",
+                "kind": "implementation",
+                "node": 1,
+                "node_generation": 1,
+                "phase": 1,
+                "publication": null,
+                "task": {
+                  "project": "example-project",
+                  "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                },
+                "team": "00000000-0000-4000-8000-00000000beef"
+              },
+              "last_verified_ms": 1700000000000,
+              "observed_at_ms": 1700000000000,
+              "reasons": [
+                "native_unsupported",
+                "old_data",
+                "missing_attempt",
+                "missing_binding",
+                "publication_unavailable"
+              ],
+              "schema": 1,
+              "seq": 11,
+              "snapshot": {
+                "configured_model": null,
+                "native_model": null,
+                "role": null,
+                "title": ""
+              },
+              "source": {
+                "event_id": "00000000-0000-4000-8000-000000009007",
+                "event_sequence": 9,
+                "identity": "00000000-0000-4000-8000-000000001733",
+                "kind": "team_journal",
+                "observer_epoch": "00000000-0000-4000-8000-00000000970a",
+                "replica_generation": null,
+                "replica_offset": null,
+                "schema": 1,
+                "task_revision": null,
+                "team_revision": 9
+              },
+              "unit": 11
+            },
+            {
+              "break_before": true,
+              "category": "delivery_refused",
+              "event_at_ms": 1700000000000,
+              "implementation_observed_ms": null,
+              "key": {
+                "attempt": null,
+                "binding": null,
+                "effect": "00000000-0000-4000-8000-000000015351",
+                "home": "00000000-0000-4000-8000-0000000000aa",
+                "kind": "implementation",
+                "node": 1,
+                "node_generation": 1,
+                "phase": 1,
+                "publication": null,
+                "task": {
+                  "project": "example-project",
+                  "uuid": "9ecfdd9c-6bc8-8aa7-933c-a4c40451bc07"
+                },
+                "team": "00000000-0000-4000-8000-00000000beef"
+              },
+              "last_verified_ms": 1700000000000,
+              "observed_at_ms": 1700000000000,
+              "reasons": [
+                "native_unsupported",
+                "old_data",
+                "missing_attempt",
+                "missing_binding",
+                "publication_unavailable"
+              ],
+              "schema": 1,
+              "seq": 12,
+              "snapshot": {
+                "configured_model": null,
+                "native_model": null,
+                "role": null,
+                "title": ""
+              },
+              "source": {
+                "event_id": "00000000-0000-4000-8000-000000009008",
+                "event_sequence": 10,
+                "identity": "00000000-0000-4000-8000-000000001733",
+                "kind": "team_journal",
+                "observer_epoch": "00000000-0000-4000-8000-00000000970a",
+                "replica_generation": null,
+                "replica_offset": null,
+                "schema": 1,
+                "task_revision": null,
+                "team_revision": 10
+              },
+              "unit": 11
+            }
+          ],
+          "schema": 1,
+          "scope": {
+            "home": "00000000-0000-4000-8000-0000000000aa",
+            "node": null,
+            "phase": 1,
+            "publication": {
+              "draft_generation": 1,
+              "id": "00000000-0000-4000-8000-000000015350"
+            },
+            "team": "00000000-0000-4000-8000-00000000beef",
+            "window": {
+              "from_ms": 1699913600000,
+              "to_ms": 1700000000000,
+              "window_ms": 86400000
+            }
+          },
+          "source_revision": 18,
+          "stream_id": "00000000-0000-4000-8000-000000001733",
+          "truncated": false
+        }
+      },
+      "selected": 1
+    },
+    "revision": 18,
+    "settings": {
+      "caps": {
+        "max_members": 6,
+        "max_open_questions": 3,
+        "max_open_tasks": 500,
+        "max_phase_tasks": 50
+      },
+      "delegations": {
+        "accept_results": true,
+        "answer_members": true,
+        "confirm_trust": true,
+        "merge_accepted": true,
+        "resume_exited": true
+      },
+      "integration": "none",
+      "land_allowed": false,
+      "phase_acceptance": "lead",
+      "plan_approval": "review",
+      "queue": true,
+      "routing": "direct",
+      "timers": {
+        "answer_escalate_minutes": 10,
+        "inbox_interval_seconds": 120,
+        "lead_stall_minutes": 20,
+        "remind_lead_minutes": 15,
+        "remind_person_minutes": 60,
+        "report_timeout_seconds": 120,
+        "resume_limit_per_hour": 3,
+        "start_timeout_seconds": 180
+      }
+    },
+    "truncated": false
+  }
+}

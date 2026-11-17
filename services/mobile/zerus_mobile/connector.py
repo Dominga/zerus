@@ -28,6 +28,7 @@ import aiohttp
 from .managed_relay import transport, identity_url
 from .accounts import AccountCache
 from .attachments import MAX_REQUEST_BYTES, validate_read, validate_send
+from . import send_outcome
 from . import analytics, speech, speech_config, voice, session_notifications
 from . import attachment_reads, file_reads, archives, hook_health, session_projects, opencode_privacy
 from .recovery import validate_recovery
@@ -206,6 +207,7 @@ class Journal:
             self.db.execute("DELETE FROM requests WHERE operation='attachment_read' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 120,))
             self.db.execute(f"DELETE FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND delivered=1 AND state!='running' AND delivered_at<?", (now - 3600,))
             self.db.execute("DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='history_projection' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)", (now - 3600,))
+            self.db.execute("DELETE FROM requests WHERE request_id IN (SELECT request_id FROM requests INDEXED BY journal_operation WHERE operation='send_outcome_receipt' AND delivered=1 AND state IN ('completed','failed','uncertain') AND delivered_at<? ORDER BY delivered_at,request_id LIMIT 5000)", (now - 3600,))
             rows = self.db.execute(f"SELECT request_id,state FROM requests WHERE operation NOT IN {READ_CLASS_SQL} AND delivered=1 AND state!='running' AND delivered_at<? AND response IS NOT NULL AND response_expired=0", (now - 7 * 86400,)).fetchall()
             for request_id, state in rows:
                 expired = {"state": state, "result": {"status": "history_expired"},
@@ -324,6 +326,7 @@ class Connector:
         self.session_notifications_supported = False
         self.preference_supported = False
         self.attachment_read_supported = False
+        self.send_outcome_abi = False
         self.archive_supported = False
         self.paged_archives = {}
         self.archive_preview = []
@@ -367,7 +370,8 @@ class Connector:
     async def _native(self, argv: list[str], payload: dict | None = None,
                       *, timeout: float | None = None, json_output: bool = True,
                       max_output_bytes: int | None = None, failure_json: bool = False) -> object:
-        stdin = None if payload is None else json.dumps(payload, ensure_ascii=False).encode()
+        outcome_call = send_outcome.negotiated(argv, payload)
+        stdin = None if payload is None else json.dumps(payload, ensure_ascii=False, sort_keys=outcome_call).encode()
         if stdin is not None and len(stdin) > MAX_PAYLOAD + (4096 if argv[:2] in (["swarm", "mobile-peer"], ["swarm", "__mobile-peer-local"]) else 0):
             raise ConnectorError("native request exceeds size limit")
         process = None
@@ -424,16 +428,19 @@ class Connector:
             stdout, _, _, code = await asyncio.wait_for(asyncio.shield(joined) if mobile_create else joined, self.timeout if timeout is None else timeout)
             if oversized: raise ConnectorError("native output exceeds size limit")
             # `hgs read` answers an unknown session with JSON and exit status 1.
-            if code != 0 and not (failure_json and stdout.strip()):
+            if code != 0 and not ((failure_json or outcome_call) and stdout.strip()):
                 raise ConnectorError("native command failed")
             if not json_output:
                 return stdout.decode("utf-8", errors="strict")
             try:
-                result = json.loads(stdout)
+                result = json.loads(stdout, object_pairs_hook=send_outcome.unique_members) if outcome_call or send_outcome.receipt_read(argv,payload) else json.loads(stdout)
+                if ((outcome_call and isinstance(result,dict) and result.get('status')=='not_offered')
+                        or send_outcome.receipt_read(argv,payload)) and not send_outcome.closed_frame(result):
+                    raise ValueError
             except (ValueError, UnicodeError):
                 raise ConnectorError("native command returned invalid JSON") from None
             # A failing exit carries only a failure answer, never a success receipt.
-            if code != 0 and not (isinstance(result, dict) and result.get("ok") is False):
+            if code != 0 and not ((failure_json and isinstance(result, dict) and result.get("ok") is False) or (outcome_call and len(stdout) <= 8192 and send_outcome.negative(result))):
                 raise ConnectorError("native command failed")
             return result
         except asyncio.TimeoutError:
@@ -539,6 +546,7 @@ class Connector:
         snapshot["mobile_accounts"] = await self.accounts.update()
         await self.probe_capabilities()
         operations = (OPERATIONS - (set() if getattr(self,"session_projects_supported",False) else session_projects.OPERATIONS) - (set() if self.analytics_supported else analytics.OPERATIONS) - (set() if getattr(self,"hook_health_supported",False) else {"hooks_status"})) - (set() if self.archive_supported else {"archive_list"}) - (set() if self.worktree_supported else worktrees.OPERATIONS) - (set() if self.directory_create_supported else {"directory_create"}) - (set() if self.lifecycle_supported else LIFECYCLE_OPERATIONS) - (set() if self.terminal_supported else TERMINAL_OPERATIONS) - (set() if self.launch_supported else LAUNCH_OPERATIONS - {"directory_create"}) - (set() if self.history_supported else {"history"}) - (set() if self.history_projection_supported else {"history_projection"}) - (set() if self.recovery_supported else {"recovery_action"}) - (set() if self.read_supported else {"mark_read"}) - (set() if getattr(self, "session_notifications_supported", False) else {"session_notifications"}) - (set() if self.attachment_read_supported else ATTACHMENT_OPERATIONS) - (set() if self.file_read_supported else {"file_read"}) - (set() if self.preference_supported and getattr(self, "fleet", None) is not None else COMPUTER_OPERATIONS) - (set() if self.speech_supported else speech.OPERATIONS) - (set() if self.voice_supported else voice.OPERATIONS) - (set() if self.speech_config_supported else speech_config.OPERATIONS)
+        operations -= set() if self.send_outcome_supported() else send_outcome.OPERATIONS
         snapshot["mobile_capabilities"] = {"protocol_version": 1,
             "operations": sorted(operations), "features": sorted(FEATURES | ({session_projects.FEATURE} if getattr(self,"session_projects_supported",False) else set()) | {"accounts_snapshot"} | ({CLEAR_CONTEXT_DISMISS_FEATURE} if getattr(self, "clear_context_dismiss_supported", False) else set()) | ({voice.video.FEATURE} if self.voice_supported and self.video_supported else set()) | ({DIRECTORY_CREATE_FEATURE} if self.directory_create_supported else set()) | ({"gateway_one_hop"} if getattr(self, "fleet", None) and self.fleet.available else set()) | ({"launch_project"} if self.project_launch_supported else set())),
             "reasons": {**({} if self.lifecycle_supported else {"session_actions": "Native CLI lacks the scoped session-action ABI"}),
@@ -550,6 +558,7 @@ class Connector:
         if time.monotonic() < self.capabilities_next_poll:
             return
         self.capabilities_next_poll = time.monotonic() + 300
+        self.send_outcome_abi = False
         self.archive_supported = False
         self.lifecycle_supported = False
         self.terminal_supported = False
@@ -577,6 +586,7 @@ class Connector:
             self.fleet.supported = False
         try:
             help_text = await self.native(["--help"], timeout=3, json_output=False)
+            self.send_outcome_abi = isinstance(help_text,str) and send_outcome.MARKERS <= {line.strip() for line in help_text.splitlines()}
             self.lifecycle_supported = isinstance(help_text, str) and any(
                 "session-action <session> --json" in line for line in help_text.splitlines())
             self.terminal_supported = isinstance(help_text, str) and "terminal <session> --json" in help_text
@@ -689,10 +699,22 @@ class Connector:
             if key in self.attention_cache:
                 row["mobile_attention"] = self.attention_cache[key]
 
+    def send_outcome_supported(self):
+        gateway = getattr(self, 'send_outcome_gateway', None)
+        return getattr(self, 'send_outcome_abi', False) and (gateway is None or getattr(gateway, 'send_outcome_abi', False))
+
     def validate(self, request: dict) -> tuple[str, str, dict | None]:
         operation, session = request.get("operation"), request.get("session")
         if not isinstance(operation, str) or operation not in OPERATIONS:
             raise ConnectorError("unsupported operation")
+        if operation in send_outcome.OPERATIONS:
+            payload=request.get('payload')
+            computer=request.get('computer_id',request.get('gateway_route',{}).get('computer_id',payload.get('binding',{}).get('computer_id')))
+            try: send_outcome.validate(operation,payload,request['request_id'],computer,session)
+            except (ValueError,TypeError,KeyError): raise ConnectorError(send_outcome.MISMATCH) from None
+            if operation==send_outcome.SEND:
+                self.validate({**request,'operation':'send','payload':payload['payload']})
+            return operation,session,payload
         if operation in analytics.OPERATIONS:
             if session != "": raise ConnectorError("analytics reads use no session target")
             try: analytics.validate(request.get("payload"))
@@ -970,6 +992,10 @@ class Connector:
                 if (not isinstance(route,dict) or ("computer_id" in request and route.get("computer_id")!=request["computer_id"])
                         or not isinstance(request.get("payload"),dict) or route.get("machine_id")!=request["payload"].get("expected_machine_id")):
                     raise ConnectorError("project assignment computer does not match its immutable route")
+            if operation in send_outcome.OPERATIONS and 'gateway_route' in request:
+                route=request['gateway_route'];binding=request.get('payload',{}).get('binding',{})
+                if not isinstance(route,dict) or route.get('computer_id')!=binding.get('computer_id') or route.get('machine_id')!=binding.get('machine_id'):
+                    raise ConnectorError(send_outcome.MISMATCH)
             if operation == "directory_create" and "gateway_route" in request:
                 route = request["gateway_route"]
                 if (not isinstance(route, dict) or ("computer_id" in request
@@ -996,6 +1022,12 @@ class Connector:
         mutation_started = False
         try:
             operation, session, payload = await asyncio.to_thread(self.validate, request)
+            outcome_wrapper = payload if operation == send_outcome.SEND else None
+            outcome_read = operation == send_outcome.READ
+            if outcome_wrapper is not None or outcome_read:
+                if not self.send_outcome_supported(): raise ConnectorError(send_outcome.UNAVAILABLE)
+            if outcome_wrapper is not None:
+                operation, payload = 'send', outcome_wrapper['payload']
             if operation == "history_projection" and not self.history_projection_supported:
                 raise ConnectorError("native history projection ABI is unavailable")
             if operation == "clear_context" and "dismiss_prompt" in payload and not getattr(self, "clear_context_dismiss_supported", False):
@@ -1125,7 +1157,10 @@ class Connector:
                         or job["identity"][:2] != [payload["expected_run_id"],payload["expected_conversation_id"]]):
                     raise ConnectorError("native recovery job changed; refresh before action")
             mutation_started = operation in MUTATIONS
-            if operation == "catalog":
+            if outcome_read:
+                b=payload['binding']
+                result=send_outcome.project(payload,await self.native(['__state','delivery','receipt',b['session'],'--json'],send_outcome.query(payload),timeout=5,max_output_bytes=8192))
+            elif operation == "catalog":
                 try: result = project_catalog(await self.native(["account", "ls"], timeout=5))
                 except ValueError as error: raise ConnectorError(str(error)) from None
                 result["project_launch_supported"] = False
@@ -1386,7 +1421,18 @@ class Connector:
                 if "archive_id" in payload:
                     result["archive_id"] = payload["archive_id"]
             else:
-                result = await self.native([CONTEXT_COMMANDS.get(operation, "send-now" if operation == "send_now" else operation), session, "--json"], payload)
+                if outcome_wrapper is not None:
+                    b=outcome_wrapper['binding']
+                    encoding='compact' if LOCAL_MACHINE_GUARD.get() is not None or getattr(self,'send_outcome_gateway',None) is not None else 'python_default'
+                    if b['native_encoding']!=encoding: raise ConnectorError(send_outcome.MISMATCH)
+                    result=await self.native(['send',session,'--session-id',b['session_id'],'--delivery-outcome-v2','--json'],dict(sorted(payload.items())))
+                    if isinstance(result,dict) and result.get('status')=='not_offered':
+                        result=send_outcome.project(outcome_wrapper,result,True)
+                    else:
+                        answer=await self.native(['__state','delivery','receipt',b['session'],'--json'],send_outcome.query(outcome_wrapper),timeout=5,max_output_bytes=8192)
+                        result=send_outcome.project(outcome_wrapper,answer)
+                else:
+                    result = await self.native([CONTEXT_COMMANDS.get(operation, "send-now" if operation == "send_now" else operation), session, "--json"], payload)
                 if operation == "send" and "agent_id" in payload:
                     if (not isinstance(result, dict) or result.get("request_id") != request_id or result.get("name") != session
                             or result.get("run_id") != payload["expected_run_id"] or result.get("conversation_id") != payload["expected_conversation_id"]
@@ -1408,6 +1454,8 @@ class Connector:
             native_state = result["status"] if operation in LIFECYCLE_OPERATIONS or operation in {"terminal_input","recovery_action"} else "completed"
             response = {"state": "completed" if native_state in {"submitted","scheduled","cancelled"} else native_state,
                         "result": result, "error": result.get("error") if (operation in LIFECYCLE_OPERATIONS or operation in {"terminal_input","recovery_action"}) and result["status"] in {"failed", "uncertain"} else None}
+            if outcome_wrapper is not None:
+                response={'state':{'not_offered':'failed','submitted':'completed'}.get(result.get('status'),'uncertain'),'result':result,'error':None}
             if len(json.dumps(response).encode()) > MAX_RESULT:
                 raise ConnectorError("native result exceeds relay size limit")
             if isinstance(payload,dict) and "archive_id" in payload and response["state"]=="completed":

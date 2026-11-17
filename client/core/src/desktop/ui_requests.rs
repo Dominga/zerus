@@ -22,6 +22,9 @@ pub const LIFETIME: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
+    InputAcknowledge {
+        acknowledgment: Box<crate::input_acknowledgment::Acknowledgment>,
+    },
     WorktreeProgramStop {
         intent: Box<crate::worktree_programs::invocation::Intent>,
     },
@@ -48,6 +51,15 @@ pub enum Request {
     },
     DeferredAnswer {
         intent: Box<super::deferred_answer::Intent>,
+    },
+    TeamPersonDecide {
+        intent: Box<super::team_person::Intent>,
+    },
+    TeamPersonPlanPiece {
+        piece: Box<super::team_person_actions::Piece>,
+    },
+    TeamPersonAction {
+        intent: Box<super::team_person_actions::Intent>,
     },
     CompactToSend {
         intent: Box<super::compact_to_send::Intent>,
@@ -142,6 +154,7 @@ impl Request {
     }
     pub fn id(&self) -> &str {
         match self {
+            Self::InputAcknowledge { acknowledgment } => &acknowledgment.request_id,
             Self::WorktreeProgramStop { intent } => intent.request_id(),
             Self::WorktreeProgramCleanup { intent } => intent.request_id(),
             Self::CreationClone { intent } => &intent.clone_request_id,
@@ -151,6 +164,9 @@ impl Request {
             Self::TaskMessageInputRelease { release } => &release.release_id,
             Self::DeferredSend { intent } => &intent.request_id,
             Self::DeferredAnswer { intent } => &intent.request_id,
+            Self::TeamPersonDecide { intent } => &intent.plan.request_id,
+            Self::TeamPersonPlanPiece { piece } => &piece.request_id,
+            Self::TeamPersonAction { intent } => &intent.plan.request_id,
             Self::CompactToSend { intent } => &intent.request_id,
             Self::SessionResume { intent } => &intent.request_id,
             Self::TaskStartReconcile { intent } => &intent.reconcile_id,
@@ -169,6 +185,7 @@ impl Request {
     }
     pub fn operation(&self) -> &'static str {
         match self {
+            Self::InputAcknowledge { .. } => "input_acknowledge",
             Self::WorktreeProgramStop { .. } => "worktree_program_stop",
             Self::WorktreeProgramCleanup { .. } => "worktree_program_cleanup",
             Self::CreationClone { .. } => "creation_clone",
@@ -178,6 +195,9 @@ impl Request {
             Self::TaskMessageInputRelease { .. } => "task_message_input_release",
             Self::DeferredSend { .. } => "deferred_send",
             Self::DeferredAnswer { .. } => "deferred_answer",
+            Self::TeamPersonDecide { .. } => "team_person_decide",
+            Self::TeamPersonPlanPiece { .. } => "team_person_plan_piece",
+            Self::TeamPersonAction { .. } => "team_person_action",
             Self::CompactToSend { .. } => "compact_to_send",
             Self::SessionResume { .. } => "session_resume",
             Self::TaskStartReconcile { .. } => "task_start_reconcile",
@@ -196,6 +216,7 @@ impl Request {
     }
     fn valid(&self) -> bool {
         match self {
+            Self::InputAcknowledge { acknowledgment } => acknowledgment.valid(),
             Self::WorktreeProgramStop { intent } => intent.valid(),
             Self::WorktreeProgramCleanup { intent } => intent.valid(),
             Self::CreationClone { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -205,6 +226,9 @@ impl Request {
             Self::TaskMessageInputRelease { release } => release.valid(),
             Self::DeferredSend { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::DeferredAnswer { intent } => intent.as_ref().clone().verify().is_ok(),
+            Self::TeamPersonDecide { intent } => intent.valid(),
+            Self::TeamPersonPlanPiece { piece } => piece.valid(),
+            Self::TeamPersonAction { intent } => intent.valid(),
             Self::CompactToSend { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::SessionResume { intent } => intent.as_ref().clone().verify().is_ok(),
             Self::TaskStartReconcile { intent } => intent.as_ref().clone().verify().is_ok(),
@@ -391,6 +415,7 @@ impl Cache {
             envelope.request,
             Request::CacheMaintenance { .. }
                 | Request::DesktopOwnershipObserve { .. }
+                | Request::InputAcknowledge { .. }
                 | Request::CreationClone { .. }
                 | Request::CreationWorktree { .. }
                 | Request::CreationLaunch { .. }
@@ -398,6 +423,9 @@ impl Cache {
                 | Request::TaskMessageInputRelease { .. }
                 | Request::DeferredSend { .. }
                 | Request::DeferredAnswer { .. }
+                | Request::TeamPersonDecide { .. }
+                | Request::TeamPersonPlanPiece { .. }
+                | Request::TeamPersonAction { .. }
                 | Request::CompactToSend { .. }
                 | Request::SessionResume { .. }
                 | Request::TaskStartReconcile { .. }
@@ -521,6 +549,12 @@ impl Responder {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
         let mode = match &request {
+            Request::InputAcknowledge { .. } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service) {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
             Request::CacheMaintenance { .. } => {
                 let mode = self.ownership_mode.get().copied();
                 if mode != Some(super::ownership::Mode::Service) {
@@ -613,6 +647,30 @@ impl Responder {
             Request::DeferredAnswer { intent } => {
                 if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
                     || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TeamPersonDecide { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TeamPersonAction { intent } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&intent.scope.configuration)
+                {
+                    return Err(io::ErrorKind::PermissionDenied.into());
+                }
+                Some(super::ownership::Mode::Service)
+            }
+            Request::TeamPersonPlanPiece { piece } => {
+                if self.ownership_mode.get() != Some(&super::ownership::Mode::Service)
+                    || self.configuration.get() != Some(&piece.scope.configuration)
                 {
                     return Err(io::ErrorKind::PermissionDenied.into());
                 }
@@ -1721,6 +1779,32 @@ mod tests {
         let mut bad = serde_json::to_value(&value.request).unwrap();
         bad["confirmed"] = true.into();
         assert!(serde_json::from_value::<Request>(bad).is_err());
+    }
+
+    #[test]
+    fn input_acknowledgment_requires_cached_service_mode() {
+        use crate::desktop::ownership::Mode;
+        let mut envelope = envelope(1);
+        envelope.request = Request::InputAcknowledge {
+            acknowledgment: Box::new(crate::input_acknowledgment::Acknowledgment {
+                request_id: id(2),
+                name: "claude/example/review".into(),
+                expected_run_id: "run".into(),
+                expected_conversation_id: "conversation".into(),
+                original_request_id: id(3),
+                pending_at: 10.0,
+                terminal_binding_id: "a".repeat(64),
+                expires_at: 15.0,
+            }),
+        };
+        let cache = Cache::default();
+        assert!(cache.prepare(envelope.clone()).is_err());
+        assert!(cache
+            .prepare_with_mode(envelope.clone(), Some(Mode::Native))
+            .is_err());
+        assert!(cache
+            .prepare_with_mode(envelope, Some(Mode::Service))
+            .is_ok());
     }
 
     #[test]

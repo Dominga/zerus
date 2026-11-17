@@ -43,6 +43,9 @@ type FixtureRun = Box<dyn FnMut(&Config, &[String], Option<&[u8]>) -> Ended>;
 #[cfg(test)]
 std::thread_local! {
     pub(super) static FIXTURE_RUN: std::cell::RefCell<Option<FixtureRun>> = const { std::cell::RefCell::new(None) };
+    /// An admitted child body, after the parent's admission guard is released
+    /// as it is after spawn. Lets writer tests execute the real command body.
+    pub(super) static FIXTURE_SPAWN: std::cell::RefCell<Option<FixtureRun>> = const { std::cell::RefCell::new(None) };
     pub(super) static FIXTURE_EXIT: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
     /// The argv each fixture child was given, so a test can run what the
     /// service spawns through the real CLI.
@@ -78,6 +81,17 @@ pub(super) fn run_guarded<T>(
     stop: &AtomicBool,
     admit: impl FnOnce() -> super::ports::Result<T>,
 ) -> Ended {
+    #[cfg(test)]
+    if FIXTURE_SPAWN.with(|slot| slot.borrow().is_some()) {
+        let mut command = std::process::Command::new("fixture");
+        return match configure(config, &mut command, stop, admit) {
+            Ok(guard) => {
+                drop(guard);
+                FIXTURE_SPAWN.with(|slot| slot.borrow_mut().as_mut().expect("fixture child")(config, args, input))
+            }
+            Err(_) => Ended::NotStarted,
+        };
+    }
     #[cfg(test)]
     if FIXTURE_RUN.with(|slot| slot.borrow().is_some()) {
         let mut command = std::process::Command::new("fixture");
@@ -223,7 +237,7 @@ pub(super) fn admission(
     bound: bool,
 ) -> super::ports::Result<()> {
     use super::launch::invalid;
-    use zerus_team_plan::model::{MemberState, TeamStatus};
+    use zerus_team_plan::model::MemberState;
     let store = crate::teams::store::Store::open(&config.state)?;
     let team = store
         .team(&plan.team)?
@@ -234,12 +248,13 @@ pub(super) fn admission(
     let session = member.session.as_ref().is_some_and(|key| {
         key.machine == plan.machine && key.session_id == format!("launch_id:{}", plan.launch_id)
     });
-    if team.status != TeamStatus::Running
+    if !store.launch_allowed(&team, &plan.member)?
         || team.home != plan.machine
         || team.project != plan.project
         || team.owner != plan.person
         || member.role != plan.role
         || member.agent != plan.agent
+        || member.launch.as_ref().map_or(0, |l| l.generation) != plan.member_generation.unwrap_or(0)
         || if bound {
             member.state != MemberState::Active || !session
         } else {

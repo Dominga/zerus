@@ -9,8 +9,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use tauri::State;
-use zerus_client_core::tasks::{checked_scoped_page, scoped_page_call, PageScope};
+use tauri::{Manager, State};
+use zerus_client_core::tasks::{checked_queried_page, queried_page_call, PageScope};
 use zerus_client_core::{attachments, reads::CachedAttachment, task_details, tasks_write};
 
 #[derive(Clone, Default)]
@@ -201,6 +201,7 @@ pub async fn task_page(
     after: Option<String>,
     session: Option<String>,
     host: Option<String>,
+    query: Option<String>,
 ) -> Result<Value, String> {
     if crate::actions::blocked() {
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
@@ -208,16 +209,24 @@ pub async fn task_page(
     if session.is_none() && host.is_some() {
         return Err("Invalid task page request.".into());
     }
-    let call = scoped_page_call(
+    let call = queried_page_call(
         &project,
         &stage,
         limit,
         after.as_deref(),
         page_scope(&session, &host),
+        query.as_deref(),
     )?;
     tauri::async_runtime::spawn_blocking(move || {
         let reply = tasks_write::run(&zerus_client_core::default_hgs(), &call)?;
-        checked_scoped_page(&reply, &project, &stage, limit, page_scope(&session, &host))
+        checked_queried_page(
+            &reply,
+            &project,
+            &stage,
+            limit,
+            page_scope(&session, &host),
+            query.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -330,6 +339,8 @@ impl TaskWrites {
 #[tauri::command]
 pub async fn task_board_action(
     state: State<'_, TaskWrites>,
+    composers: State<'_, crate::composer::Composers>,
+    window: tauri::AppHandle,
     project: String,
     task: String,
     expected_stage: String,
@@ -339,8 +350,33 @@ pub async fn task_board_action(
         return Err(crate::screens::REPLAY_NEEDS_HGS.into());
     }
     let permit = state.begin()?;
+    // The native AppHandle selects these managed services; renderer input
+    // cannot provide a service, an action original or a Person admission.
+    let service = window
+        .try_state::<crate::commands::AppState>()
+        .ok_or_else(|| "The desktop app state is unavailable.".to_owned())?
+        .desktop_service();
+    let native_actions = window
+        .try_state::<crate::teams::Teams>()
+        .ok_or_else(|| "The native team action state is unavailable.".to_owned())?
+        .native_actions();
+    let composers = composers.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _permit = permit;
+        if let zerus_client_core::task_board::Action::SendToTeam { team } = &action {
+            return crate::task_team::run(
+                crate::task_team::Context {
+                    app: &window,
+                    service,
+                    actions: &native_actions,
+                    composers: &composers,
+                },
+                &project,
+                &task,
+                &expected_stage,
+                team,
+            );
+        }
         zerus_client_core::task_board::apply(&project, &task, &expected_stage, &action, |call| {
             tasks_write::run(&zerus_client_core::default_hgs(), call)
         })

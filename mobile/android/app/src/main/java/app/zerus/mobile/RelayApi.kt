@@ -167,12 +167,23 @@ class RelayApi internal constructor(private val client: OkHttpClient = OkHttpCli
         return withContext(Dispatchers.Default) { receipt.optJSONObject("result")?.let { SendReceiptRecovery.proof(id,intent,it) } }
     }
     /** One unchanged campaign budget covers the original receipt and its exact native fallback. */
-    suspend fun checkDelivery(connection:Connection,message:OutgoingMessage,intent:SendIntent?,limitMs:Long=45_000):SendReceiptCheck {
+    suspend fun checkDelivery(connection:Connection,message:OutgoingMessage,intent:SendIntent?,limitMs:Long=45_000,nativeOutcomeSupported:Boolean=false):SendReceiptCheck {
         require(limitMs in 1..45_000)
         val deadline=SendReceiptRecovery.nowMs()+limitMs
         return withTimeout(limitMs) {
             val original=try { await(connection,receipt(connection,message.requestId)) }
                 catch(e:CancellationException) { throw e } catch(_:Exception) { null }
+            if(message.nativeSendIntent!=null) {
+                val saved=message.nativeSendIntent
+                if(!saved.matches(message)) return@withTimeout SendReceiptCheck.Unconfirmed
+                original?.let { NativeSendOutcome.fromReceipt(message.requestId,saved,it) }?.let { return@withTimeout SendReceiptCheck.Outcome(it,deadline) }
+                if(!nativeOutcomeSupported || SendReceiptRecovery.nowMs()>=deadline) return@withTimeout SendReceiptCheck.Unconfirmed
+                val id=UUID.randomUUID().toString()
+                val initial=submit(connection,message.target,NativeSendOutcome.read,NativeSendOutcome.request(id,saved),id,SendAttempt())
+                val receipt=await(connection,initial,firstPollDelayMs=100)
+                val proof=NativeSendOutcome.fromReceipt(id,saved,receipt,lookup=true)
+                return@withTimeout if(proof==null || SendReceiptRecovery.nowMs()>=deadline) SendReceiptCheck.Unconfirmed else SendReceiptCheck.Outcome(proof,deadline)
+            }
             if(original?.string("state")=="failed") return@withTimeout SendReceiptCheck.Original(original,deadline)
             if(original?.string("state")=="completed" && original.optJSONObject("result")?.string("status") in listOf("submitted","queued")) {
                 if(!message.hasOriginalSendIdentity) return@withTimeout SendReceiptCheck.Original(original,deadline)

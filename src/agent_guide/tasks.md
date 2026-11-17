@@ -1,8 +1,9 @@
-Project tasks (hgs guide tasks)
+Tasks (hgs guide tasks)
 
-Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: task.
+Own session/project; REF: T-xxxxxx or PROJECT/T-xxxxxx; stdin text; --json: task.
 
   hgs task list [--stage review|active|todo|backlog|done]
+  hgs task list --stage S --limit 1..200 [--query TEXT] [--after CURSOR]
   hgs task get REF
   hgs task add [--backlog] [--position N] [--title TEXT [--request-id UUID]]
   hgs task add --start
@@ -22,27 +23,25 @@ Own session/project. REF: T-xxxxxx or PROJECT/T-xxxxxx; text: stdin; --json: tas
   hgs task cancel REF [--reason TEXT]
   hgs task cancel-attempt REF --attempt UUID   person only
 
-Add queues; --start/start records work, no resend. Only the person accepts Done.
-Use the prompt's one acknowledgement; begin-attempt replaces start for managed
-work once controls are active.
-Report with the original command; --progress updates.
-Keep its pinned attempt UUID, never a newer one.
-Legacy start prints a plain report command.
-History-only means saved, not moved; do not retry. Without a pinned command,
-ask the person to accept or resend. You cannot cancel your dispatched task;
-report or hand it off. Messages do not transfer ownership; submitted handoff does.
-An unknown delivery recovers without replay; else ask the person to abandon it.
+Add queues; --start/start records work, no resend. Only person accepts Done.
+Acknowledge once as prompted. Inactive: start; activated: begin-attempt replaces managed start.
+Report with pinned command/UUID; never get/start's latest ID.
+--progress updates. Legacy start prints report command without UUID.
+History-only: saved, not moved; no retry. No pinned command: ask person to accept/resend.
+Agents cannot cancel dispatched tasks: report/handoff. Only submitted handoff
+transfers ownership.
+Unknown delivery: recover, never replay. Unresolved: ask person to abandon that exact attempt.
 
-Plans create none; ask the parent for a child.
-Bind its live ID to the receipt. Parent reports; children never use its identity.
-Unknown launch: review, not retry.
+Plans launch none. Ask parent/Start dialog; bind live ID to receipt.
+Parent reports; children never use parent identity.
+Unknown launch: review, no retry. No task Pause.
 
-Edit: To do/Backlog. UUID replay keeps edits; changed input refuses.
-Files: --content-json. Read get first.
+Edit: To do/Backlog. Same UUID keeps edits; changed input refuses.
+Files: --content-json; get first.
 
-Discussion: hgs task message REF --request-id UUID --mode queue|send|reopen|note
+hgs task message REF --request-id UUID --mode queue|send|reopen|note
   --expect-dispatch ID --content-json
-Get supplies dispatch_id. Queue waits for Start; note saves. Reopen
-leaves Review/Done. Same UUID/mode/anchor/content looks up its
-receipt, never repeats input. Coordinator receipts prove no child ownership.
-Submitted is transport, not read; unknown stays unknown.
+Get: dispatch_id/executor. Queue waits for Start; note saves. Reopen leaves
+Review/Done after submission. Same UUID/mode/anchor/content: receipt lookup,
+never repeated input. Coordinator receipts prove no child ownership.
+Submitted: transport, not model-read; unknown stays unknown.

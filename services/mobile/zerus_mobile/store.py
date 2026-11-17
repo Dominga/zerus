@@ -115,6 +115,7 @@ class Store:
         self.db.execute("DROP INDEX IF EXISTS read_history_v2")
         self.db.execute("CREATE INDEX IF NOT EXISTS terminal_history_v2 ON requests(updated) WHERE operation='terminal_snapshot' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS archive_history ON requests(updated,id) WHERE operation='archive_list' AND state IN ('completed','failed','uncertain')")
+        self.db.execute("CREATE INDEX IF NOT EXISTS send_outcome_reads_v2 ON requests(updated,id) WHERE operation='send_outcome_receipt' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS history_projection_reads_v1 ON requests(updated,id) WHERE operation='history_projection' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS file_history ON requests(updated,id) WHERE operation='file_read' AND state IN ('completed','failed','uncertain')")
         self.db.execute("CREATE INDEX IF NOT EXISTS attachment_history ON requests(updated,id) WHERE operation='attachment_read' AND state IN ('completed','failed','uncertain')")
@@ -247,6 +248,7 @@ class Store:
                 self.db.execute(f"UPDATE requests SET state='uncertain',error='node result timeout after claim',result_bytes=length('node result timeout after claim'),reserved_bytes=0,updated=? WHERE id IN (SELECT id FROM requests WHERE state='claimed' AND claimed<=? ORDER BY claimed LIMIT {batch_size})", (now, now - claim_ttl))
             # Read-only inspections can expire; mutations keep indefinite UUID
             # tombstones so an old command can never execute a second time.
+            self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY send_outcome_reads_v2 WHERE operation='send_outcome_receipt' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now-min(retention,3600),))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY project_assignment_history_v1 WHERE operation='project_assignment' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated,id LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests INDEXED BY hook_health_history WHERE operation='hooks_status' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now-120,))
             self.db.execute(f"DELETE FROM requests WHERE id IN (SELECT id FROM requests WHERE operation IN {READ_SQL} AND operation!='terminal_snapshot' AND state IN ('completed','failed','uncertain') AND updated<? ORDER BY updated LIMIT {batch_size})", (now - min(retention, 3600),))
@@ -315,7 +317,7 @@ class Store:
             retained = usage["payload_bytes"]
             # Preserve a small control/text allowance when attachment traffic
             # occupies the main body budget. No uncertain request is evicted.
-            small = byte_count <= 64 * 1024 and not body.get("payload", {}).get("attachments")
+            small = byte_count <= 64 * 1024 and not (body.get("payload", {}).get("payload", {}) if body.get("operation")=="send_outcome" else body.get("payload", {})).get("attachments")
             if retained + byte_count + 1024*1024 > max_bytes + (1024 * 1024 if small else 0):
                 return 429, {"error": "workspace retained payload budget is full"}
             self.db.execute("INSERT INTO requests(id,workspace_id,device_id,node_id,operation,body_hash,body_bytes,body,state,created,updated,reserved_bytes,target_computer_id,target_machine_id,route_id) VALUES(?,?,?,?,?,?,?,?,'queued',?,?,1048576,?,?,?)", (body["request_id"], device["workspace_id"], device["id"], node["gateway_id"], body["operation"], digest(encoded), byte_count, encoded, now, now, node["id"], node["machine_id"], None if node["local"] else node["route_id"]))

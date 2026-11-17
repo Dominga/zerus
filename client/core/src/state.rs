@@ -51,7 +51,7 @@ pub struct ActivityState {
     /// The journal `seq` to resume after.
     pub cursor: i64,
     /// The latest `state` value with `event` frames merged into its
-    /// `provider_messages`.
+    /// `provider_messages` and display-only `user_message_bodies`.
     pub state: Option<Value>,
     /// The `rev` of the latest `state` frame.
     pub rev: u64,
@@ -98,8 +98,13 @@ fn at(value: &Value) -> f64 {
 }
 
 fn merge_provider_message(state: &mut Map<String, Value>, message: Value) -> bool {
+    let window = if field(&message, "type") == "UserMessageBody" {
+        "user_message_bodies"
+    } else {
+        "provider_messages"
+    };
     let entry = state
-        .entry("provider_messages")
+        .entry(window)
         .or_insert_with(|| Value::Array(Vec::new()));
     if !entry.is_array() {
         *entry = Value::Array(Vec::new());
@@ -2358,6 +2363,48 @@ mod tests {
             .iter()
             .map(|message| message["detail"].as_str().unwrap().to_owned())
             .collect()
+    }
+
+    #[test]
+    fn full_own_message_bodies_have_a_separate_bounded_stream_window() {
+        let mut activity = ActivityState::default();
+        activity.replace_state(
+            json!({"provider_messages":[message("AgentMessage","reply","Keep this reply",1.0)]}),
+            1,
+        );
+        for index in 0..120 {
+            let id = format!("body-{index}");
+            assert!(activity.merge_event(
+                &id,
+                1,
+                message(
+                    "UserMessageBody",
+                    &id,
+                    &format!("Full prompt {index}"),
+                    10.0 + index as f64
+                )
+            ));
+        }
+        assert_eq!(details(&activity), ["Keep this reply"]);
+        let bodies = activity.state.as_ref().unwrap()["user_message_bodies"]
+            .as_array()
+            .unwrap();
+        assert_eq!(bodies.len(), 100);
+        assert_eq!(bodies[0]["message_id"], "body-20");
+        assert!(!activity.merge_event(
+            "body-119",
+            1,
+            message("UserMessageBody", "body-119", "Stale", 130.0)
+        ));
+        assert!(activity.merge_event(
+            "body-119",
+            2,
+            message("UserMessageBody", "body-119", "Updated", 130.0)
+        ));
+        assert_eq!(
+            activity.state.as_ref().unwrap()["user_message_bodies"][99]["detail"],
+            "Updated"
+        );
     }
 
     #[test]

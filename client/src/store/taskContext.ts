@@ -11,7 +11,7 @@ export const projectSessions = createMemo(() => orderedRows().filter((s) => s.st
 export const findTaskSession = createMemo(() => taskSessions(projectSessions()));
 export const projectTasks = createMemo(() => tasks.project() === taskProject()?.id ? tasks.tasks().map((t) => projectTask(t, findTaskSession())) : []);
 /**
- * Only this session, as hgs pages it (zerus-cg5h.26): each stage's rows,
+ * The session filter or search, as hgs pages it: each stage's rows,
  * projected; undefined when the board filters its loaded rows instead. A To
  * do row keeps its place in the whole list when the window holds it, and has
  * none otherwise.

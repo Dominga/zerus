@@ -1080,12 +1080,26 @@ fn worker() -> Result<i32> {
     let mut keep_warm_at: Option<std::time::Instant> = None;
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     let (mut process_index_work, mut process_index_at) = (None, std::time::Instant::now());
+    let (mut listing_work, mut listing_at) = (None, std::time::Instant::now());
     loop {
         if replaced() || owner.yields() {
             return Ok(0);
         }
         if let Err(e) = tick() {
             eprintln!("hgs recovery: {e}");
+        }
+        if std::time::Instant::now() >= listing_at {
+            match super::listing_metadata::background_at(&root(), &mut listing_work) {
+                Ok(step) => {
+                    debug_assert!(step.entries <= 256 && step.bytes <= 16 << 20 && step.rows <= 128);
+                    listing_at = std::time::Instant::now()
+                        + Duration::from_secs(if step.done && step.complete { 60 } else { 2 });
+                }
+                Err(error) => {
+                    eprintln!("hgs advisory listing metadata: {error}");
+                    listing_at = std::time::Instant::now() + Duration::from_secs(15);
+                }
+            }
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         if std::time::Instant::now() >= process_index_at {

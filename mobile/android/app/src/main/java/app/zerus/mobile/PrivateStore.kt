@@ -3,10 +3,13 @@ package app.zerus.mobile
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.system.Os
+import android.system.OsConstants
 import android.util.Base64
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.KeyStore
+import java.io.File
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -17,6 +20,20 @@ class PrivateStore(context: Context) {
     private val notificationContext = context.applicationContext
     private val preferences = context.getSharedPreferences("zerus_private", Context.MODE_PRIVATE)
     internal val workspaceJournal by lazy { AndroidWorkspaceJournal(context.applicationContext) }
+    internal val taskEditDrafts by lazy {
+        val root = File(notificationContext.noBackupFilesDir, "task-edit-drafts-v1")
+        TaskEditDraftFiles(root, { key }, syncDirectory = {
+            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+        })
+    }
+    internal val taskContentDrafts by lazy {
+        val root = File(notificationContext.noBackupFilesDir, "task-content-drafts-v1")
+        TaskContentDraftFiles(root, { key }, syncDirectory = {
+            val descriptor = Os.open(root.absolutePath, OsConstants.O_RDONLY, 0)
+            try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+        })
+    }
     companion object { private val keyCreationLock=Any(); internal val notificationLock=Any(); private val pushLock=Any() }
     private val key: SecretKey by lazy { synchronized(keyCreationLock) {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

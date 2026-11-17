@@ -1,0 +1,866 @@
+{
+  "schema": 2,
+  "vectors": [
+    {
+      "name": "compact-text",
+      "send": {
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome",
+        "payload": {
+          "schema": 2,
+          "request_id": "22222222-2222-4222-8222-222222222222",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "compact",
+            "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+          },
+          "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109",
+          "payload": {
+            "request_id": "22222222-2222-4222-8222-222222222222",
+            "text": " e\u0301\nkept ",
+            "expected_run_id": "run",
+            "expected_conversation_id": "conversation",
+            "attachments": []
+          }
+        }
+      },
+      "negative": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "not_sent": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+        },
+        "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read": {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome_receipt",
+        "payload": {
+          "schema": 2,
+          "request_id": "11111111-1111-4111-8111-111111111111",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "compact",
+            "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+          },
+          "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109"
+        }
+      },
+      "read_negative": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "read_not_sent": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+        },
+        "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read_positive": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": "",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_submitted": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+        },
+        "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc",
+        "status": "unknown",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc"
+        },
+        "binding_sha256": "273572fda3e02f799efa6fe1b6484a3754baaebe0d943dcc2399a298ce476109",
+        "status": "unknown"
+      }
+    },
+    {
+      "name": "compact-attachment",
+      "send": {
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome",
+        "payload": {
+          "schema": 2,
+          "request_id": "22222222-2222-4222-8222-222222222222",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "compact",
+            "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+          },
+          "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040",
+          "payload": {
+            "request_id": "22222222-2222-4222-8222-222222222222",
+            "text": " e\u0301\nkept ",
+            "expected_run_id": "run",
+            "expected_conversation_id": "conversation",
+            "attachments": [
+              {
+                "name": "note.txt",
+                "mime": "text/plain",
+                "data_base64": "aGVsbG8="
+              }
+            ]
+          }
+        }
+      },
+      "negative": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "not_sent": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+        },
+        "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read": {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome_receipt",
+        "payload": {
+          "schema": 2,
+          "request_id": "11111111-1111-4111-8111-111111111111",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "compact",
+            "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+          },
+          "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040"
+        }
+      },
+      "read_negative": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "read_not_sent": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+        },
+        "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read_positive": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": "",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_submitted": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+        },
+        "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e",
+        "status": "unknown",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "compact",
+          "native_digest": "9e0d2524e17e6877201c00c329cec21975ae9f4bd2d8f5a955a3d5a2dc582d2e"
+        },
+        "binding_sha256": "83678858c26ed59d4892fef5a943995d861977a0094f8dcefa763724439a3040",
+        "status": "unknown"
+      }
+    },
+    {
+      "name": "python_default-text",
+      "send": {
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome",
+        "payload": {
+          "schema": 2,
+          "request_id": "22222222-2222-4222-8222-222222222222",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "python_default",
+            "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+          },
+          "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56",
+          "payload": {
+            "request_id": "22222222-2222-4222-8222-222222222222",
+            "text": " e\u0301\nkept ",
+            "expected_run_id": "run",
+            "expected_conversation_id": "conversation",
+            "attachments": []
+          }
+        }
+      },
+      "negative": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "not_sent": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+        },
+        "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read": {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome_receipt",
+        "payload": {
+          "schema": 2,
+          "request_id": "11111111-1111-4111-8111-111111111111",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "python_default",
+            "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+          },
+          "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56"
+        }
+      },
+      "read_negative": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "read_not_sent": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+        },
+        "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read_positive": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": "",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_submitted": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+        },
+        "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8",
+        "status": "unknown",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "bf71e3457737a71624207234bd8f40b703676f575ae6e6171b08386024111fd8"
+        },
+        "binding_sha256": "643bff77baafc43f41aa5bdcd6e6ce0c981f98d05c42a27efe5580e20a056e56",
+        "status": "unknown"
+      }
+    },
+    {
+      "name": "python_default-attachment",
+      "send": {
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome",
+        "payload": {
+          "schema": 2,
+          "request_id": "22222222-2222-4222-8222-222222222222",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "python_default",
+            "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+          },
+          "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9",
+          "payload": {
+            "request_id": "22222222-2222-4222-8222-222222222222",
+            "text": " e\u0301\nkept ",
+            "expected_run_id": "run",
+            "expected_conversation_id": "conversation",
+            "attachments": [
+              {
+                "name": "note.txt",
+                "mime": "text/plain",
+                "data_base64": "aGVsbG8="
+              }
+            ]
+          }
+        }
+      },
+      "negative": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "not_sent": {
+        "schema": 2,
+        "request_id": "22222222-2222-4222-8222-222222222222",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+        },
+        "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read": {
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "computer_id": "fixture",
+        "session": "codex/example/send",
+        "operation": "send_outcome_receipt",
+        "payload": {
+          "schema": 2,
+          "request_id": "11111111-1111-4111-8111-111111111111",
+          "binding": {
+            "schema": 2,
+            "message_request_id": "22222222-2222-4222-8222-222222222222",
+            "computer_id": "fixture",
+            "machine_id": "33333333-3333-4333-8333-333333333333",
+            "session_id": "44444444-4444-4444-8444-444444444444",
+            "session": "codex/example/send",
+            "provider": "codex",
+            "run_id": "run",
+            "conversation_id": "conversation",
+            "native_encoding": "python_default",
+            "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+          },
+          "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9"
+        }
+      },
+      "read_negative": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "read_not_sent": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+        },
+        "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9",
+        "status": "not_offered",
+        "proof": "native_input_lock",
+        "reason": "terminal has a draft"
+      },
+      "read_positive": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": "",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_submitted": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+        },
+        "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9",
+        "status": "submitted",
+        "proof": "original_receipt",
+        "submitted_at": 1700000000.0,
+        "queued": false
+      },
+      "read_unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "name": "codex/example/send",
+        "machine_id": "33333333-3333-4333-8333-333333333333",
+        "session_id": "44444444-4444-4444-8444-444444444444",
+        "provider": "codex",
+        "run_id": "run",
+        "conversation_id": "conversation",
+        "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d",
+        "status": "unknown",
+        "reason": "terminal has a draft",
+        "message_request_id": "22222222-2222-4222-8222-222222222222",
+        "agent_id": ""
+      },
+      "unknown": {
+        "schema": 2,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "binding": {
+          "schema": 2,
+          "message_request_id": "22222222-2222-4222-8222-222222222222",
+          "computer_id": "fixture",
+          "machine_id": "33333333-3333-4333-8333-333333333333",
+          "session_id": "44444444-4444-4444-8444-444444444444",
+          "session": "codex/example/send",
+          "provider": "codex",
+          "run_id": "run",
+          "conversation_id": "conversation",
+          "native_encoding": "python_default",
+          "native_digest": "d90b2053290475371d5c136f0f0e82634fb0f81a8183aecfa2f5d9a442b27a6d"
+        },
+        "binding_sha256": "408f099804078562563ae722be0d9ed166106f2fcf5983c7c01f314747f1a3e9",
+        "status": "unknown"
+      }
+    }
+  ],
+  "native_frames": [
+    {
+      "name": "submitted",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false}",
+      "frame_accepted": true
+    },
+    {
+      "name": "submitted-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false,\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "unknown",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"unknown\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\"}",
+      "frame_accepted": true
+    },
+    {
+      "name": "unknown-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"unknown\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "not-offered",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"not_offered\",\"proof\":\"native_input_lock\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\"}",
+      "frame_accepted": true
+    },
+    {
+      "name": "not-offered-unknown-field",
+      "json": "{\"schema\":2,\"request_id\":\"11111111-1111-4111-8111-111111111111\",\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"not_offered\",\"proof\":\"native_input_lock\",\"reason\":\"terminal has a draft\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"unreviewed_extension\":true}",
+      "frame_accepted": false
+    },
+    {
+      "name": "submitted-missing-required-field",
+      "json": "{\"schema\":2,\"name\":\"codex/example/send\",\"machine_id\":\"33333333-3333-4333-8333-333333333333\",\"session_id\":\"44444444-4444-4444-8444-444444444444\",\"provider\":\"codex\",\"run_id\":\"run\",\"conversation_id\":\"conversation\",\"native_digest\":\"000a79cf5c553c38bf439b46d3db33f07cc936aaa73333ef23337e4551643bfc\",\"status\":\"submitted\",\"proof\":\"original_receipt\",\"message_request_id\":\"22222222-2222-4222-8222-222222222222\",\"agent_id\":\"\",\"submitted_at\":1700000000.0,\"queued\":false}",
+      "frame_accepted": false
+    }
+  ]
+}

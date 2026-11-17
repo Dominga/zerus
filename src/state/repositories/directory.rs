@@ -24,6 +24,11 @@ thread_local! { static SYNC_FAILURE: std::cell::RefCell<Option<PathBuf>> = const
 // Its callers are the fence probe (Linux) and the task refusal tests (Unix).
 #[cfg(all(test, unix))]
 pub(in crate::state) fn fail_publication_sync(path: Option<PathBuf>) {
+    // Fixtures can use macOS's /var or /tmp aliases; Directory holds canonical paths.
+    // An absent boundary is a fixture error, never a silently unarmed fault.
+    let path = path.map(|path| {
+        crate::platform::canonical(path).expect("fixture sync directory must already exist")
+    });
     SYNC_FAILURE.with(|slot| *slot.borrow_mut() = path);
 }
 
@@ -380,7 +385,16 @@ impl Directory {
     /// The same publication, retaining the exact file created by this call.
     /// A later pathname open cannot stand in for that original object.
     pub fn write_new_file(&self, name: &str, bytes: &[u8]) -> Result<File> {
-        self.publish_file(name, bytes, false)
+        self.publish_file(name, bytes, false, None)
+    }
+
+    pub(in crate::state) fn write_new_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        self.publish_file(name, bytes, false, Some(observe))
     }
 
     /// Replace metadata under caller-held exclusion, through this original
@@ -389,10 +403,25 @@ impl Directory {
         self.replace_file_retained(name, bytes).map(drop)
     }
     pub(in crate::state) fn replace_file_retained(&self, name: &str, bytes: &[u8]) -> Result<File> {
-        self.publish_file(name, bytes, true)
+        self.publish_file(name, bytes, true, None)
     }
 
-    fn publish_file(&self, name: &str, bytes: &[u8], replace: bool) -> Result<File> {
+    pub(in crate::state) fn replace_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        self.publish_file(name, bytes, true, Some(observe))
+    }
+
+    fn publish_file(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        replace: bool,
+        observe: Option<&mut dyn FnMut(&File)>,
+    ) -> Result<File> {
         use std::io::Write;
         use std::os::fd::{AsRawFd, FromRawFd};
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
@@ -422,6 +451,9 @@ impl Directory {
             .write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|e| e.to_string());
+        if let (true, Some(observe)) = (written.is_ok(), observe) {
+            observe(&file);
+        }
         #[cfg(target_os = "linux")]
         let rc = written.as_ref().map_or(-1, |_| unsafe {
             libc::renameat2(dir, staging.as_ptr(), dir, to.as_ptr(), if replace { 0 } else { libc::RENAME_NOREPLACE })
@@ -542,6 +574,18 @@ impl Directory {
         self.publish_file(name, bytes, false)
     }
 
+    pub(in crate::state) fn write_new_file_observed(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        _observe: &mut dyn FnMut(&File),
+    ) -> Result<File> {
+        // Keep the existing Windows handle-sharing/lifetime contract. Until
+        // pre-publication observation is supported here, advisory repair must
+        // read the canonical bytes; a pathname stamp is never a substitute.
+        self.write_new_file(name, bytes)
+    }
+
     /// Replace metadata under caller-held exclusion, through this original
     /// directory. This does not establish any action or consent authority.
     pub(in crate::state) fn replace_file(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -653,6 +697,34 @@ impl Directory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_sync_fault_matches_a_private_directory_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = crate::platform::canonical(temp.path()).unwrap();
+        std::fs::create_dir(path.join("original")).unwrap();
+        std::fs::create_dir(path.join("unrelated")).unwrap();
+        std::os::unix::fs::symlink(path.join("original"), path.join("alias")).unwrap();
+        let original = Directory::open(&path.join("original")).unwrap();
+        let unrelated = Directory::open(&path.join("unrelated")).unwrap();
+
+        fail_publication_sync(Some(path.join("alias")));
+        let other = unrelated.write_new("other", b"unrelated");
+        let published = original.write_new("receipt", b"visible but unconfirmed");
+        let synced = original.sync();
+        fail_publication_sync(None);
+
+        other.unwrap();
+        assert_eq!(published.unwrap_err(), "fixture directory sync failure");
+        assert_eq!(synced.unwrap_err(), "fixture directory sync failure");
+        assert_eq!(
+            std::fs::read(path.join("original/receipt")).unwrap(),
+            b"visible but unconfirmed"
+        );
+        original.sync().unwrap();
+        original.write_new("after", b"confirmed").unwrap();
+    }
 
     #[test]
     fn existing_destination_is_never_replaced() {

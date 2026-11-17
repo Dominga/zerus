@@ -166,9 +166,10 @@ impl Runtime {
             }
             let hold: Hold =
                 serde_json::from_value(row.data.clone()).map_err(crate::teams::store::storage)?;
-            if store
-                .task_observation(&team.id, hold.node)?
-                .is_some_and(|o| o.stage == ops::TaskStage::Done || o.key != ops::KeyState::Ours)
+            if !store.node_live(&team.id, hold.node)?
+                || store
+                    .task_observation(&team.id, hold.node)?
+                    .is_some_and(|o| o.stage == ops::TaskStage::Done || o.key != ops::KeyState::Ours)
             {
                 self.recovered(store, team, &format!("finish_refused:{}", hold.node), now)?;
                 self.ledger.remove(&row)?;

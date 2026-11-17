@@ -33,7 +33,9 @@ pub struct Reported {
     pub dirty: bool,
 }
 
+mod base;
 mod member_refs;
+pub(crate) use base::{main_refs, validate_base_advance};
 #[cfg(any(test, target_os = "linux", target_os = "macos"))]
 pub use member_refs::member_branch_available;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -373,6 +375,9 @@ fn merge_git<T>(
         #[cfg(unix)]
         Some(turn),
     );
+    // The admission and every lock it holds (the store's writer fence, and
+    // for a team merge the accepted task's project lock) end only after
+    // update-ref has returned, within the ref deadline.
     drop(admission);
     let output = output?;
     if output.status.success() {

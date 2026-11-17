@@ -94,6 +94,8 @@ impl Native<'_> {
         super::super::policy::stored(b, &facts)?;
         let delegated = if plan.kind == Kind::Trust {
             facts.team.settings.delegations.confirm_trust
+        } else if plan.kind == Kind::Brief {
+            super::super::policy::brief_granted(plan, &facts)
         } else {
             facts.team.settings.delegations.resume_exited
         };
@@ -164,10 +166,16 @@ fn admission(db: &Connection) -> std::io::Result<Transaction<'_>> {
 }
 fn stored_facts(db: &Connection, b: &Binding) -> Result<Facts> {
     use crate::teams::store::rows;
+    crate::teams::store::execution_fence(db).map_err(|e| e.to_string())?;
+    let team = rows::team(db, &b.team)
+        .map_err(|e| e.to_string())?
+        .ok_or("Team disappeared")?;
+    let planning_paused = team.status == zerus_team_plan::model::TeamStatus::Planning
+        && crate::teams::store::planning::paused(db, &b.team).map_err(|e| e.to_string())?
+            != Some(false);
     Ok(Facts {
-        team: rows::team(db, &b.team)
-            .map_err(|e| e.to_string())?
-            .ok_or("Team disappeared")?,
+        team,
+        planning_paused,
         member: rows::member(db, &b.team, &b.member)
             .map_err(|e| e.to_string())?
             .ok_or("Member disappeared")?,

@@ -89,6 +89,8 @@ export interface ListInput {
   nestKey?: (s: Session) => string | undefined;
   /** A parent whose child sessions are collapsed. */
   teamCollapsed?: (key: string) => boolean;
+  /** Favorites bypass ancestor collapse, then use their own child toggle, after every ordinary filter. */
+  favorite?: (s: Session) => boolean;
   /** The Teams team a row belongs to, when its computer's team list is loaded. */
   teamOf?: (s: Session) => TeamSummary | undefined;
   /** Whether this Teams team's members are folded under their lead (workspace/collapsedTeams). */
@@ -234,7 +236,7 @@ export function groupRows(input: ListInput): Row[] {
     membersOf.set(team, shown);
     for (const member of shown) nested.add(member.key);
   }
-  const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}) => {
+  const card = (s: Session, extra: Partial<Extract<Row, { type: "card" }>> = {}, showChildren = true) => {
       const current = currentChildren(s, input.online(s));
       const roster = input.children === false ? [] : (input.roster?.(s) ?? s.subagents ?? []);
       const kids = roster.filter((child) =>
@@ -247,15 +249,16 @@ export function groupRows(input: ListInput): Row[] {
       // sessions (owner, 2026-11-07, zerus-sa9qn.16): the toggle shows or
       // hides both, and is remembered across relaunches (zerus-sa9qn.15).
       const team = withSubagents(extra.team, kids, !!input.teamCollapsed?.(s.key));
-      const expanded = kids.length > 0 && !team?.collapsed;
+      const expanded = showChildren && kids.length > 0 && !team?.collapsed;
       const changed = kids.length !== roster.length || kids.some((child, index) => child !== roster[index]);
       const shown = changed ? { ...s, subagents: kids } : s;
       const summary = teamFor.get(s.key);
       const teamMembers = summary && leadOf.get(summary.id)?.key === s.key ? membersOf.get(summary.id) ?? [] : [];
       const isLead = !!summary && leadOf.get(summary.id)?.key === s.key;
       const membersShown = isLead && teamMembers.length > 0 && !(input.teamFolded?.(summary!.id) ?? false);
-      out.push({ type: "card", id: s.key, session: shown, expandable: isLead && teamMembers.length > 0, expanded: expanded || membersShown, compactRow: input.compact(s.key), ...extra, team,
-                 teamSummary: isLead ? summary : undefined, teamMembersShown: isLead ? teamMembers.length : undefined });
+      const row: Extract<Row, { type: "card" }> = { type: "card", id: s.key, session: shown, expandable: isLead && teamMembers.length > 0, expanded: expanded || membersShown, compactRow: input.compact(s.key), ...extra, team,
+                 teamSummary: isLead ? summary : undefined, teamMembersShown: isLead ? teamMembers.length : undefined };
+      out.push(row);
       if (expanded) kids.forEach((child, i) => out.push({ type: "child", id: `${s.key}/${child.id}`, parent: shown, child, first: i === 0, last: i === kids.length - 1 }));
       if (membersShown) {
         teamMembers.forEach((member, i) => out.push({
@@ -263,6 +266,7 @@ export function groupRows(input: ListInput): Row[] {
           compactRow: false, depth: (extra.depth ?? 0) + 1, teamFirst: i === 0, teamLast: i === teamMembers.length - 1,
         }));
       }
+      return row;
   };
   // One project group's visible cards in rank order, child sessions nested
   // under a parent shown in the same list. Only a real dependence nests
@@ -270,7 +274,7 @@ export function groupRows(input: ListInput): Row[] {
   // card and only names who started it. Nesting never hides a row: a loop
   // or a parent elsewhere leaves the card at top level. A Teams member
   // listed under its lead is not a card of its own.
-  const cards = (members: readonly Session[], project = "", all: readonly Session[] = members) => {
+  const cards = (members: readonly Session[], project = "", all: readonly Session[] = members, favoritesOnly = false) => {
     const listed = members.filter((s) => !nested.has(s.key));
     const resolved = input.containers ? withContainers(listed, all, input) : undefined;
     const list = resolved?.ordered ?? listed;
@@ -286,6 +290,7 @@ export function groupRows(input: ListInput): Row[] {
     }
     if (!parentOf.size) {
       for (const s of list) {
+        if (favoritesOnly && !input.favorite?.(s)) continue;
         const from = s.parent && input.parentKey ? input.parentKey(s) : undefined;
         card(s, s.parent ? { fromParent: { name: s.parent.name, key: from } } : {});
       }
@@ -348,21 +353,47 @@ export function groupRows(input: ListInput): Row[] {
       sum.needsYou += (!s.muted && (asks ? !s.quiet : !s.quiet && needsAttention(s, up)) ? 1 : 0) + (below?.needsYou ?? 0);
       teams.set(parent, sum);
     }
+    // Retain only favorite paths through collapsed ancestors, in one reverse
+    // pass. Counts still cover the ordinary filtered hierarchy above.
+    const retained = new Set<string>();
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const { s, parent } = nodes[i];
+      if (input.favorite?.(s) || retained.has(s.key)) {
+        retained.add(s.key);
+        if (parent) retained.add(parent);
+      }
+    }
     const hidden = new Set<string>();
+    // A connector ends at the last *shown* sibling, even when later siblings
+    // stayed collapsed. The previous sibling's row is still local to this pass.
+    const lastShown = new Map<string, Extract<Row, { type: "card" | "container" }>>();
+    const connect = (row: Extract<Row, { type: "card" | "container" }>, parent?: string) => {
+      if (!parent) return;
+      const previous = lastShown.get(parent);
+      if (previous) previous.lastChild = false;
+      row.lastChild = true;
+      lastShown.set(parent, row);
+    };
     for (const { s, depth, parent, last } of nodes) {
-      // Hidden with a collapsed parent; never promoted to top level.
-      if (parent && hidden.has(parent)) { hidden.add(s.key); continue; }
+      // Hidden with a collapsed parent, unless it is a favorite or leads to one.
+      const onlyFavorites = parent ? hidden.has(parent) : favoritesOnly;
+      const isFavorite = !!input.favorite?.(s);
+      if (onlyFavorites) {
+        if (!isFavorite) hidden.add(s.key);
+        if (!retained.has(s.key)) continue;
+      }
       const counts = teams.get(s.key);
       const collapsed = !!counts && !!input.teamCollapsed?.(s.key);
       if (collapsed) hidden.add(s.key);
       const from = !parent && s.parent ? { fromParent: { name: s.parent.name, key: input.parentKey?.(s) } } : {};
       const container = containers?.get(s.key);
       if (container) {
-        out.push({ type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
-                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
+        const row: Extract<Row, { type: "container" }> = { type: "container", id: `container:${s.key}`, project, container, depth, parentKey: parent,
+                   lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from };
+        out.push(row); connect(row, parent);
         continue;
       }
-      card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from });
+      connect(card(s, { depth, parentKey: parent, lastChild: parent ? last : undefined, team: counts && { ...counts, collapsed }, ...from }, !onlyFavorites || isFavorite), parent);
     }
   };
   const headers = input.grouping.loaded ? input.grouping.headers : [];
@@ -392,7 +423,8 @@ export function groupRows(input: ListInput): Row[] {
     }
     out.push({ type: "header", id: `h:${h.id}`, project: h.id, name: h.name, color: h.color, palette: h.palette,
                collapsed: h.collapsed, total: list.length, attention, unread, working });
-    if (!h.collapsed) cards(list, h.id, all);
+    // A collapsed project still lists its favorites (and the paths to them).
+    cards(list, h.id, all, h.collapsed);
   }
   return out;
 }

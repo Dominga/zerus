@@ -199,9 +199,149 @@ pub enum CancelState {
     Released,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationProblemKind {
+    Refused,
+    Uncertain,
+    Deferred,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    SetPhaseBarrier {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        barrier: bool,
+    },
+    PausePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+        reason: String,
+    },
+    ResumePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        pause: Option<String>,
+    },
+    MovePhase {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        relative_to: zerus_team_plan::phase_control::PhaseControlScope,
+        placement: zerus_team_plan::phase_control::PhasePlacement,
+    },
+    SetPhaseAcceptance {
+        scope: zerus_team_plan::phase_control::PhaseControlScope,
+        acceptance: Acceptance,
+    },
+    RecordTimingFact {
+        node: u32,
+        observation: Box<super::observed_timing::TimingInput>,
+    },
+    SendBackPhase {
+        phase: u32,
+        publication: String,
+        comment: String,
+    },
+    SubmitPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    ApprovePhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
+    RejectPhaseCorrections {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        comment: String,
+    },
+    UndoPhaseCorrectionRejection {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+        rejection: String,
+    },
+    ReconcileCorrectionReview {
+        phase: u32,
+        publication: String,
+        rework: String,
+        generation: u64,
+    },
+    ReconcilePhaseReview {
+        phase: u32,
+        generation: u64,
+    },
+    ApprovePhase {
+        phase: u32,
+        generation: u64,
+        #[serde(default)]
+        confirm_initial: bool,
+    },
+    RejectPhase {
+        phase: u32,
+        generation: u64,
+        comment: String,
+    },
+    UndoRejectPhase {
+        phase: u32,
+        generation: u64,
+        rejection: String,
+    },
+    ReconcilePublication {
+        phase: u32,
+        publication: String,
+    },
+    PublicationTaskProblem {
+        publication: String,
+        node: u32,
+        reason: String,
+        kind: PublicationProblemKind,
+        #[serde(default)]
+        clear: bool,
+    },
+    ReconcilePhase {
+        phase: u32,
+        publication: String,
+    },
+    AcceptPhase {
+        phase: u32,
+        publication: String,
+    },
+    SubmitDraftPhase {
+        phase: u32,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    EditDraftPhase {
+        phase: u32,
+        generation: u64,
+        draft: zerus_team_plan::draft::DraftInput,
+    },
+    StartPlanning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_template: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegations: Option<Delegations>,
+        project: String,
+        name: String,
+        goal: String,
+        home: String,
+        bundle: Box<TemplateBundle>,
+        integration_branch: String,
+        base_commit: String,
+    },
     Create {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_template: Option<String>,
@@ -214,6 +354,32 @@ pub enum Operation {
         bundle: Box<TemplateBundle>,
         integration_branch: String,
         base_commit: String,
+    },
+    AddMember {
+        role: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    SwapMember {
+        member: String,
+        agent: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        effort: String,
+        #[serde(default)]
+        account: zerus_team_plan::catalog::AccountChoice,
+    },
+    RenameTeam {
+        name: String,
+    },
+    SetGoal {
+        goal: String,
     },
     SetMemberSession {
         member: String,
@@ -238,6 +404,10 @@ pub enum Operation {
     Resume,
     Stop,
     Archive,
+    /// Person-only: advance the default for future hand-outs, without a Git write.
+    AdvanceBase {
+        commit: String,
+    },
     PauseMember {
         member: String,
     },
@@ -270,6 +440,12 @@ pub enum Operation {
         writes: Vec<String>,
         #[serde(default)]
         assignee: Option<MemberId>,
+    },
+    /// The person edits dependencies before the first attempt or delivery
+    /// reservation, without changing routing or assignment.
+    SetDeps {
+        node: NodeId,
+        deps: Vec<Dep>,
     },
     Hold {
         node: NodeId,
@@ -388,6 +564,9 @@ pub enum Operation {
         card: u64,
         decision: String,
     },
+    SetValidationConfig {
+        selection: zerus_team_plan::validation::Selection,
+    },
     ChangeSettings {
         settings: Settings,
     },
@@ -440,6 +619,8 @@ pub enum Operation {
     /// lead, as at the stage's creation. A call that finds nothing to change is
     /// refused with `unstaffed_unchanged`.
     ReconcileUnstaffed,
+    /// Recompute the two aggregate waiting-queue inbox episodes. Service only.
+    ReconcileLeadQueue,
     /// The service saw unended unstaffed items older than their node's
     /// newest one: stale items an earlier layout left, which stand for no
     /// episode. It ends at most a page of them, oldest first, in its own
@@ -538,6 +719,8 @@ impl<'de> Deserialize<'de> for Request {
 pub struct Reply {
     pub ok: bool,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node: Option<NodeId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

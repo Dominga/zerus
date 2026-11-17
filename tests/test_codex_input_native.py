@@ -54,6 +54,189 @@ class NativeCodexInput(unittest.TestCase):
     def screen(self):
         return self.tmux('capture-pane', '-p', '-t', self.pane)
 
+    def prepare_native_hooks(self):
+        if self._testMethodName != 'test_native_five_second_hook_timeout_keeps_acceptance_under_contention':
+            return
+        import shlex
+        # Model two seconds of scheduling/startup delay before the real hook.
+        # A held SQLite writer adds its real three-second busy wait. The native
+        # five-second hook budget then expires; acceptance must already survive.
+        wrapper = self.root / 'delayed-hook.py'
+        wrapper.write_text('import subprocess,time\nfrom pathlib import Path\ntime.sleep(2)\n'
+                           + 'child=subprocess.Popen(' + repr([str(test_input.HGS),'__state','hook']) + ')\n'
+                           + 'Path(' + repr(str(self.root/'hook-child-pid')) + ').write_text(str(child.pid))\n'
+                           + 'raise SystemExit(child.wait())\n')
+        env = dict(HGS_SESSION=self.name,HGS_RUN_ID=self.run_id,HGS_STATE_DIR=str(self.state),
+                   HGS_CONFIG_DIR=str(self.root/'config'),PATH=self.env['PATH'])
+        command = 'env ' + ' '.join(shlex.quote(k+'='+v) for k,v in env.items()) + ' python3 ' + shlex.quote(str(wrapper))
+        (self.native_home/'hooks.json').write_text(json.dumps(dict(hooks=dict(UserPromptSubmit=[dict(hooks=[
+            dict(type='command',command=command,timeout=5)])]))))
+
+    def test_native_five_second_hook_timeout_keeps_acceptance_under_contention(self):
+        import sqlite3
+        inspected = subprocess.run([str(test_input.HGS),'inspect',self.name],env=self.env,capture_output=True,text=True,timeout=15)
+        self.assertEqual(inspected.returncode,0,inspected.stderr)
+        db=sqlite3.connect(self.state/'events.sqlite3'); db.execute('BEGIN IMMEDIATE')
+        started=time.monotonic()
+        try:
+            receipt=self.send(self.payload(text='Native timed hook fixture'))
+            deadline=started+4
+            while time.monotonic()<deadline:
+                record=json.loads(self.record_path.read_text())
+                if record.get('input_seen_at',0)>=receipt['submitted_at']: break
+                time.sleep(.02)
+            self.assertGreaterEqual(record.get('input_seen_at',0),receipt['submitted_at'])
+            accepted=time.monotonic()-started
+            # Keep contention until the provider has moved past its timeout.
+            self.wait_for(lambda:'Fixture turn complete.' in self.screen())
+            elapsed=time.monotonic()-started
+            self.assertGreater(elapsed,4.5)
+            print('ZERUS_NATIVE_HOOK_TIMEOUT='+json.dumps(dict(version=self.native_version,
+                accepted_ms=round(accepted*1000),model_completed_ms=round(elapsed*1000))),flush=True)
+        finally:
+            db.rollback(); db.close()
+            pid_path=self.root/'hook-child-pid'
+            if pid_path.exists():
+                pid=pid_path.read_text().strip()
+                def ended():
+                    state=subprocess.run(['ps','-p',pid,'-o','stat='],capture_output=True,text=True,timeout=5).stdout.strip()
+                    return not state or state.startswith(('Z','X'))
+                self.wait_for(ended)
+
+    def test_consumed_input_without_hook_is_reconciled_from_exact_native_user_row(self):
+        text = 'Exact hookless Codex fixture input ' + str(uuid.uuid4())
+        payload = self.payload(text=text)
+        receipt = self.send(payload)
+        self.wait_for(lambda: 'Fixture turn complete.' in self.screen())
+        before = json.loads(self.record_path.read_text())
+        self.assertGreater(before['input_pending_at'], before['input_seen_at'])
+        original = (self.state / 'input_receipts' / (payload['request_id'] + '.json')).read_bytes()
+        inspected = subprocess.run([str(test_input.HGS), 'inspect', self.name],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        after = json.loads(self.record_path.read_text())
+        self.assertGreaterEqual(after['input_seen_at'], after['input_pending_at'])
+        self.assertEqual((self.state / 'input_receipts' / (payload['request_id'] + '.json')).read_bytes(), original)
+        self.assertEqual(self.send(payload), receipt, 'the original request is never replayed')
+        self.assertEqual(sum(request['texts'][-1:] == [text] for request in self.server.requests), 1)
+
+    def test_prompt_acceptance_is_durable_before_a_busy_activity_journal(self):
+        import sqlite3
+        # Initialize the real private journal, then hold its writer. Native hook
+        # acceptance must survive a slow/failed journal or a five-second timeout.
+        inspected = subprocess.run([str(test_input.HGS), 'inspect', self.name],
+            env=self.env, capture_output=True, text=True, timeout=15)
+        self.assertEqual(inspected.returncode, 0, inspected.stderr)
+        self.record.update(input_pending_request=str(uuid.uuid4()), input_pending_at=time.time(), input_seen_at=0)
+        self.write_record()
+        db = sqlite3.connect(self.state / 'events.sqlite3')
+        db.execute('BEGIN IMMEDIATE')
+        env = dict(self.env, HGS_SESSION=self.name, HGS_RUN_ID=self.run_id)
+        event = dict(hook_event_name='UserPromptSubmit', session_id=self.conversation_id,
+                     transcript_path=self.record['transcript'], prompt='Private durable acceptance fixture')
+        started = time.monotonic()
+        child = subprocess.Popen([str(test_input.HGS), '__state', 'hook'], env=env,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            child.stdin.write(json.dumps(event))
+            child.stdin.close()
+            deadline = started + 1.5
+            while time.monotonic() < deadline:
+                record = json.loads(self.record_path.read_text())
+                if record.get('input_seen_at', 0) >= self.record['input_pending_at']:
+                    break
+                time.sleep(.02)
+            self.assertGreaterEqual(record.get('input_seen_at', 0), self.record['input_pending_at'],
+                'journal contention must not postpone durable native acceptance')
+            print('ZERUS_HOOK_ACCEPTANCE_MS=' + str(round((time.monotonic()-started)*1000)), flush=True)
+        finally:
+            db.rollback()
+            db.close()
+            child.stdin = None
+            child.communicate(timeout=10)
+
+    def test_scrolled_working_composer_page_accepts_send_and_preserves_a_real_draft(self):
+        self.scrolled_working_composer('page')
+
+    def test_scrolled_working_composer_wheel_accepts_send_and_preserves_a_real_draft(self):
+        self.scrolled_working_composer('wheel')
+
+    def scrolled_working_composer(self, method):
+        # Keep an actual native Responses turn open with enough rendered history
+        # for both PageUp and terminal mouse-wheel input to pause the viewport.
+        def busy(handler):
+            body = json.loads(handler.rfile.read(int(handler.headers.get('Content-Length', '0'))))
+            texts = [part.get('text', '') for item in body.get('input', []) if item.get('role') == 'user'
+                     for part in item.get('content', []) if isinstance(part, dict)]
+            handler.server.requests.append(dict(texts=texts))
+            text = '\n'.join(f'Private history row {n:03d}: scroll control.' for n in range(180))
+            item = dict(type='message', id='msg_scroll', role='assistant', status='completed',
+                        content=[dict(type='output_text', text=text, annotations=[])])
+            response = dict(id='resp_scroll', object='response', status='completed', output=[item],
+                            usage=dict(input_tokens=1, output_tokens=5, total_tokens=6))
+            try:
+                handler.send_response(200)
+                handler.send_header('Content-Type', 'text/event-stream')
+                handler.end_headers()
+                handler.emit('response.created', response=dict(response, status='in_progress', output=[]))
+                handler.emit('response.output_item.added', output_index=0, item=dict(item, status='in_progress'))
+                handler.emit('response.output_item.done', output_index=0, item=item)
+                handler.server.release.wait(60)
+                handler.emit('response.completed', response=response)
+            except OSError:
+                pass
+        self.server.RequestHandlerClass.do_POST = busy
+        self.send(self.payload(text='Start the private scroll control'))
+        self.wait_for(lambda: 'Private history row 179' in self.screen())
+        self.record.update(activity='busy', phase='working')
+        self.write_record()
+        def scroll():
+            if method == 'page':
+                self.tmux('send-keys', '-t', self.pane, 'PPage')
+            else:
+                self.tmux('send-keys', '-l', '-t', self.pane, '\x1b[<64;40;10M' * 8)
+            self.wait_for(lambda: 'Back to bottom · esc' in self.screen())
+            self.assertEqual(self.tmux('display-message', '-p', '-t', self.pane, '#{pane_in_mode}').strip(), '0')
+        scroll()
+        draft = 'Retain this private draft'
+        self.tmux('send-keys', '-l', '-t', self.pane, draft)
+        self.wait_for(lambda: draft in self.screen())
+        scroll()
+        refused = 'Must never enter the composer'
+        self.assertIn('draft', self.send(self.payload(text=refused), success=False))
+        self.assertIn(draft, self.screen())
+        self.assertNotIn(refused, self.screen())
+        # A tmux mode is a different input owner. It remains closed, with no
+        # automatic exit, draft edit or message bytes sent through that mode.
+        self.tmux('copy-mode', '-t', self.pane)
+        before = self.screen()
+        self.assertIn('expected agent input mode', self.send(self.payload(text=refused), success=False))
+        self.assertEqual(self.tmux('display-message', '-p', '-t', self.pane, '#{pane_in_mode}').strip(), '1')
+        self.assertEqual(self.screen(), before)
+        self.tmux('send-keys', '-X', '-t', self.pane, 'cancel')
+        # Clear only this fixture's own draft after proving both refusals kept it.
+        self.tmux('send-keys', '-t', self.pane, 'C-a', 'C-k')
+        self.wait_for(lambda: draft not in self.screen())
+        scroll()
+        self.wait_for(lambda: 'enter/esc latest' in self.screen())
+        text = f'Private scrolled {method} message'
+        receipt = self.send(self.payload(text=text))
+        self.assertEqual(receipt['status'], 'submitted')
+        self.assertEqual(receipt['submitted_text'], text)
+        self.server.release.set()
+        self.wait_for(lambda: any(text in part for request in self.server.requests for part in request['texts']))
+        rows = map(json.loads, Path(self.record['transcript']).read_text().splitlines())
+        messages = [row['payload']['message'] for row in rows if row.get('type') == 'event_msg'
+                    and row.get('payload', {}).get('type') == 'user_message']
+        self.assertEqual(messages.count(text), 1)
+        self.assertNotIn(draft, messages)
+        self.assertNotIn(refused, messages)
+
+    def test_native_refusal_has_an_opted_in_terminal_outcome(self):
+        import native_send_outcome
+        native_send_outcome.refused_draft(self, self.name, self.record, self.screen,
+                                         lambda: len(self.server.raw_requests))
+
     def test_id_pending_settings_then_message_makes_one_model_call_and_keeps_defaults(self):
         self.pending_message(named=True)
 

@@ -211,6 +211,17 @@ impl Runtime {
             ports::DeliveryResult::NotStarted { reason } => {
                 d.command = true;
                 d.not_started = true;
+                // A first-send gate is a waiting member, not a failed child.
+                // Classify only this proven non-start; unknown results retain
+                // their original no-replay path. Start the named wait in this
+                // pass, even when the hand-out was reserved after selection.
+                if matches!(ports.availability(team, assignment.1),
+                    Ok(Availability::Unreadable(Fact::FirstMessage))) {
+                    self.put(&team.id, key, &d)?;
+                    boundary("not_started");
+                    self.recovered(store, team, key, now)?;
+                    return self.first_message_wait(store, team, assignment.1, d.node, now);
+                }
                 d.nonstarts = d.nonstarts.saturating_add(1);
                 if d.nonstarts >= 5 {
                     // Five non-starts reach the retry table's fifteen-minute
@@ -462,11 +473,9 @@ impl Runtime {
             // the terminal gate (zerus-63rru.79) nor of the project's own
             // limit (zerus-63rru.23).
             let refused = match &d.outcome {
-                Some(HandoutOutcome::Refused { reason })
-                    if !d.waiting
-                        && !d.project
-                        && store.effect_reserved(&team.id, &d.id)? =>
-                {
+                Some(
+                    HandoutOutcome::Refused { reason } | HandoutOutcome::CuttingOver { reason },
+                ) if !d.waiting && !d.project && store.effect_reserved(&team.id, &d.id)? => {
                     Some(reason)
                 }
                 _ => None,
@@ -487,13 +496,7 @@ impl Runtime {
             // A refusal of the terminal gate is not a failed hand-out: the
             // member's terminal is not free (zerus-63rru.79).
             if d.waiting {
-                self.terminal_refused(
-                    &team.id,
-                    &d.member,
-                    d.stamp.clone(),
-                    d.dialog.clone(),
-                    now,
-                )?;
+                self.terminal_refused(&team.id, &d.member, d.stamp.clone(), d.dialog.clone(), now)?;
             }
             // A refusal of the project's own limit is not a failed hand-out:
             // it is a fact about the team (zerus-63rru.23).
@@ -510,7 +513,10 @@ impl Runtime {
                     d.outcome,
                     Some(HandoutOutcome::Submitted { .. } | HandoutOutcome::Refused { .. })
                 )
-                && self.ledger.get(&team.id, super::project_limit::KEY)?.is_some()
+                && self
+                    .ledger
+                    .get(&team.id, super::project_limit::KEY)?
+                    .is_some()
             {
                 // The probe's own answer, and the project admitted: only a
                 // submitted delivery or the command's own refusal with
@@ -619,14 +625,7 @@ impl Runtime {
                 let outcome = if d.outcome.is_some() {
                     d.outcome.clone()
                 } else {
-                    #[cfg(any(target_os = "linux", target_os = "macos"))]
-                    {
-                        self.retained_outcome(team, &d)?
-                    }
-                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-                    {
-                        None
-                    }
+                    self.retained_outcome(team, &d)?
                 };
                 if let Some(outcome) = outcome {
                     d.outcome = Some(outcome);
@@ -659,7 +658,6 @@ impl Runtime {
     /// uncertain reply is the accepted limit (round 3): the delivery stays
     /// unknown, the row and its retained task text stay, and the open effect
     /// keeps the terminal prune blocked for that team. It is never replayed.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn retained_outcome(&self, team: &Team, d: &Delivery) -> Result<Option<HandoutOutcome>> {
         let Some(row) = self
             .ledger
@@ -672,12 +670,12 @@ impl Runtime {
         }
         let raw =
             serde_json::to_vec(&row.data["reply"]).map_err(crate::teams::store::storage)?;
-        Ok(match super::native::decode_delivery(&raw, &d.id) {
+        Ok(match super::reply::decode_delivery(&raw, &d.id) {
             HandoutOutcome::Submitted { .. }
             | HandoutOutcome::Refused { .. }
             | HandoutOutcome::HandedBack { .. }
             | HandoutOutcome::CuttingOver { .. } => {
-                Some(super::native::decode_delivery(&raw, &d.id))
+                Some(super::reply::decode_delivery(&raw, &d.id))
             }
             HandoutOutcome::Uncertain { .. } => None,
         })

@@ -372,10 +372,11 @@ fn a_floored_task_is_read_only_in_the_apps() {
     assert!(task.writable);
     {
         let hgs = ProjectStore::open(root.path(), "project-1").unwrap();
-        let mut doc = hgs.load(&task.uuid).unwrap();
-        assert!(doc.floor().unwrap());
+        let mut native = hgs
+            .admit_until(std::time::Instant::now() + std::time::Duration::from_secs(1))
+            .unwrap();
+        let doc = native.write_first_floor(&task.uuid).unwrap();
         assert_eq!(doc.stage().unwrap(), Stage::Todo);
-        hgs.save(&mut doc).unwrap();
     }
     let floored = apps.get(task.uuid.clone()).unwrap();
     assert!(!floored.writable);

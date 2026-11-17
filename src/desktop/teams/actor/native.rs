@@ -9,6 +9,9 @@ mod tasks;
 #[allow(unused_imports)]
 pub(super) use tasks::{clear_request, stage_arguments, stage_request, task_reply};
 mod admission;
+mod fresh;
+#[cfg(test)]
+mod fresh_fixture;
 mod cancels;
 use super::*;
 use crate::{
@@ -100,6 +103,12 @@ impl Native {
                 return Err(problem("The member has another active task"));
             }
         }
+        // Native terminal reads cannot run inside the final spawn admission.
+        // The child still checks the native gate again before offering input.
+        let first = match member {
+            Some(member) => self.first_witness(team, member)?,
+            None => None,
+        };
         let args = task_arguments(task, action);
         let input = task_request(team, node, member, id);
         #[cfg(test)]
@@ -115,7 +124,7 @@ impl Native {
             Instant::now() + Duration::from_secs(30),
             &self.stop,
             || {
-                self.admit(team, node, member, id, decision)
+                self.admit(team, node, member, id, decision, first.as_ref())
                     .inspect_err(|e| {
                         if e.code == crate::teams::store::actor_reads::ADMISSION_BUSY {
                             retry = Some(e.clone());
@@ -213,6 +222,14 @@ impl Ports for Native {
     ) -> Result<()> {
         state.terminal(self, store, now)
     }
+    fn planned_task(
+        &mut self,
+        team: &Team,
+        request: &crate::teams::store::publication::PlannedTaskRequest,
+        clear: bool,
+    ) -> Result<super::ports::TaskReply> {
+        self.planned_task_child(team, request, clear)
+    }
     fn stage(
         &mut self,
         team: &Team,
@@ -248,6 +265,19 @@ impl Ports for Native {
     fn observe(&mut self, _: &mut Store, task: &TaskRef) -> Result<()> {
         crate::teams::tasks::observe(&self.config.state, task)
     }
+    fn timing_supported(&self) -> bool {
+        true
+    }
+    fn observe_timing(
+        &mut self,
+        _: &mut Store,
+        task: &TaskRef,
+        epoch: &str,
+        generation: Option<String>,
+        offset: Option<u64>,
+    ) -> Result<Option<crate::teams::tasks::timing::TimingRead>> {
+        crate::teams::tasks::timing::observe(&self.config.state, task, epoch, generation, offset)
+    }
     fn report(&mut self, task: &TaskRef) -> Result<Option<String>> {
         crate::teams::tasks::report(&self.config.state, task)
     }
@@ -275,7 +305,8 @@ impl Ports for Native {
         if session.machine != self.machine {
             return Ok(ports::Availability::Busy);
         }
-        match super::availability::availability(&self.config, &self.epoch, &team.id, m, true)? {
+        match super::availability::with_first(&self.config, &self.epoch, &team.id, m, true,
+            |row| self.first_on(m, row).is_some())? {
             ports::Availability::Free if !self.unoccupied(m)? => Ok(ports::Availability::Busy),
             answer => Ok(answer),
         }
@@ -319,6 +350,14 @@ impl Ports for Native {
             Ok(Ended::NotStarted) if member.agent == "dsh" => ports::DeliveryResult::NotStarted {
                 reason: "The hosted delivery child did not start".into(),
             },
+            // Admission proved that no child started. A fresh member's
+            // first-send gate keeps that proof pending under its named wait;
+            // a final or unknown child result never enters this branch.
+            Ok(Ended::NotStarted) if matches!(self.availability(team, member),
+                Ok(ports::Availability::Unreadable(ports::Fact::FirstMessage))) =>
+                ports::DeliveryResult::NotStarted {
+                    reason: "The member is waiting for its first-message readiness".into(),
+                },
             Ok(ended) if member.agent == "dsh" => {
                 let confirmed = match &ended {
                     Ended::Exited { code: 0, output } => serde_json::from_slice::<Value>(output).is_ok_and(|v|
@@ -408,43 +447,7 @@ pub(super) fn delivery_reply(ended: Ended, id: &str) -> HandoutOutcome {
         },
     }
 }
-pub(super) fn decode_delivery(raw: &[u8], id: &str) -> HandoutOutcome {
-    let bad = || HandoutOutcome::Uncertain {
-        reason: "The original child returned no authoritative delivery result".into(),
-    };
-    let Ok(v) = serde_json::from_slice::<Value>(raw) else {
-        return bad();
-    };
-    if v["id"].as_str() != Some(id) {
-        return bad();
-    }
-    if v["schema"].as_u64() != Some(1) {
-        return bad();
-    }
-    let error = match v.get("error") {
-        Some(Value::String(error)) => error.as_str(),
-        None if v["state"] == "submitted" => "",
-        _ => return bad(),
-    };
-    // The command's own words, cleaned before they are recorded; a sentence
-    // with nothing readable left keeps the fixed one.
-    let said = super::cancel::reason::spoken(&cut(error, 2048));
-    let reason = if said.is_empty() {
-        "The task writer did not complete delivery".to_owned()
-    } else {
-        said
-    };
-    match v["state"].as_str() {
-        Some("submitted") => HandoutOutcome::Submitted { receipt: id.into() },
-        // Final only from the exact reply: the reopen's member no longer has
-        // the task's conversation (zerus-63rru.64).
-        Some("refused") if v["final"] == true => HandoutOutcome::HandedBack { reason },
-        Some("refused") => HandoutOutcome::Refused { reason },
-        Some("uncertain") => HandoutOutcome::Uncertain { reason },
-        Some("cutting_over") => HandoutOutcome::CuttingOver { reason },
-        _ => bad(),
-    }
-}
+pub(super) use super::reply::decode_delivery;
 impl Native {
     pub(super) fn done(
         &self,

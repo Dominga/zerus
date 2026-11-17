@@ -4,7 +4,8 @@ import type { FitAddon } from "@xterm/addon-fit";
 import { Icon } from "../lib/icons";
 import { contentScale, selected, setMenu, toast } from "../../store/ui";
 import { composer } from "../../store/composer";
-import { clearInput, clearableText, composerTarget } from "../../store/clearInput";
+import { clearInput, clearableText, composerTarget, recoverableInput } from "../../store/clearInput";
+import type { PendingInput } from "../../bridge";
 import { copyVerbatim, pasteText } from "../../bridge";
 import { platform } from "../../store/shortcuts";
 import { normalizeTerminalImage, terminalMenu } from "./terminal-clipboard";
@@ -205,6 +206,17 @@ export function TerminalTab() {
   const reading = setInterval(() => { if (!document.hidden) void clearInput.refresh(); }, 2500);
   onCleanup(() => { clearInterval(reading); clearInput.follow(undefined); });
   const clearable = () => clearableText(clearInput.state(), selected(), composer.view(), clearInput.clearing());
+  const recoverable = () => recoverableInput(clearInput.state(), selected(), composer.view(), clearInput.clearing());
+  const [reviewing, setReviewing] = createSignal<{ key: string; pending: PendingInput; origin: HTMLElement }>();
+  const confirmAcknowledgment = async (key: string, pending: PendingInput) => {
+    setReviewing(undefined);
+    const outcome = await clearInput.acknowledge(key, pending, recoverable);
+    if (outcome?.status === "person-acknowledged-unknown") {
+      toast(tr("Terminal"), tr("Previous input marked as handled. Delivery remains unconfirmed."));
+    } else {
+      toast(tr("Terminal"), tr("Input was not released. Check Terminal and review it again."), "error", outcome?.status === "unknown");
+    }
+  };
   const [confirming, setConfirming] = createSignal<{ key: string; text: string; origin: HTMLElement }>();
   const confirmClear = async (key: string, text: string) => {
     setConfirming(undefined);
@@ -237,6 +249,12 @@ export function TerminalTab() {
           </label>
         </Show>
         <span class="grow" />
+        <Show when={recoverable()}>{(pending) => (
+          <button class="icon-btn term-release-input" data-tip={tr("Release unconfirmed input")} aria-label={tr("Release unconfirmed input")}
+            onClick={(event) => { const s = selected(); if (s) setReviewing({ key: s.key, pending: pending(), origin: event.currentTarget }); }}>
+            <Icon name="check" size={15} />
+          </button>
+        )}</Show>
         <Show when={clearable()}>{(text) => (
           <button class="icon-btn term-clear-input" data-tip={tr("Clear input")} aria-label={tr("Clear input")}
             onClick={(event) => { const s = selected(); if (s) setConfirming({ key: s.key, text: text(), origin: event.currentTarget }); }}>
@@ -260,8 +278,33 @@ export function TerminalTab() {
       <div class="term-host" data-shortcut-context="terminal" ref={host} onContextMenu={onContextMenu} />
       <Show when={confirming()}>{(item) => <ClearInputConfirm text={item().text} origin={item().origin}
         cancel={() => setConfirming(undefined)} confirm={() => void confirmClear(item().key, item().text)} />}</Show>
+      <Show when={reviewing()}>{(item) => <InputAcknowledgmentConfirm origin={item().origin}
+        cancel={() => setReviewing(undefined)} confirm={() => void confirmAcknowledgment(item().key, item().pending)} />}</Show>
     </div>
   );
+}
+
+/** A person decision about an unknown delivery, never an instruction to send it again. */
+export function InputAcknowledgmentConfirm(props: { origin: HTMLElement; cancel(): void; confirm(): void }) {
+  const origin = props.origin;
+  let dialog!: HTMLDialogElement, cancel!: HTMLButtonElement;
+  onMount(() => { dialog.showModal(); cancel.focus(); });
+  onCleanup(() => {
+    if (dialog.open) dialog.close();
+    queueMicrotask(() => { if (origin.isConnected) origin.focus(); });
+  });
+  return <dialog ref={dialog} class="dlg" style={{ width: "520px" }} aria-labelledby="release-input-title"
+    onCancel={(event) => { event.preventDefault(); props.cancel(); }} onClose={props.cancel}>
+    <div class="dlg-head"><h2 id="release-input-title">{tr("Release unconfirmed input")}</h2></div>
+    <div class="dlg-body"><div class="confirm-body">
+      <p>{tr("The previous input may or may not have reached the agent. Nothing will be sent again. Only continue after checking Terminal.")}</p>
+      <p>{tr("A later identical message can also remain unconfirmed; check Terminal before releasing it.")}</p>
+    </div></div>
+    <div class="dlg-foot"><span class="spacer" />
+      <button type="button" class="btn solid-danger" onClick={props.confirm}>{tr("I checked Terminal: mark the previous input as handled")}</button>
+      <button ref={cancel} type="button" class="btn primary" onClick={props.cancel}>{tr("Cancel")}</button>
+    </div>
+  </dialog>;
 }
 
 /** The exact text Clear input discards, confirmed before any key is sent. */

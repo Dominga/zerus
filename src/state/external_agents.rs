@@ -134,7 +134,15 @@ pub(super) fn main_start(record: &Value, event: &Value) -> bool {
             .is_some_and(|child| child.is_object() && child["external"] != true)) {
         return false;
     }
-    if event["session_id"] == record["conversation_id"] { return true; }
+    if event["session_id"] == record["conversation_id"] {
+        return true;
+    }
+    if record["agent"] == "codex"
+        && (codex_tasks::known(record, string(event, "session_id"))
+            || codex_tasks::unresolved(record))
+    {
+        return false;
+    }
     match provider(event).or_else(|| caller(record).map(|source| source.provider)) {
         Some(provider) => provider == string(record, "agent"),
         None => string(record, "conversation_id").is_empty(),
@@ -190,14 +198,15 @@ pub(super) fn route(record: &mut Value, event: &Value) -> Option<Value> {
     } else if let Some(id) = known {
         id
     } else {
-        if string(event, "hook_event_name") != "SessionStart" {
+        let native_task = codex_tasks::known(record, sid);
+        if string(event, "hook_event_name") != "SessionStart" && !native_task {
             return None;
         }
         let source = caller(record);
         let agent = provider(event).or_else(|| source.map(|source| source.provider))?;
         let headless = agent == "codex" && (metadata.as_ref().is_some_and(|meta| meta["source"] == "exec")
             || source.is_some_and(|source| source.provider == "codex" && source.headless));
-        if agent == string(record, "agent") && !headless {
+        if agent == string(record, "agent") && !headless && !native_task {
             return None;
         }
         let id = format!("external:{agent}:{sid}");

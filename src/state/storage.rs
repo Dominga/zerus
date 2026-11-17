@@ -4,6 +4,8 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 
+pub(super) mod listing_scope;
+
 // Read-only selected-slot source fences for saved Resume, Start fresh and terminal Fork.
 pub(super) mod selected_source;
 #[cfg(test)]
@@ -177,7 +179,7 @@ fn refuse_picker_io() -> Result<()> {
 }
 
 pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
-    write_atomic(path, contents, false)
+    write_atomic(path, contents, false, None)
 }
 
 /// `atomic` for a file whose privacy is checked when it is read (#526): on
@@ -185,10 +187,23 @@ pub(super) fn atomic(path: &Path, contents: &str) -> Result<()> {
 /// anything is written, as a Unix temp file is created 0600; an inherited ACL
 /// is not private on every computer.
 pub(super) fn atomic_private(path: &Path, contents: &str) -> Result<()> {
-    write_atomic(path, contents, true)
+    write_atomic(path, contents, true, None)
 }
 
-fn write_atomic(path: &Path, contents: &str, private: bool) -> Result<()> {
+pub(super) fn atomic_observed(
+    path: &Path,
+    contents: &str,
+    publication: Option<&mut super::listing_metadata::Publication>,
+) -> Result<()> {
+    write_atomic(path, contents, false, publication)
+}
+
+fn write_atomic(
+    path: &Path,
+    contents: &str,
+    private: bool,
+    mut publication: Option<&mut super::listing_metadata::Publication>,
+) -> Result<()> {
     refuse_picker_io()?;
     let parent = path.parent().ok_or("cannot write file without parent")?;
     cut_write()?;
@@ -203,8 +218,19 @@ fn write_atomic(path: &Path, contents: &str, private: bool) -> Result<()> {
     temp.write_all(contents.as_bytes())
         .map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;
-    crate::platform::persist(temp, path).map_err(|e| e.to_string())?;
-    crate::platform::sync_dir(parent).map_err(|e| e.to_string())
+    if let Some(p) = publication.as_deref_mut() {
+        p.staged(temp.as_file());
+    }
+    let file = crate::platform::persist(temp, path).map_err(|e| e.to_string())?;
+    if let Some(p) = publication {
+        crate::platform::sync_dir(parent).map_err(|e| e.to_string())?;
+        p.published(file);
+        Ok(())
+    } else {
+        // Keep the original non-observed descriptor lifetime and I/O sequence.
+        drop(file);
+        crate::platform::sync_dir(parent).map_err(|e| e.to_string())
+    }
 }
 
 pub(super) type Guard = crate::platform::FileLock;
@@ -215,10 +241,18 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
     let path = path.unwrap_or(&default);
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
-    let guard = Guard::exclusive(file).map_err(|e| e.to_string())?;
+    let guard = if let Some(deadline) = listing_scope::deadline() {
+        lock_open_until(file, deadline)?.ok_or_else(listing_scope::refuse)?
+    } else {
+        Guard::exclusive(file).map_err(|error| error.to_string())?
+    };
     if path == default {
+        if listing_scope::active() {
+            worktree_lock::listing_ready()?;
+        }
         rename::recover_locked()?;
         rename::sync_legacy_locked()?;
+        listing_scope::check()?;
         worktree_lock::recover_locked();
     }
     Ok(guard)
@@ -230,6 +264,18 @@ pub(super) fn lock(path: Option<&Path>) -> Result<Guard> {
 pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(path.parent().ok_or("invalid lock path")?)?;
     let file = lock_file(path)?;
+    lock_open_until(file, deadline)
+}
+
+/// Read-only channel admission: the state writer already exists. Never
+/// create it, follow a link, wait on a FIFO or invoke normal writer recovery.
+pub(super) fn existing_lock_until(path: &Path, deadline: std::time::Instant) -> Result<Option<Guard>> {
+    let parent = repositories::directory::Directory::open(path.parent().ok_or("invalid lock path")?)?;
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or("invalid lock name")?;
+    lock_open_until(parent.existing_private_lock(name)?, deadline)
+}
+
+fn lock_open_until(file: fs::File, deadline: std::time::Instant) -> Result<Option<Guard>> {
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(Some(Guard::held(file))),
@@ -244,9 +290,15 @@ pub(super) fn lock_until(path: &Path, deadline: std::time::Instant) -> Result<Op
 /// lifecycle cleanup. Never turn a busy writer into an unbounded archive exit.
 pub(super) fn writer_until(deadline: std::time::Instant) -> Result<Option<Guard>> {
     private_dir(&root())?;
-    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else { return Ok(None); };
+    let Some(guard) = lock_until(&root().join(".lock"), deadline)? else {
+        return Ok(None);
+    };
+    if listing_scope::active() {
+        worktree_lock::listing_ready()?;
+    }
     rename::recover_locked()?;
     rename::sync_legacy_locked()?;
+    listing_scope::check()?;
     worktree_lock::recover_locked();
     Ok(Some(guard))
 }
@@ -340,6 +392,9 @@ pub(crate) fn is_id_layout_record(record: &Value, id: &str) -> bool {
 ///   reach a session whose label has no first holder.
 pub(super) fn record_path(name: &str) -> PathBuf {
     if let Some(path) = selected_id_path(name) {
+        return path;
+    }
+    if let Some(path) = listing_scope::route(name) {
         return path;
     }
     let label = label_record_path(name);
@@ -442,6 +497,12 @@ pub(super) fn read_metadata(name: &str) -> Result<Value> {
     read_metadata_at(&path, name)
 }
 
+/// One already-selected native slot, without telemetry repairs or observations.
+/// The returned bytes add no launch/input authority.
+pub(super) fn read_selected_metadata(name: &str) -> Result<Value> {
+    read_metadata_at(&record_path(name), name)
+}
+
 fn read_metadata_at(path: &Path, name: &str) -> Result<Value> {
     let bytes = record_bytes(path, Some(ID_RECORD_BYTES)).map_err(|e| not_found(name, e))?;
     let record = verify_metadata_at(path, name, &bytes)?;
@@ -485,6 +546,9 @@ fn in_sessions(path: &Path) -> bool {
 /// regular file and stops at its bound (#1437 review): a lock-free scan must
 /// not hang on what it finds there.
 fn record_bytes(path: &Path, limit: Option<u64>) -> io::Result<Vec<u8>> {
+    if let Some(result) = listing_scope::read(path) {
+        return result;
+    }
     let retiring = limit.is_some();
     let Some(limit) = limit.or(in_sessions(path).then_some(ID_RECORD_BYTES)) else {
         return fs::read(path);
@@ -562,7 +626,7 @@ fn read_at(path: &Path, name: &str, limit: Option<u64>) -> Result<Value> {
 }
 
 /// The record in `bytes`, read from `path` as `name`, verified.
-fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
+pub(super) fn verify_at(path: &Path, name: &str, bytes: &[u8]) -> Result<Value> {
     let mut record: Value = serde_json::from_slice(bytes)
         .map_err(|e| format!("{name}: invalid saved binding: {e}"))?;
     if !record.is_object()
@@ -756,16 +820,34 @@ pub(super) fn publish_new_id(_writer: &Guard, record: &mut Value) -> Result<()> 
     }
     #[cfg(all(test, unix))]
     if let Some(hook) = BEFORE_NEW_ID.with(|hook| hook.borrow_mut().take()) {hook();}
-    state.verify()?; directory.verify()?; label_directory.verify()?;
-    if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
-        return Err("The selected state root changed before ID publication".into());
-    }
-    if let Some(protection) = &protection {protection.verify()?;}
-    #[cfg(unix)]
-    if let Some(input) = &fresh_input {input.verify()?;}
-    cut_write()?;
-    directory.write_new(&format!("{id}.json"),bytes.as_bytes())?;
-    crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())?;
+    super::listing_metadata::write_at(
+        &state.path,
+        &directory.path.join(format!("{id}.json")),
+        &published,
+        |publication| {
+            state.verify()?;
+            directory.verify()?;
+            label_directory.verify()?;
+            if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
+                return Err("The selected state root changed before ID publication".into());
+            }
+            if let Some(protection) = &protection {
+                protection.verify()?;
+            }
+            #[cfg(unix)]
+            if let Some(input) = &fresh_input {
+                input.verify()?;
+            }
+            cut_write()?;
+            super::listing_metadata::Publication::write_new(
+                publication,
+                &directory,
+                &format!("{id}.json"),
+                bytes.as_bytes(),
+            )?;
+            crate::platform::sync_dir(&directory.path).map_err(|e| e.to_string())
+        },
+    )?;
     state.verify()?; directory.verify()?; label_directory.verify()?;
     if crate::platform::canonical(root()).map_err(|e| e.to_string())? != state.path {
         return Err("The selected state root changed after ID publication".into());
@@ -784,10 +866,14 @@ pub(super) fn atomic_record(path: &Path, record: &mut Value) -> Result<()> {
     processes::compact(record);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     super::process_index_writer::write_at(&root(), path, record, |record| {
-        atomic(path, &format!("{record}\n"))
+        super::listing_metadata::write_at(&root(), path, record, |publication| {
+            atomic_observed(path, &format!("{record}\n"), publication)
+        })
     })?;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    atomic(path, &format!("{record}\n"))?;
+    super::listing_metadata::write_at(&root(), path, record, |publication| {
+        atomic_observed(path, &format!("{record}\n"), publication)
+    })?;
     super::archive_references::note(path, record);
     Ok(())
 }
@@ -863,6 +949,9 @@ fn is_record_path(path: &Path) -> bool {
 }
 
 pub(super) fn records() -> Result<Vec<Value>> {
+    if listing_scope::active() {
+        return Err(listing_scope::refuse());
+    }
     if !root().exists() {
         return Ok(Vec::new());
     }

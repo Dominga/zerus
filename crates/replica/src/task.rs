@@ -21,6 +21,10 @@ use sha2::{Digest, Sha256};
 mod attempts;
 pub use attempts::{Settled, Settlement};
 
+#[path = "task_cutover.rs"]
+mod cutover;
+pub use cutover::{Capture, CutoverSeal, NotCutOver};
+
 #[cfg(test)]
 #[path = "task_team_tests.rs"]
 mod team_key_tests;
@@ -38,6 +42,10 @@ mod team_handover_tests;
 mod team;
 #[cfg(not(feature = "test-without-team"))]
 pub use team::TaskTeam;
+
+pub(crate) fn cutover_schema() -> i64 {
+    cutover::SCHEMA
+}
 
 pub struct NewTask<'a> {
     pub project: &'a str,
@@ -61,6 +69,10 @@ pub struct TaskDoc {
     pub(crate) needs_fold: bool,
     /// The stage when the store last read or wrote the task.
     pub(crate) saved_stage: Option<Stage>,
+    /// In-process creation witness. Importing bytes never manufactures it.
+    pub(crate) created_here: bool,
+    /// A phone cache can project state, never mutate a sealed native task.
+    pub(crate) projection_only: bool,
 }
 
 fn string(map: &LoroMap, key: &str) -> Option<String> {
@@ -224,6 +236,8 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
+            created_here: true,
+            projection_only: false,
         };
         this.log("created", &task.author, task.now, "", None)?;
         this.doc.commit();
@@ -246,6 +260,8 @@ impl TaskDoc {
             saved_len: 0,
             needs_fold: false,
             saved_stage: None,
+            created_here: false,
+            projection_only: false,
         })
     }
 
@@ -256,8 +272,57 @@ impl TaskDoc {
     /// Imports another replica's changes, restoring the execution schema when
     /// a merged lower value replaced it.
     pub fn import(&mut self, bytes: &[u8]) -> Result<()> {
-        self.doc.import(bytes)?;
+        self.apply_checked(bytes)?;
         self.repair_schema()?;
+        Ok(())
+    }
+
+    pub(crate) fn apply_checked(&mut self, bytes: &[u8]) -> Result<()> {
+        let doc = self.doc.fork();
+        if doc.import(bytes)?.pending.is_some() {
+            return Err(Error::new(
+                "the task update has incomplete causal history; the saved copy is kept",
+            ));
+        }
+        let candidate = Self {
+            uuid: self.uuid.clone(),
+            doc,
+            saved: self.saved.clone(),
+            saved_len: self.saved_len,
+            needs_fold: self.needs_fold,
+            saved_stage: self.saved_stage,
+            created_here: false,
+            projection_only: self.projection_only,
+        };
+        if string(&candidate.meta(), "uuid") != Some(self.uuid.clone())
+            || string(&candidate.meta(), "project") != string(&self.meta(), "project")
+        {
+            return Err(Error::new(
+                "the update changes the original task or project identity",
+            ));
+        }
+        // Legacy unrooted DTOs still decode/merge for projection. They cannot
+        // construct store authority: every authoritative save/import calls
+        // validate_cutover_history and the native pin gate independently.
+        // Never skip a malformed, replaced or newly received actual root.
+        if !self.projection_only
+            && (self.meta().get("floor").is_some()
+                || self.meta().get("cutover").is_some()
+                || candidate.meta().get("floor").is_some()
+                || candidate.meta().get("cutover").is_some())
+        {
+            candidate.validate_cutover_history()?;
+        }
+        if self
+            .cutover_seal()?
+            .is_some_and(|seal| candidate.cutover_seal().ok().flatten().as_ref() != Some(&seal))
+        {
+            return Err(Error::new(
+                "an incoming update cannot replace the original task seal",
+            ));
+        }
+        self.doc = candidate.doc;
+        self.created_here = false;
         Ok(())
     }
 
@@ -357,11 +422,14 @@ impl TaskDoc {
         Ok(self.doc.export(ExportMode::updates_in_range(spans))?)
     }
 
-    /// Applies stored updates; false when they cannot be applied completely.
-    pub(crate) fn import_block(&mut self, bytes: &[u8]) -> bool {
-        self.doc
-            .import(bytes)
-            .is_ok_and(|status| status.pending.is_none())
+    /// Applies stored updates. Invalid/incomplete bytes retain the existing
+    /// fold/recovery behavior; temporary proof exhaustion is never corruption.
+    pub(crate) fn import_block(&mut self, bytes: &[u8]) -> Result<bool> {
+        match self.apply_checked(bytes) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == crate::ErrorKind::Busy => Err(error),
+            Err(_) => Ok(false),
+        }
     }
 
     fn meta(&self) -> LoroMap {
@@ -435,7 +503,9 @@ impl TaskDoc {
     /// upgrade by an older replica won the merged `meta.schema` value.
     pub fn schema(&self) -> i64 {
         let stored = self.stored_schema();
-        if self.execution_managed() {
+        if self.meta().get("cutover").is_some() {
+            stored.max(TASK_SCHEMA)
+        } else if self.execution_managed() {
             stored.max(execution::EXECUTION_TASK_SCHEMA)
         } else {
             stored
@@ -603,7 +673,7 @@ impl TaskDoc {
     pub fn view_with_history_ids(&self) -> Result<(TaskView, Vec<String>)> {
         let meta = self.meta();
         let fields = self.fields();
-        let writable = self.schema() <= TASK_SCHEMA;
+        let writable = !self.projection_only && self.schema() <= TASK_SCHEMA;
         let mut log = Vec::new();
         let list = self.doc.get_list("log");
         for index in 0..list.len() {
@@ -817,7 +887,9 @@ impl TaskDoc {
     /// schema in every commit: a lower value an older replica's concurrent
     /// upgrade left in the merge is raised again here, never lowered.
     fn commit(&self) -> Result<()> {
-        if self.execution_managed() {
+        if self.meta().get("cutover").is_some() {
+            self.upgrade_schema(TASK_SCHEMA)?;
+        } else if self.execution_managed() {
             self.upgrade_schema(execution::EXECUTION_TASK_SCHEMA)?;
         }
         self.doc.commit();
@@ -827,7 +899,8 @@ impl TaskDoc {
     /// Whether the stored schema is below the execution schema its attempts
     /// need: a lower upgrade by an older replica won the merge.
     pub fn needs_schema_repair(&self) -> bool {
-        self.execution_managed() && self.stored_schema() < execution::EXECUTION_TASK_SCHEMA
+        (self.meta().get("cutover").is_some() && self.stored_schema() < TASK_SCHEMA)
+            || (self.execution_managed() && self.stored_schema() < execution::EXECUTION_TASK_SCHEMA)
     }
 
     /// Raises the stored schema of a task with attempts to the execution
@@ -874,6 +947,9 @@ impl TaskDoc {
     }
 
     pub(crate) fn writable(&self) -> Result<()> {
+        if self.projection_only {
+            return Err(Error::new("This sealed task is read-only on the phone; use its computer to change or start it"));
+        }
         if self.schema() > TASK_SCHEMA {
             return Err(Error::new("Update Zerus to edit this task"));
         }
@@ -1760,7 +1836,14 @@ mod tests {
             .set_title("Rate limiting", &Actor::Person, 30)
             .unwrap();
         let mut merged = TaskDoc::from_bytes(&task.snapshot().unwrap()).unwrap();
-        assert!(merged.import_block(&stale.export_since_vv(&merged.current_vv()).unwrap()));
+        let old = stale.export_since_vv(&merged.current_vv()).unwrap();
+        assert!(
+            !merged.import_block(&old).unwrap(),
+            "a live import must refuse the pre-floor branch"
+        );
+        // Decode a literal older importer's result to retain the raw-schema
+        // reader control; this does not qualify it for a current store save.
+        merged.import_unrepaired_for_test(&old);
         assert_eq!(
             merged.schema(),
             execution::EXECUTION_TASK_SCHEMA,
@@ -1976,7 +2059,9 @@ mod tests {
             } else {
                 (cancelling, reviving)
             };
-            assert!(first.import_block(&second.export_since_vv(&first.current_vv()).unwrap()));
+            assert!(first
+                .import_block(&second.export_since_vv(&first.current_vv()).unwrap())
+                .unwrap());
             let view = first.view().unwrap();
             assert!(
                 matches!(view.stage, Stage::Todo | Stage::Review),
@@ -2003,7 +2088,9 @@ mod tests {
         let mut two = TaskDoc::from_bytes(&marked).unwrap();
         one.set_stage(Stage::Todo, &Actor::Person, 4).unwrap();
         two.set_stage(Stage::Todo, &Actor::Person, 5).unwrap();
-        assert!(one.import_block(&two.export_since_vv(&one.current_vv()).unwrap()));
+        assert!(one
+            .import_block(&two.export_since_vv(&one.current_vv()).unwrap())
+            .unwrap());
         let view = one.view().unwrap();
         assert_eq!(view.stage, Stage::Todo);
         assert_eq!(view.cancelled_at, None);
@@ -3258,6 +3345,7 @@ mod tests {
             let mut base = task(Stage::Todo);
             base.record_send(&worker(), "request-1", &Actor::Person, 10)
                 .unwrap();
+            base.floor().unwrap();
             let bytes = base.snapshot().unwrap();
             let mut one = TaskDoc::from_bytes(&bytes).unwrap();
             let mut two = TaskDoc::from_bytes(&bytes).unwrap();

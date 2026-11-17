@@ -83,7 +83,6 @@ class Repositories(unittest.TestCase):
         self.assertEqual(result.returncode, rc, result.stdout + result.stderr)
         return json.loads(result.stdout) if rc == 0 else result
 
-    @unittest.skipIf(os.name == "nt", "Unix mobile one-hop acquisition; Windows gateway refuses before dispatch")
     def test_mobile_guarded_acquisition_uses_actual_git_and_original_receipt(self):
         machine = self.hgs("swarm", "export", "--json")["node_id"]
         token = str(uuid.uuid4())
@@ -97,7 +96,6 @@ class Repositories(unittest.TestCase):
         self.assertEqual(self.mobile(argv, machine), cloned)
         self.assertEqual(self.mobile(["repository", "status", "--request-id", token, "--json"], machine), cloned)
 
-    @unittest.skipIf(os.name == "nt", "Unix mobile one-hop identity guard; Windows gateway refuses before dispatch")
     def test_mobile_wrong_machine_refuses_before_creating_any_destination(self):
         self.hgs("swarm", "export", "--json")
         self.mobile(["repository", "clone", "--url", self.url, "--parent", str(self.root), "--name", "foreign", "--request-id", str(uuid.uuid4()), "--json"], str(uuid.uuid4()), rc=1)
@@ -105,7 +103,7 @@ class Repositories(unittest.TestCase):
         self.assertEqual((self.source / "content").read_text(), "preserved\n")
 
     @unittest.skipUnless(os.name == "nt", "Windows gateway one-hop repository refusal")
-    def test_windows_mobile_repository_routes_refuse_without_effects(self):
+    def test_windows_gateway_repository_routes_refuse_without_effects(self):
         machine = self.hgs("swarm", "export", "--json")["node_id"]
         token = str(uuid.uuid4())
         destination = self.root / "windows mobile checkout"
@@ -125,13 +123,14 @@ class Repositories(unittest.TestCase):
         before = snapshot()
         arguments = ["--url", self.url, "--parent", str(self.root), "--name", destination.name]
         clone = ["repository", "clone", *arguments, "--request-id", token, "--json"]
-        cases = [("check", ["repository", "check", *arguments, "--json"], machine),
-                 ("clone", clone, machine),
-                 ("wrong-machine clone", clone, str(uuid.uuid4())),
-                 ("status", ["repository", "status", "--request-id", token, "--json"], machine)]
-        for operation, argv, target in cases:
+        envelope = {"schema": 1, "via": "direct-peer", "target_machine_id": machine,
+                    "argv": clone, "payload": None}
+        for operation in ("mobile-peers", "mobile-peer", "__mobile-peer-transport"):
             with self.subTest(operation=operation):
-                result = self.mobile(argv, target, rc=2)
+                result = bounded_run([str(HGS), "swarm", operation, "--json"],
+                                     input=json.dumps(envelope), env=self.env, cwd=self.root,
+                                     capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, "")
                 self.assertIn("One-hop mobile peer routing is unavailable on a Windows gateway; "
                               "local Windows sessions are supported.", result.stderr)

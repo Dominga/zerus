@@ -132,6 +132,12 @@ fn reserve(ctx: &mut Context<'_>, node: u32, member: &str, id: &str, kind: &str)
     ctx.db.execute("INSERT INTO effects(team,node,member,generation,request_id,actor,kind,created_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![ctx.team.id,node,member,ctx.generation(node)?,id,encode(ctx.actor)?,kind,ctx.now]).map_err(storage)?;
     ctx.reply.node = Some(node);
     ctx.reply.item = Some(ctx.db.last_insert_rowid() as u64);
+    ctx.db
+        .execute(
+            "INSERT INTO handout_bases(effect,base_commit) VALUES(?1,?2)",
+            params![id, ctx.team.base_commit],
+        )
+        .map_err(storage)?;
     Ok(())
 }
 pub(super) fn reopen_intent(ctx: &mut Context<'_>) -> Result<()> {
@@ -204,7 +210,29 @@ fn record_outcome(
     kind: &str,
 ) -> Result<()> {
     let e = read_effect(ctx, id)?;
-    if e.kind != kind || e.outcome.is_some() {
+    let same_non_delivery = matches!(outcome, HandoutOutcome::CuttingOver { .. })
+        && e.outcome
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<HandoutOutcome>(raw).ok())
+            .as_ref()
+            == Some(outcome);
+    let item = if same_non_delivery {
+        store::non_delivery::non_delivery_item(
+            ctx.db,
+            &ctx.team.id,
+            id,
+            e.node,
+            e.generation,
+            kind,
+            outcome,
+        )?
+    } else {
+        None
+    };
+    let repairing = same_non_delivery
+        && store::non_delivery::legacy_non_delivery_state(&e.state)
+        && (e.state == "cutting_over" || item.is_some());
+    if e.kind != kind || (e.outcome.is_some() && !repairing) {
         return Err(invalid(
             "Effect kind differs or its outcome was already recorded.",
         ));
@@ -221,13 +249,28 @@ fn record_outcome(
             |r| r.get(0),
         )
         .map_err(storage)?;
-    ctx.db
-        .execute(
-            "UPDATE effects SET outcome=?3 WHERE team=?1 AND request_id=?2",
-            params![ctx.team.id, id, encode(outcome)?],
-        )
-        .map_err(storage)?;
-    timers::outcome_time(ctx, id)?;
+    if !repairing {
+        ctx.db
+            .execute(
+                "UPDATE effects SET outcome=?3 WHERE team=?1 AND request_id=?2",
+                params![ctx.team.id, id, encode(outcome)?],
+            )
+            .map_err(storage)?;
+        timers::outcome_time(ctx, id)?;
+    }
+    if let Some(item) = item {
+        ctx.db.execute("UPDATE inbox SET state='closed' WHERE team=?1 AND seq=?2 AND kind='delivery_uncertain' AND state='open'",params![ctx.team.id,item]).map_err(storage)?;
+    }
+    // Closing proven non-delivery cannot resurrect a stale generation. Its
+    // original outcome, receipt and timing remain facts, never a new offer.
+    if repairing && e.state == "cutting_over" {
+        ctx.db
+            .execute(
+                "UPDATE effects SET state='refused' WHERE team=?1 AND request_id=?2",
+                params![ctx.team.id, id],
+            )
+            .map_err(storage)?;
+    }
     // A late receipt is still a fact. It never resurrects a superseded,
     // reported or observed-done slot and never settles a newer decision.
     if current && e.state != "superseded" && state == "submitted" {
@@ -278,7 +321,9 @@ fn record_outcome(
         }
         if state == "submitted" {
             ctx.close_inbox(e.node)?;
-        } else if let HandoutOutcome::Refused { reason } = outcome {
+        } else if let HandoutOutcome::Refused { reason } | HandoutOutcome::CuttingOver { reason } =
+            outcome
+        {
             // A held node with nobody told is the fault zerus-63rru.77
             // closes: an uncertain end already wrote its item above.
             let reason = reason.trim_end();
@@ -315,7 +360,7 @@ fn outcome_state(outcome: &HandoutOutcome) -> Result<(&'static str, Option<&str>
         }
         HandoutOutcome::CuttingOver { reason: r } => {
             reason(r)?;
-            ("cutting_over", Some(r.as_str()))
+            ("refused", None)
         }
         HandoutOutcome::Uncertain { reason: r } => {
             reason(r)?;

@@ -1,6 +1,7 @@
 package app.zerus.mobile.replica
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -13,6 +14,91 @@ class TaskStoreBindingTest {
     @get:Rule val folders = TemporaryFolder()
 
     private fun store() = TaskStore(folders.newFolder().path, "project-1", "orchard")
+
+    @Test
+    fun explicitUploadBindingsPreserveLargePhoneCreatedMedia() {
+        val (host, phone) = store() to store()
+        val bytes = ByteArray(800 * 1024).also { java.util.Random(731).nextBytes(it) }
+        val task = phone.addWithMedia("Inspect the original photo", TaskStage.TODO,
+            TaskTarget.AnySession, TaskPosition.End, listOf(TaskMediaInput("fixture.png", "image/png", bytes)))
+        phone.exchange().use { legacy ->
+            var unsent = false
+            while (true) {
+                val request = legacy.nextRequest() ?: break
+                unsent = legacy.accept(host.answerExchange(request)).unsent.contains(task.uuid) || unsent
+            }
+            assertTrue(unsent)
+        }
+        phone.exchangeUploading(emptyList()).use { exchange ->
+            var requests = 0
+            while (true) {
+                val request = exchange.nextRequest() ?: break
+                assertTrue(request.toByteArray(Charsets.UTF_8).size <= 1_048_576)
+                val progress = exchange.accept(host.answerExchange(request))
+                assertTrue(progress.unsent.isEmpty())
+                assertTrue(progress.refusedHere.isEmpty())
+                assertTrue(progress.refusedThere.isEmpty())
+                requests += 1
+            }
+            assertTrue(requests > 2)
+        }
+        val media = host.media(task.uuid, null).single()
+        assertArrayEquals(bytes, host.readMedia(task.uuid, null, 0u, media.token).data)
+    }
+
+    @Test
+    fun mediaBindingsKeepBytesScopeAndTheOriginalContentRevision() {
+        val (computer, phone) = store() to store()
+        val bytes = byteArrayOf(0, -1, 10)
+        val picked = TaskMediaInput("picked-note.txt", "text/plain", bytes)
+        assertEquals("", picked.reference)
+        val task = computer.addWithMedia("Inspect the picked file", TaskStage.TODO,
+            TaskTarget.AnySession, TaskPosition.End, listOf(picked))
+        assertEquals(2L, task.schema)
+        val page = computer.updatesFor(phone.inventory(), 1_048_576UL)
+        assertFalse(page.more)
+        phone.importUpdates(page.updates)
+        val loaded = phone.get(task.uuid)
+        assertEquals(task.attachments, loaded.attachments)
+        val meta = loaded.attachments.single()
+        assertEquals(3UL, meta.size)
+        assertArrayEquals(bytes, phone.readMedia(task.uuid, null, 0u, meta.token).data)
+        val comment = phone.comment(task.uuid, "Arrived while editing").log.last { it.kind == "comment" }
+        assertTrue(comment.entryId.isNotEmpty())
+        assertEquals(0u, comment.attachmentCount)
+        val edited = phone.editContent(task.uuid, "Reviewed content", listOf(meta.token), emptyList(), loaded.contentRevision)
+        assertTrue(edited.log.any { it.text == "Arrived while editing" })
+        try {
+            phone.editContent(task.uuid, "Stale draft", listOf(meta.token), emptyList(), loaded.contentRevision)
+            fail("a stale media draft was accepted")
+        } catch (_: ReplicaException.Refused) { }
+        assertEquals("Reviewed content", phone.get(task.uuid).text)
+        assertArrayEquals(bytes, phone.readMedia(task.uuid, null, 0u, meta.token).data)
+        try {
+            phone.readMedia(task.id, null, 0u, meta.token)
+            fail("a mutable display ID rebound the preview")
+        } catch (_: ReplicaException.Refused) { }
+        val removed = phone.editContent(task.uuid, edited.text, emptyList(), emptyList(), edited.contentRevision)
+        assertTrue(removed.attachments.isEmpty())
+        assertEquals(2L, removed.schema)
+    }
+
+    @Test
+    fun immutableSessionIdentitySurvivesGeneratedBindingsAndExchange() {
+        val legacy = SessionRef("fixture-machine", "codex/orchard/original-label")
+        assertEquals("", legacy.sessionId)
+        val original = legacy.copy(sessionId = "92ea863f-833d-4f58-a4a6-b30cb780e14a")
+        val (computer, phone) = store() to store()
+        val task = computer.add("Inspect the fixture", TaskStage.TODO, TaskTarget.Session(original), TaskPosition.End)
+        val page = computer.updatesFor(phone.inventory(), 1_048_576UL)
+        assertFalse(page.more)
+        phone.importUpdates(page.updates)
+        val retained = (phone.get(task.uuid).target as TaskTarget.Session).session
+        assertEquals(original, retained)
+        assertEquals(original.sessionId, retained.sessionId)
+        computer.setTarget(task.uuid, TaskTarget.Session(legacy))
+        assertEquals("", (computer.get(task.uuid).target as TaskTarget.Session).session.sessionId)
+    }
 
     @Test
     fun tasksAreFiledListedAndChanged() {

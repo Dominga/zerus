@@ -21,11 +21,19 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
+base64 = "0.22"
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+zerus-mobile-crypto = { path = "../../services/mobile/crypto" }
+sha2 = "0.10"
+zeroize = "1"
 uniffi = "=0.32.2"
 zerus-replica = { path = "../replica" }
 
 [dev-dependencies]
+zerus-replica = { path = "../replica", features = ["test-support"] }
+zerus-mobile-endpoint = { path = "../../services/mobile/endpoint" }
+zerus-mobile-task-edit = { path = "../mobile-task-edit" }
 tempfile = "3"
 
 [profile.release]

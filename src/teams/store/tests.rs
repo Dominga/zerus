@@ -1,12 +1,16 @@
 use super::*;
+mod layouts;
 mod conversion;
 mod cross;
+mod drafts;
 mod guards;
 mod holder;
 mod member_sessions;
 #[cfg(unix)]
 mod paths;
+mod planning;
 mod stage;
+mod timeline;
 
 #[test]
 fn missing_store_is_lazy_and_preview_is_required() {
@@ -136,7 +140,7 @@ fn version_one_is_refused_as_an_unreleased_store() {
 fn an_empty_handle_can_refresh_after_another_writer_creates_a_team() {
     let mut h = Harness::empty();
     let mut writer = Store::open(h.temp.path()).unwrap();
-    ops::apply(&mut writer, &person(), &request(0, create()), 1).unwrap();
+    ops::tests::apply_fixture(&mut writer, &person(), &request(0, create()), 1).unwrap();
     h.store.refresh().unwrap();
     assert!(h.store.team(TEAM).unwrap().is_some());
 }
@@ -195,7 +199,7 @@ fn node_rows_and_dependencies_share_one_snapshot_during_a_concurrent_route() {
                 writes.push("new.rs".into());
             }
             let rev = writer.team(TEAM).unwrap().unwrap().revision;
-            ops::apply(&mut writer, &person(), &request(rev, new), 1).unwrap();
+            ops::tests::apply_fixture(&mut writer, &person(), &request(rev, new), 1).unwrap();
         })
         .unwrap();
     assert_eq!(p.rows[0].writes, vec!["old.rs"]);
@@ -662,7 +666,7 @@ fn observations_upgrade_version_two_and_keep_departures_released_after_reopen() 
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, u32>(0))
             .unwrap(),
-        2
+        versions::CORE_NATIVE_FLOOR
     );
 }
 
@@ -691,7 +695,7 @@ fn member_handles_move_neither_the_version_nor_the_mark_an_older_build_checks() 
     };
     // The values this build writes: the core version and its current
     // layout mark (`timers::EXTENSION`, which later changes move on).
-    let current = (2, super::timers::EXTENSION, true);
+    let current = (versions::CORE_NATIVE_FLOOR, super::timers::EXTENSION, true);
     let db = rusqlite::Connection::open(&path).unwrap();
     assert_eq!(read(&db), current);
     // A store as an older build leaves it: without the table.
@@ -874,7 +878,7 @@ fn an_older_store_gains_parameters_and_keeps_reading_its_own_cards() {
             parameters: Some(vec![("member".into(), "m1".into())]),
         },
     };
-    let card = ops::apply(&mut store, &service(), &request, 2000)
+    let card = ops::tests::apply_fixture(&mut store, &service(), &request, 2000)
         .unwrap()
         .item
         .unwrap();

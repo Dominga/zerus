@@ -132,8 +132,11 @@ mod retained {
         root: PathBuf,
     }
     impl Fixture {
-        fn new(phase: &str, pipe: &str) -> Self {
-            let fake = FakeHgs::new(&format!("accounted-{phase}-{pipe}"), json!({}));
+        fn new(phase: &str, pipe: &str, holder_startup_delay_ms: u64) -> Self {
+            let fake = FakeHgs::new(
+                &format!("accounted-{phase}-{pipe}-{holder_startup_delay_ms}"),
+                json!({}),
+            );
             fs::remove_file(fake.path()).unwrap();
             std::os::unix::fs::symlink(
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake_hgs_accounted.py"),
@@ -148,7 +151,7 @@ mod retained {
                     .push(json!("organization"));
             }
             let organization = json!({"schema":1,"node_id":"node-1","swarm_id":"swarm-1","digest":"outdated","initialized":true,"conflicts":[],"preferences":{},"machines":[],"peers":{},"worker":{"running":true,"current":false},"organization":{"version":2,"default_project":"ungrouped","projects":[]}});
-            fs::write(fake.dir.join("accounted.json"), json!({"phase":phase,"pipe":pipe,"marker":zerus_watch_protocol::HELP_MARKER,"frames":[greeting,catalog(&[])],"organization_frames":[{"t":"snapshot","topic":"organization","items":[{"key":"organization","row":organization}],"page":0,"last":true,"cursor":1}]}).to_string()).unwrap();
+            fs::write(fake.dir.join("accounted.json"), json!({"phase":phase,"pipe":pipe,"holder_startup_delay_ms":holder_startup_delay_ms,"marker":zerus_watch_protocol::HELP_MARKER,"frames":[greeting,catalog(&[])],"organization_frames":[{"t":"snapshot","topic":"organization","items":[{"key":"organization","row":organization}],"page":0,"last":true,"cursor":1}]}).to_string()).unwrap();
             Self {
                 root: fake.dir.clone(),
                 _fake: fake,
@@ -159,7 +162,9 @@ mod retained {
         }
         fn ready(&self) {
             eventually("private helper reached ready", || {
-                self.root.join("ready").exists()
+                // Popen returning only proves exec, not that the detached
+                // interpreter has started polling its release file.
+                self.root.join("ready").exists() && self.root.join("holder-ready").exists()
             });
         }
         fn release(&self) {
@@ -172,7 +177,10 @@ mod retained {
         }
     }
     fn check(phase: &str, pipe: &str) {
-        let f = Fixture::new(phase, pipe);
+        check_with_delay(phase, pipe, 0);
+    }
+    fn check_with_delay(phase: &str, pipe: &str, holder_startup_delay_ms: u64) {
+        let f = Fixture::new(phase, pipe, holder_startup_delay_ms);
         let gate = Gate::new(1).unwrap();
         let (tx, rx) = mpsc::channel();
         let handle = stream::spawn_accounted(
@@ -237,6 +245,12 @@ mod retained {
     #[test]
     fn help_stdout_is_retained_after_the_owned_probe_exits() {
         check("probe", "stdout");
+    }
+    #[test]
+    fn help_stdout_waits_for_the_holder_to_start_before_testing_release() {
+        // Exceed bounded stop (3 s) plus retirement (5 s), without changing
+        // either deadline. The existing 20 s readiness budget covers startup.
+        check_with_delay("probe", "stdout", 9_000);
     }
     #[test]
     fn watch_stdout_is_retained_after_bounded_stop() {

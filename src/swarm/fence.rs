@@ -16,13 +16,14 @@ use std::time::{Duration, Instant};
 use super::replica;
 use zerus_replica::{
     canonical_version, ids, version_includes, Admitted, Document, ProjectStore, TaskDoc, Update, Version,
-    TASK_SCHEMA,
+    TASK_SCHEMA, NotCutOver,
 };
 pub(crate) mod start_mode;
+mod reachable;
 
 /// The fence capability a hello advertises: it relays, and (from C3c2) it
 /// answers the per-task proof.
-pub const FENCE: u64 = 1;
+pub const FENCE: u64 = 2;
 /// The most nodes one universe covers, and the longest route to one.
 pub(crate) const MAX_NODES: usize = 256;
 const MAX_HOPS: usize = 16;
@@ -148,6 +149,11 @@ pub(crate) struct Route<'a> {
 /// in its tests. Each answer is checked to come from the node, and store,
 /// it is bound to.
 pub(crate) trait Net {
+    /// The effective cutoff shared by every remote phase. Native local
+    /// settlement still uses the operation's original deadline.
+    fn remote_deadline(&self, deadline: Instant) -> Instant {
+        deadline
+    }
     fn call(
         &self,
         swarm: &str,
@@ -156,6 +162,58 @@ pub(crate) trait Net {
         input: Option<&Value>,
         deadline: Instant,
     ) -> Result<Value>;
+}
+
+/// One fixed remote cutoff for the whole operation, including catch-up and
+/// both discovery passes. Optional peers cannot consume local settlement's
+/// reserved portion of the original deadline.
+struct WithLocalReserve<'a> { inner:&'a dyn Net, remote:Instant }
+impl<'a> WithLocalReserve<'a> {
+    fn new(inner:&'a dyn Net, deadline:Instant)->Self {
+        let reserve=(left(deadline)/3).min(Duration::from_secs(2));
+        Self{inner,remote:deadline.checked_sub(reserve).unwrap_or(deadline)}
+    }
+}
+impl Net for WithLocalReserve<'_> {
+    fn remote_deadline(&self, deadline: Instant) -> Instant {
+        self.inner
+            .remote_deadline(deadline)
+            .min(self.remote)
+            .min(deadline)
+    }
+    fn call(
+        &self,
+        swarm: &str,
+        route: Route<'_>,
+        command: &str,
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<Value> {
+        let deadline = self.remote_deadline(deadline);
+        let expired = || {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the optional peer budget is reserved for local settlement",
+            )
+        };
+        if left(deadline).is_zero() {
+            return Err(expired().into());
+        }
+        let reply = self.inner.call(swarm, route, command, input, deadline)?;
+        if left(deadline).is_zero() {
+            return Err(expired().into());
+        }
+        Ok(reply)
+    }
+}
+/// One fair probe pool, bounded by the same remote cutoff as later phases.
+fn probe_pool_end(net: &dyn Net, deadline: Instant) -> Instant {
+    Instant::now()
+        + (left(net.remote_deadline(deadline).min(deadline)) / 3).min(Duration::from_secs(3))
+}
+
+fn probe_expired(error:&anyhow::Error)->bool {
+    error.downcast_ref::<std::io::Error>().is_some_and(|error|error.kind()==std::io::ErrorKind::TimedOut)
 }
 
 /// The members' own transport.
@@ -251,6 +309,9 @@ pub struct Node {
     pub protocol: Option<u64>,
     pub task_schema: Option<i64>,
     pub store: Option<String>,
+    /// Last verified store, only as an explicit uncut-over fact. It is
+    /// never used as a positive hello/route/adoption acknowledgement.
+    pub not_cut_over_store: Option<String>,
     pub fence: Option<u64>,
     /// Its membership incarnation, from its hello.
     pub membership: Option<String>,
@@ -317,7 +378,7 @@ impl Universe {
         // The nearest node first; one no route reaches comes last.
         self.nodes
             .values()
-            .filter(|node| node.closed.is_some())
+            .filter(|node| node.closed.is_some_and(|reason| !optional(reason)))
             .min_by_key(|node| (node.route.is_empty(), node.route.len(), node.node.as_str()))
             .map(|node| (Some(node.node.as_str()), node.closed.expect("filtered")))
     }
@@ -330,6 +391,10 @@ impl Universe {
             .expect("a universe serializes");
         format!("{:x}", Sha256::digest(canonical))
     }
+}
+
+fn optional(reason: &str) -> bool {
+    matches!(reason,"unroutable"|"unreachable"|"unverified"|"deadline"|"task_schema"|"fence_unsupported"|"unavailable"|"protocol"|"store")
 }
 
 /// This computer's membership view as `store` holds it, as one digest: its
@@ -370,7 +435,12 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     let root = config.state.join("replica");
     let Some(store) = LockedStore::load_until(config, deadline)? else {
         return Ok(Universe {
-            me: Me { node: String::new(), store: None, root: root.display().to_string(), membership: None },
+            me: Me {
+                node: String::new(),
+                store: None,
+                root: root.display().to_string(),
+                membership: None,
+            },
             nodes: BTreeMap::new(),
             stopped: Some("busy"),
             view: String::new(),
@@ -396,7 +466,9 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     drop(store);
     let me = Me {
         node: me,
-        store: zerus_replica::ProjectStore::store_id_until(&root, deadline).ok().flatten(),
+        store: zerus_replica::ProjectStore::store_id_until(&root, deadline)
+            .ok()
+            .flatten(),
         root: root.display().to_string(),
         membership,
     };
@@ -414,15 +486,33 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
     // Every candidate, from every source, counts against one bound as it is
     // added: the nodes queued or seen and the writers known. Past it the
     // universe stops closed and no more work is queued (review-n on #1452).
-    let over = |seen: &BTreeSet<String>, known: &BTreeSet<String>| seen.union(known).count() > MAX_NODES + 1;
+    let over = |seen: &BTreeSet<String>, known: &BTreeSet<String>| {
+        seen.union(known).count() > MAX_NODES + 1
+    };
     if over(&seen, &known) {
         stopped = Some("too_many_nodes");
         queue.clear();
     }
+    // Share one bounded discovery pool rather than letting every absent
+    // route spend a fresh two seconds. Fair shares leave a later healthy
+    // route time even when earlier probes actually wait until their bounds.
+    let probe_end = probe_pool_end(net, deadline);
     while let Some((alias, route, stores)) = queue.pop_front() {
         let node = route[route.len() - 1].clone();
-        let (found, peers, writers) =
-            observe(net, &swarm, Route { alias: &alias, nodes: &route, stores: &stores }, deadline);
+        let share = left(probe_end) / u32::try_from(queue.len() + 1).unwrap_or(u32::MAX);
+        let probe_deadline = deadline
+            .min(probe_end)
+            .min(Instant::now() + share.min(Duration::from_secs(2)));
+        let (found, peers, writers) = observe(
+            net,
+            &swarm,
+            Route {
+                alias: &alias,
+                nodes: &route,
+                stores: &stores,
+            },
+            probe_deadline,
+        );
         for writer in writers {
             if writer != me.node && known.insert(writer) && over(&seen, &known) {
                 stopped = Some("too_many_nodes");
@@ -433,7 +523,7 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             nodes.insert(node, found);
             break;
         }
-        if found.closed == Some("deadline") {
+        if found.closed == Some("deadline") && left(deadline).is_zero() {
             nodes.insert(node, found);
             stopped = Some("deadline");
             break;
@@ -467,7 +557,7 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             break;
         }
     }
-    // Every known writer no verified route reached closes the fence. What is
+    // Keep every known writer as an exact positive or negative fact. What is
     // reported is bounded too: past the bound the universe already stopped
     // closed, and no more than the bound is listed (review-n on #1452).
     for id in known {
@@ -482,12 +572,29 @@ pub(crate) fn universe_with(config: &Config, net: &dyn Net, deadline: Instant) -
             protocol: None,
             task_schema: None,
             store: None,
+            not_cut_over_store: None,
             fence: None,
             membership: None,
             closed: Some("unroutable"),
         });
     }
-    Ok(Universe { me, nodes, stopped, view, swarm })
+    if let Ok(records) = super::replica_members::read_strict(config) {
+        for node in nodes.values_mut().filter(|node| node.closed.is_some()) {
+            node.not_cut_over_store = records
+                .values()
+                .find(|record| record.node == node.node)
+                .and_then(|record| record.store.as_ref())
+                .filter(|store| ids::is_uuid(store))
+                .cloned();
+        }
+    }
+    Ok(Universe {
+        me,
+        nodes,
+        stopped,
+        view,
+        swarm,
+    })
 }
 
 /// A fresh hello to the node at the end of `route`, and the peers it lists.
@@ -502,6 +609,7 @@ fn observe(net: &dyn Net, swarm: &str, whole: Route<'_>, deadline: Instant) -> (
         protocol: None,
         task_schema: None,
         store: None,
+        not_cut_over_store: None,
         fence: None,
         membership: None,
         closed: None,
@@ -513,7 +621,7 @@ fn observe(net: &dyn Net, swarm: &str, whole: Route<'_>, deadline: Instant) -> (
             eprintln!("hgs swarm: {node} cannot be reached for the fence: {error:#}");
             found.closed = Some(if error.downcast_ref::<Unverified>().is_some() {
                 "unverified"
-            } else if expired {
+            } else if expired || probe_expired(&error) {
                 "deadline"
             } else {
                 "unreachable"
@@ -573,6 +681,8 @@ pub struct TaskRequest {
     store: String,
     #[serde(default)]
     remaining_ms: u64,
+    #[serde(default)]
+    cutover: Option<reachable::Request>,
 }
 
 /// `swarm replica-task`: imports the requester's updates of the task (the
@@ -582,6 +692,10 @@ pub struct TaskRequest {
 /// one the requester observed imports nothing and answers only its own, so
 /// the requester closes its proof as a changed identity.
 pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
+    task_using(config, request, &Ssh(config))
+}
+
+fn task_using(config: &Config, request: TaskRequest, net: &dyn Net) -> Result<Value> {
     // One deadline from this answer's entry covers the catalog, the store
     // identity, the project and the store's admission, and no answer is
     // given after it (review-n on #1464).
@@ -597,6 +711,15 @@ pub fn task(config: &Config, request: TaskRequest) -> Result<Value> {
     let base = json!({"node_id": node, "store": own, "task": request.task});
     if own != request.store {
         return Ok(base);
+    }
+    if let Some(action) = request.cutover {
+        let mut reply = base;
+        reply["cutover"] = match reachable::serve(config, net, &request.project, &request.task, (&node, &own), action, deadline) {
+            Ok(answer) => answer,
+            Err(error) => json!({"kind":"refused","error":format!("{error:#}")}),
+        };
+        ensure!(Instant::now()<deadline,"the original cutover deadline passed");
+        return Ok(reply);
     }
     let wait = deadline.saturating_duration_since(Instant::now()).min(PROJECT_WAIT);
     let Some(store) = ProjectStore::open_within(&root, &request.project, wait)? else {
@@ -655,6 +778,8 @@ pub struct Proof {
     pub me: Me,
     /// Every node that confirmed, with the store it answered from.
     pub nodes: BTreeMap<String, String>,
+    pub not_cut_over: BTreeMap<String, NotCutOver>,
+    pub seal: String,
     pub rounds: usize,
 }
 
@@ -693,7 +818,13 @@ fn local(
 /// Why this copy cannot be the common version, when it cannot: the raw
 /// stored schema, the floor and a fully applied state (`fence_ready`).
 fn barrier(task: &TaskDoc) -> Option<&'static str> {
-    task.fence_ready()
+    task.fence_ready().or_else(|| {
+        if task.stored_schema()<TASK_SCHEMA || task.cutover_seal().ok().flatten().is_none() {
+            Some("needs_current_cutover")
+        } else if task.validate_cutover_history().is_err() {
+            Some("cutover_unproved")
+        } else {None}
+    })
 }
 
 /// Proves the fence for `uuid` within `deadline`: the universe, then rounds
@@ -708,9 +839,77 @@ pub(crate) fn prove(
     uuid: &str,
     deadline: Instant,
 ) -> Result<(Universe, std::result::Result<Proof, Closed>)> {
+    let reserved=WithLocalReserve::new(net,deadline);
+    let net:&dyn Net=&reserved;
     let first = universe_with(config, net, deadline)?;
-    let proved = prove_over(config, net, &first, project, uuid, deadline)?;
+    if let Some((node,reason))=first.closed() {
+        return Ok((first.clone(),Err(Closed{node:node.map(str::to_owned),reason})));
+    }
+    let excluded=reachable::upgrade(config,net,&first,project,uuid,deadline)?;
+    let proved = prove_over(config, net, &first, project, uuid, deadline, excluded)?;
     Ok((first, proved))
+}
+
+/// Protocol-only background migration. The index contributes no authority;
+/// canonical full-history evidence is re-read before any prepare. It creates
+/// no task acknowledgement, certificate, attempt or native offer.
+pub(crate) fn catch_up_writer(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<()> {
+    ensure!(
+        ids::is_uuid(uuid),
+        "the cutover candidate is not a canonical task UUID"
+    );
+    // Install once, before read-only source lookup or first-floor preparation.
+    // No later phase may renew or consume local settlement's reservation.
+    let reserved = WithLocalReserve::new(net, deadline);
+    let net: &dyn Net = &reserved;
+    let needs_floor = {
+        let Some(store) =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+        else {
+            anyhow::bail!("the candidate task store is busy");
+        };
+        store.settle_cutover(uuid)?;
+        // A retained native prepare is resumed by the exact-original lane,
+        // even when a pin-before-canonical cut makes the ordinary read fail.
+        if store.pending_cutover_capture(uuid)?.is_none() {
+            let mut admitted = store
+                .admit_until(deadline)
+                .ok_or_else(|| anyhow::anyhow!("the candidate admission is busy"))?;
+            let task = admitted.load_complete(uuid)?;
+            if task.cutover_seal()?.is_some() {
+                admitted.cutover_ready(&task)?;
+                return Ok(());
+            }
+            task.validate_cutover_history()?;
+            // History validation above keeps existing execution/root evidence
+            // fail closed. Only an unmanaged task needs its first floor.
+            !task.execution_managed()
+        } else {
+            false
+        }
+    };
+    if needs_floor {
+        match prepare_floor(config, net, project, uuid, deadline, None)? {
+            Floor::Managed | Floor::Written => (),
+            Floor::Legacy(closed) | Floor::Refused(closed) => anyhow::bail!(
+                "the task's first-floor migration is pending ({})",
+                closed.reason
+            ),
+        }
+    }
+    let first = universe_with(config, net, deadline)?;
+    ensure!(
+        first.closed().is_none(),
+        "the local cutover identity or discovery is unavailable"
+    );
+    reachable::upgrade(config, net, &first, project, uuid, deadline)?;
+    Ok(())
 }
 
 fn prove_over(
@@ -720,12 +919,13 @@ fn prove_over(
     project: &str,
     uuid: &str,
     deadline: Instant,
+    mut excluded: BTreeMap<String,NotCutOver>,
 ) -> Result<std::result::Result<Proof, Closed>> {
     if let Some((node, reason)) = first.closed() {
         return closed(node, reason);
     }
     let root = config.state.join("replica");
-    let nodes: Vec<&Node> = first.nodes.values().filter(|node| !node.no_replica).collect();
+    let nodes: Vec<&Node> = first.nodes.values().filter(|node| !node.no_replica && node.closed.is_none() && !excluded.contains_key(&node.node)).collect();
     // The version each node last answered with: what it lacks is sent.
     let mut theirs: BTreeMap<String, Version> = BTreeMap::new();
     for round in 1..=ROUNDS {
@@ -740,6 +940,7 @@ fn prove_over(
         let mut confirmed = true;
         let mut answered = BTreeMap::new();
         for node in &nodes {
+            if excluded.contains_key(&node.node) {continue;}
             let stores = first.stores(node).expect("a routed node");
             let store = node.store.clone().expect("a node with a store");
             let since = theirs.get(&node.node).cloned().unwrap_or_default();
@@ -753,17 +954,18 @@ fn prove_over(
                 "remaining_ms": left(deadline).as_millis() as u64,
             });
             let route = Route { alias: &node.alias, nodes: &node.route, stores: &stores };
-            let reply = match net.call(&first.swarm, route, "replica-task", Some(&request), deadline) {
+            let reply = match net.call(&first.swarm, route, "replica-task", Some(&request), deadline.min(Instant::now()+Duration::from_secs(2))) {
                 Ok(reply) => reply,
                 Err(error) => {
                     let reason = if error.downcast_ref::<Unverified>().is_some() {
                         "unverified"
-                    } else if left(deadline).is_zero() {
+                    } else if left(deadline).is_zero() || probe_expired(&error) {
                         "deadline"
                     } else {
                         "unreachable"
                     };
-                    return closed(Some(&node.node), reason);
+                    excluded.insert(node.node.clone(),NotCutOver{node:node.node.clone(),store:node.store.clone(),reason:reason.into()});
+                    continue;
                 }
             };
             if reply["store"].as_str() != Some(store.as_str()) {
@@ -820,7 +1022,17 @@ fn prove_over(
         if let Some((node, reason)) = second.closed() {
             return closed(node, reason);
         }
-        if second.incarnation() != first.incarnation() {
+        // A peer that can no longer be covered within the optional budget
+        // is a negative fact, including during final discovery. Never keep
+        // its earlier acknowledgement in the final covered set.
+        for (node,mut fact) in reachable::negative(&second) {
+            if second.nodes[&node].closed.is_some_and(optional) {
+                fact.store=first.nodes.get(&node).and_then(|known|known.store.clone()).or(fact.store);
+                answered.remove(&node);
+                excluded.insert(node,fact);
+            }
+        }
+        if covered_incarnation(&second, &excluded) != covered_incarnation(first, &excluded) {
             return closed(None, "membership_changed");
         }
         return Ok(Ok(Proof {
@@ -832,6 +1044,8 @@ fn prove_over(
             view: first.view.clone(),
             me: first.me.clone(),
             nodes: answered,
+            not_cut_over: excluded.clone(),
+            seal: again.cutover_seal()?.expect("barrier checked seal").identity(),
             rounds: round,
         }));
     }
@@ -839,6 +1053,13 @@ fn prove_over(
         return closed(None, "deadline");
     }
     closed(None, "not_converged")
+}
+
+// Negative facts never become acknowledgements. Only the exact covered
+// cohort must remain unchanged; losing an optional node cannot veto it.
+fn covered_incarnation(universe:&Universe, excluded:&BTreeMap<String,NotCutOver>) -> String {
+    let nodes:BTreeMap<_,_>=universe.nodes.iter().filter(|(node,_)|!excluded.contains_key(*node)).collect();
+    format!("{:x}",Sha256::digest(serde_json::to_vec(&json!({"me":universe.me,"view":universe.view,"swarm":universe.swarm,"nodes":nodes})).expect("typed universe")))
 }
 
 impl Proof {
@@ -917,11 +1138,21 @@ impl Proof {
         if let Some(reason) = barrier(&task) {
             return closed(None, reason);
         }
+        if task.cutover_seal()?.as_ref().map(zerus_replica::CutoverSeal::identity).as_ref()!=Some(&self.seal) {
+            return closed(None,"seal_changed");
+        }
+        if admitted.cutover_ready(&task).is_err() {
+            return closed(None,"cutover_preparing");
+        }
         let holds = task
             .applied_version()
             .is_some_and(|version| version_includes(&version, &self.version));
         if !holds {
             return closed(None, "changed_version");
+        }
+        // The proof resource allowance never extends native admission.
+        if left(deadline).is_zero() {
+            return closed(None, "deadline");
         }
         let result = then(&catalog, &mut admitted, &mut task)?;
         drop(admitted);
@@ -953,6 +1184,7 @@ fn members_disagree(
     config: &Config,
     catalog: &LockedStore,
     nodes: &BTreeMap<String, String>,
+    not_cut_over: &BTreeMap<String,NotCutOver>,
 ) -> Option<Closed> {
     let refused = |node: Option<&str>, reason| {
         Some(Closed {
@@ -964,6 +1196,17 @@ fn members_disagree(
         return refused(None, "members_unreadable");
     };
     for (alias, peer) in &catalog.data.peers {
+        if let Some(absent)=not_cut_over.get(&peer.node) {
+            if absent.node!=peer.node || nodes.contains_key(&peer.node) {
+                return refused(Some(&peer.node),"member_store_changed");
+            }
+            if let Some(record)=records.get(alias).filter(|record|record.node==peer.node) {
+                if absent.store.as_ref().zip(record.store.as_ref()).is_some_and(|(old,new)|old!=new) {
+                    return refused(Some(&peer.node),"member_store_changed");
+                }
+            }
+            continue;
+        }
         let Some(record) = records.get(alias).filter(|record| record.node == peer.node) else {
             return refused(Some(&peer.node), "member_unobserved");
         };
@@ -977,7 +1220,7 @@ fn members_disagree(
         let current = record.protocol == Some(PROTOCOL)
             && record
                 .task_schema
-                .is_some_and(|schema| schema >= zerus_replica::execution::EXECUTION_TASK_SCHEMA);
+                .is_some_and(|schema| schema >= TASK_SCHEMA);
         if !record.no_replica && !current {
             return refused(Some(&peer.node), "member_downgraded");
         }
@@ -986,7 +1229,7 @@ fn members_disagree(
 }
 
 /// The certificate's format; a record in another one is not reused.
-const CERTIFICATE_FORMAT: u64 = 1;
+const CERTIFICATE_FORMAT: u64 = 2;
 
 /// The once-per-task certificate (C3e): the durable record of a proof that
 /// passed its final admission, reused with NO network while nothing it binds
@@ -1010,6 +1253,8 @@ pub struct Certificate {
     pub root: String,
     /// Every node that confirmed the proof, with the store it answered from.
     pub nodes: BTreeMap<String, String>,
+    pub not_cut_over: BTreeMap<String,NotCutOver>,
+    pub seal: String,
     /// This computer's configuration identity (`configuration`).
     pub configuration: String,
     /// When it was written, in milliseconds (information only).
@@ -1075,6 +1320,9 @@ impl Certificate {
             && self.format == CERTIFICATE_FORMAT
             && !self.version.is_empty()
             && canonical_version(&self.version).as_ref() == Some(&self.version)
+            && self.seal.len()==64 && self.seal.bytes().all(|byte|byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && self.not_cut_over.iter().all(|(node,fact)|node==&fact.node && node!=&self.node && ids::is_uuid(node)
+                && !self.nodes.contains_key(node) && fact.store.as_ref().is_none_or(|store|ids::is_uuid(store)))
             && self.nodes.iter().all(|(node, store)| {
                 node != &self.node && ids::is_uuid(node) && ids::is_uuid(store)
             })
@@ -1106,7 +1354,7 @@ impl Proof {
             Err(refused) => return Ok(Err(refused)),
         };
         self.admit_in(config, deadline, |catalog, admitted, _| {
-            if let Some(refused) = members_disagree(config, catalog, &self.nodes) {
+            if let Some(refused) = members_disagree(config, catalog, &self.nodes, &self.not_cut_over) {
                 return Ok(Err(refused));
             }
             write_certificate(admitted, &self.task, &bytes)?;
@@ -1135,6 +1383,8 @@ impl Proof {
             store,
             root: self.me.root.clone(),
             nodes: self.nodes.clone(),
+            not_cut_over:self.not_cut_over.clone(),
+            seal:self.seal.clone(),
             configuration,
             at: super::replica_members::now(),
             digest: String::new(),
@@ -1196,6 +1446,7 @@ pub(crate) enum Admission<R> {
     /// to hold no floor and no attempt while its project's bootstrap gate is
     /// positively open: a member known not current, or the person's hold.
     /// Only this outcome lets the caller keep the legacy route.
+    #[allow(dead_code)] // Retained for existing typed callers; the new gate never grants it.
     Legacy(Closed),
     /// Nothing was reserved, and the task may hold a floor or an attempt,
     /// or what decides is unknown: it is cutting over, never legacy. The
@@ -1346,7 +1597,7 @@ fn floor_matching(
     } else {
         admitted.load(uuid)
     };
-    let Ok(mut task) = loaded else {
+    let Ok(task) = loaded else {
         return Ok(Floor::Refused(Closed {
             node: None,
             reason: "damaged",
@@ -1363,8 +1614,7 @@ fn floor_matching(
             if expected == Some(start_mode::Mode::Legacy) {
                 return Ok(Floor::Refused(start_mode::changed()));
             }
-            task.floor()?;
-            admitted.save(&mut task)?;
+            admitted.write_first_floor(uuid)?;
             Floor::Written
         }
         Bootstrap::Open(_) if expected == Some(start_mode::Mode::Managed) => {
@@ -1377,6 +1627,67 @@ fn floor_matching(
     drop(store);
     drop(catalog);
     Ok(floor)
+}
+
+/// The common pre-reservation root preparation. A returning clean prefix
+/// first looks for an admitted seal; it must never mint another first floor.
+fn prepare_floor(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+    expected: Option<start_mode::Mode>,
+) -> Result<Floor> {
+    let mut initial = local(config, project, uuid, deadline)?;
+    if initial.as_ref().is_ok_and(|task| {
+        task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_none()
+    }) {
+        // Keep the person's hold and unreadable local evidence ahead of any
+        // read-only catch-up. A returning clean prefix never mints F2 first.
+        let Some(store) =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+        else {
+            return Ok(Floor::Refused(Closed {
+                node: None,
+                reason: "busy",
+            }));
+        };
+        match store.project() {
+            Ok(project) if project.cutover_hold().is_some_and(|hold| hold.on) => {
+                return Ok(Floor::Refused(Closed {
+                    node: None,
+                    reason: "held",
+                }))
+            }
+            Err(_) => {
+                return Ok(Floor::Refused(Closed {
+                    node: None,
+                    reason: "hold_unreadable",
+                }))
+            }
+            _ => {}
+        }
+        drop(store);
+        if reachable::catch_up_existing(config, net, project, uuid, deadline)? {
+            initial = local(config, project, uuid, deadline)?;
+        }
+    }
+    if initial.as_ref().is_ok_and(|task| {
+        task.floor_record().is_none() && task.cutover_seal().ok().flatten().is_some()
+    }) {
+        reachable::floor_born(config, project, uuid, deadline)?;
+    }
+    let needs_historical_mode_check = initial
+        .as_ref()
+        .is_ok_and(|task| task.cutover_seal().ok().flatten().is_none());
+    if !needs_historical_mode_check {
+        Ok(Floor::Managed)
+    } else if expected.is_some() {
+        floor_matching(config, project, uuid, deadline, SCAN_ENTRIES, expected)
+    } else {
+        floor_within(config, project, uuid, deadline)
+    }
 }
 
 /// Admits ONE reservation of the task's next attempt (C3 activation, A1;
@@ -1409,6 +1720,42 @@ pub(crate) fn admit_attempt<R>(
     admit_matching(config, net, project, uuid, deadline, None, reserve)
 }
 
+/// Preserve protocol-only validation for an already sealed writer. An
+/// unsealed write uses Start's exact admission entry, whose callback makes no
+/// business write, attempt or input. The command reloads and checks authority
+/// afterward; protocol preparation must not replace its business refusals.
+pub(crate) fn prepare_write(
+    config: &Config,
+    net: &dyn Net,
+    project: &str,
+    uuid: &str,
+    deadline: Instant,
+) -> Result<std::result::Result<(), Closed>> {
+    {
+        let store =
+            ProjectStore::open_within(&config.state.join("replica"), project, left(deadline))?
+                .ok_or_else(|| anyhow::anyhow!("the candidate task store is busy"))?;
+        store.settle_cutover(uuid)?;
+        if store.pending_cutover_capture(uuid)?.is_none() {
+            let mut admitted = store
+                .admit_until(deadline)
+                .ok_or_else(|| anyhow::anyhow!("the candidate admission is busy"))?;
+            let task = admitted.load_complete(uuid)?;
+            if task.cutover_seal()?.is_some() {
+                admitted.cutover_ready(&task)?;
+                return Ok(Ok(()));
+            }
+        }
+    }
+    Ok(
+        match admit_attempt(config, net, project, uuid, deadline, |_, _| Ok(Ok(())))? {
+            Admission::Reserved { .. } => Ok(()),
+            Admission::Legacy(closed) | Admission::Refused(closed) => Err(closed),
+            Admission::Uncertain(reason) => anyhow::bail!(reason),
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn admit_matching<R>(
     config: &Config,
@@ -1419,6 +1766,8 @@ fn admit_matching<R>(
     expected: Option<start_mode::Mode>,
     reserve: impl FnOnce(&mut Admitted<'_>, &mut TaskDoc) -> Result<std::result::Result<R, Closed>>,
 ) -> Result<Admission<R>> {
+    let reserved = WithLocalReserve::new(net, deadline);
+    let net: &dyn Net = &reserved;
     let entered = std::cell::Cell::new(false);
     let mut reserve = Some(reserve);
     let mut run = |admitted: &mut Admitted<'_>, task: &mut TaskDoc| {
@@ -1431,12 +1780,21 @@ fn admit_matching<R>(
         if expected == Some(start_mode::Mode::Legacy) {
             return Ok(Err(start_mode::changed()));
         }
+        // The expected-mode load can itself consume the remaining time.
+        if left(deadline).is_zero() {
+            return closed(None, "deadline");
+        }
         entered.set(true);
         (reserve.take().expect("reserved at most once"))(admitted, task)
     };
     // An error once `reserve` was entered leaves its save unknown.
     let uncertain = |error: anyhow::Error| Admission::Uncertain(format!("{error:#}"));
+    let expired = || uncertain(anyhow::anyhow!(
+        "the original task admission deadline elapsed after reservation; \
+         the original result is uncertain and must not be replayed"
+    ));
     match admit_certified(config, project, uuid, deadline, &mut run) {
+        Ok(Ok(Ok(_))) if left(deadline).is_zero() => return Ok(expired()),
         Ok(Ok(Ok(value))) => {
             return Ok(Admission::Reserved {
                 value,
@@ -1451,14 +1809,10 @@ fn admit_matching<R>(
         Err(error) if entered.get() => return Ok(uncertain(error)),
         Err(error) => return Err(error),
     }
-    let floored = if expected.is_some() {
-        floor_matching(config, project, uuid, deadline, SCAN_ENTRIES, expected)?
-    } else {
-        floor_within(config, project, uuid, deadline)?
-    };
+    let floored = prepare_floor(config, net, project, uuid, deadline, expected)?;
     match floored {
         Floor::Managed | Floor::Written => {}
-        Floor::Legacy(closed) => return Ok(Admission::Legacy(closed)),
+        Floor::Legacy(closed) => return Ok(Admission::Refused(closed)),
         Floor::Refused(closed) => return Ok(Admission::Refused(closed)),
     }
     let (_, proved) = prove(config, net, project, uuid, deadline)?;
@@ -1474,7 +1828,7 @@ fn admit_matching<R>(
         };
         // The certificate only spares the next attempt a proof.
         let certified = certificate.as_deref().is_some_and(|bytes| {
-            members_disagree(config, catalog, &proof.nodes).is_none()
+            members_disagree(config, catalog, &proof.nodes, &proof.not_cut_over).is_none()
                 && write_certificate(admitted, &proof.task, bytes).is_ok()
         });
         Ok(Ok(Admission::Reserved {
@@ -1483,6 +1837,7 @@ fn admit_matching<R>(
         }))
     });
     match admitted {
+        Ok(Ok(Admission::Reserved { .. })) if left(deadline).is_zero() => Ok(expired()),
         Ok(Ok(decided)) => Ok(decided),
         Ok(Err(refused)) => Ok(Admission::Refused(refused)),
         Err(error) if entered.get() => Ok(uncertain(error)),
@@ -1549,7 +1904,7 @@ pub(crate) fn admit_certified<R>(
         return closed(Some(&node), "changed_identity");
     }
     // Every direct member still as certified, by C2's records.
-    if let Some(refused) = members_disagree(config, &catalog, &certificate.nodes) {
+    if let Some(refused) = members_disagree(config, &catalog, &certificate.nodes, &certificate.not_cut_over) {
         return Ok(Err(refused));
     }
     let held = store.project()?.cutover_hold().is_some_and(|hold| hold.on);
@@ -1571,11 +1926,21 @@ pub(crate) fn admit_certified<R>(
     if let Some(reason) = task.fence_ready() {
         return closed(None, reason);
     }
+    if barrier(&task).is_some() || task.cutover_seal()?.as_ref().map(zerus_replica::CutoverSeal::identity).as_ref()!=Some(&certificate.seal) {
+        return closed(None,"seal_changed");
+    }
+    if admitted.cutover_ready(&task).is_err() {
+        return closed(None,"cutover_preparing");
+    }
     if !task
         .applied_version()
         .is_some_and(|version| version_includes(&version, &certificate.version))
     {
         return closed(None, "changed_version");
+    }
+    // A certificate's resource allowance is not native admission time.
+    if left(deadline).is_zero() {
+        return closed(None, "deadline");
     }
     let result = then(&mut admitted, &mut task)?;
     drop(admitted);
@@ -1591,6 +1956,8 @@ mod tests {
     use super::*;
     use crate::swarm::store::Peer;
     use anyhow::ensure;
+    mod legacy_writes;
+    mod proof_deadlines;
 
     fn fixture() -> (tempfile::TempDir, Config) {
         let dir = tempfile::tempdir().unwrap();
@@ -1753,7 +2120,8 @@ mod tests {
     #[test]
     fn a_writer_only_a_visited_node_knows_is_covered() {
         let universe = universe_known(chain(1), BTreeMap::from([(PEER.to_owned(), vec!["incoming".to_owned()])]), &[]);
-        assert_eq!(universe.closed(), Some((Some("incoming"), "unroutable")));
+        assert_eq!(universe.closed(), None);
+        assert_eq!(universe.nodes["incoming"].closed, Some("unroutable"));
         // Known and reachable, it is covered and open.
         let mut peers = chain(1);
         peers.get_mut(PEER).unwrap().push("incoming".to_owned());
@@ -1950,9 +2318,14 @@ printf '{{"node_id":"{PEER}"}}'
                     }
                     let mut request = input.unwrap().clone();
                     if self.faults.early.contains(node) {
+                        if request["cutover"]["action"] == "adopt" {
+                            let req: TaskRequest = serde_json::from_value(request.clone())?;
+                            return Ok(json!({"node_id":node,"store":req.store,"task":req.task,
+                                "cutover":{"kind":"adopted","seal":request["cutover"]["seal"],"version":{}}}));
+                        }
                         request["updates"] = json!([]);
                     }
-                    let mut reply = task(config, serde_json::from_value(request)?)?;
+                    let mut reply = task_using(config, serde_json::from_value(request)?, self)?;
                     if self.faults.wrong_store.contains(node) {
                         reply["store"] = json!("99999999-9999-4999-8999-999999999999");
                     }
@@ -2032,6 +2405,241 @@ printf '{{"node_id":"{PEER}"}}'
         assert_eq!((admitted.unwrap(), runs), (Ok(()), 1));
     }
 
+    #[test]
+    fn an_offline_optional_writer_does_not_veto_the_current_available_cohort() {
+        let members = members(&["a", "b", "c"], &[("a", "b"), ("a", "c")]);
+        let task = floored(&members, "a");
+        let net = InProcess::new(&members, Faults { offline:BTreeSet::from([members.ids["b"].clone()]), ..Faults::default() });
+        let (_, result) = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap();
+        assert!(result.is_ok(), "an absent optional computer still vetoed the cutover: {result:?}");
+    }
+
+    #[test]
+    fn losing_a_prepared_optional_writer_does_not_veto_the_remaining_cohort() {
+        let (members, uuid) = never_certified_fixture();
+        struct Lost<'a>(InProcess<'a>);
+        impl Net for Lost<'_> {
+            fn call(&self, swarm:&str, route:Route<'_>, command:&str, input:Option<&Value>, deadline:Instant)->Result<Value> {
+                if route.nodes.last()==Some(&self.0.members.ids["b"]) && command=="replica-task" && input.is_some_and(|value|value.get("cutover").is_none()) {
+                    anyhow::bail!("the prepared peer disappeared before its confirmation");
+                }
+                self.0.call(swarm,route,command,input,deadline)
+            }
+        }
+        let net=Lost(InProcess::new(&members,Faults::default()));
+        let proof=prove(&members.configs["a"],&net,"p",&uuid,soon()).unwrap().1.unwrap();
+        assert!(!proof.nodes.contains_key(&members.ids["b"]));
+        assert!(proof.nodes.contains_key(&members.ids["c"]));
+        assert_eq!(proof.not_cut_over[&members.ids["b"]].reason,"unreachable");
+    }
+
+    #[test]
+    fn a_slow_first_route_leaves_the_original_budget_for_a_healthy_later_peer() {
+        let (members, uuid)=never_certified_fixture();
+        struct Slow<'a>(InProcess<'a>);
+        impl Net for Slow<'_> {
+            fn call(&self, swarm:&str, route:Route<'_>, command:&str, input:Option<&Value>, deadline:Instant)->Result<Value> {
+                if route.nodes.last()==Some(&self.0.members.ids["b"]) {
+                    assert!(left(deadline)<=Duration::from_millis(2050),"one optional route received the whole deadline");
+                    anyhow::bail!("simulated route timeout");
+                }
+                self.0.call(swarm,route,command,input,deadline)
+            }
+        }
+        let net=Slow(InProcess::new(&members,Faults::default()));
+        let proof=prove(&members.configs["a"],&net,"p",&uuid,soon()).unwrap().1.unwrap();
+        assert!(proof.nodes.contains_key(&members.ids["c"]));
+        assert!(!proof.nodes.contains_key(&members.ids["b"]));
+    }
+
+    #[test]
+    fn actual_absent_route_waits_leave_a_healthy_later_peer_and_local_admission_time() {
+        let names=["a","b","c","d","e","f","g","h","z"];
+        let links=names[1..].iter().map(|name|("a",*name)).collect::<Vec<_>>();
+        let members=members(&names,&links);
+        let task=floored(&members,"a");
+        struct Sleeping<'a>(InProcess<'a>);
+        impl Net for Sleeping<'_> {
+            fn call(&self,swarm:&str,route:Route<'_>,command:&str,input:Option<&Value>,deadline:Instant)->Result<Value> {
+                if command=="hello" && route.nodes.last()!=Some(&self.0.members.ids["z"]) {
+                    std::thread::sleep(left(deadline));
+                    anyhow::bail!("the absent route actually exhausted its supplied probe deadline");
+                }
+                self.0.call(swarm,route,command,input,deadline)
+            }
+        }
+        let net=Sleeping(InProcess::new(&members,Faults::default()));
+        let deadline=Instant::now()+Duration::from_secs(15);
+        let proof=prove(&members.configs["a"],&net,"p",task.uuid(),deadline).unwrap().1.unwrap();
+        assert!(proof.nodes.contains_key(&members.ids["z"]),"a healthy later peer was starved by absent routes");
+        assert_eq!(proof.not_cut_over.len(),7);
+        let mut admitted=0;
+        assert!(proof.admit(&members.configs["a"],deadline,|_,_|{admitted+=1;Ok(())}).unwrap().is_ok());
+        assert_eq!(admitted,1);
+        assert!(Instant::now()<deadline,"the original deadline was extended or consumed");
+    }
+
+    #[test]
+    fn worker_cutover_allows_an_ordinary_stage_without_any_start_or_certificate() {
+        let (members,uuid)=never_certified_fixture();
+        let config=&members.configs["a"];
+        {
+            let mut catalog=LockedStore::load(config).unwrap();
+            let node=catalog.data.node_id.clone();
+            for (field,value) in [("alive",json!(true)),("name",json!("p")),("color",json!("#123456"))] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::project("p",field),value).unwrap();
+            }
+            catalog.save().unwrap();
+        }
+        let net=InProcess::new(&members,Faults{offline:BTreeSet::from([members.ids["b"].clone()]),..Faults::default()});
+        let mut worker=super::super::replica::CutoverScan::default();
+        assert!(worker.advance_with(config,&net).unwrap(),"an ordinary existing writer has no automatic cutover trigger");
+        assert!(held(&members,"a",&uuid).unwrap().cutover_seal().unwrap().is_some());
+        assert!(!record_path(&members,&uuid).exists());
+        assert_eq!(attempts(&members,&uuid),0);
+        let store=ProjectStore::open(&config.state.join("replica"),"p").unwrap();
+        let mut changed=store.load(&uuid).unwrap();
+        store.change_stage(&mut changed,zerus_replica::Stage::Backlog,&zerus_replica::Actor::Person,30).unwrap();
+        store.save(&mut changed).unwrap();
+        drop(store);
+        let current=held(&members,"a",&uuid).unwrap();
+        assert_eq!(current.stage().unwrap(),zerus_replica::Stage::Backlog);
+        assert_eq!(attempts(&members,&uuid),0);
+        assert!(!record_path(&members,&uuid).exists());
+        assert!(current.view().unwrap().log.iter().all(|entry|!matches!(entry.kind.as_str(),"started"|"reported"|"attempt")));
+        let stale={
+            let store=ProjectStore::open(&members.configs["b"].state.join("replica"),"p").unwrap();
+            let mut stale=store.load(&uuid).unwrap();
+            stale.comment("Uncut-over B's old-rule edit",&zerus_replica::Actor::Person,40).unwrap();
+            store.save_legacy_for_test(&mut stale).unwrap();
+            stale.snapshot().unwrap()
+        };
+        for name in ["a","c"] {
+            let store=ProjectStore::open(&members.configs[name].state.join("replica"),"p").unwrap();
+            let before=store.load(&uuid).unwrap().version();
+            let refused=store.import_updates(vec![Update{document:Document::Task(uuid.clone()),bytes:stale.clone()}]).unwrap();
+            assert_eq!(refused.refused.len(),1,"{name}");
+            assert_eq!(store.load(&uuid).unwrap().version(),before,"a worker's seal cannot admit stale B directly or through current C");
+        }
+        assert_eq!(attempts(&members,&uuid),0);
+    }
+
+    #[test]
+    fn manual_sync_cuts_over_a_historical_writer_before_an_ordinary_change() {
+        let (members,uuid)=never_certified_fixture();
+        let config=&members.configs["a"];
+        {
+            let mut catalog=LockedStore::load(config).unwrap();
+            let node=catalog.data.node_id.clone();
+            for (field,value) in [("alive",json!(true)),("name",json!("p")),("color",json!("#123456"))] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::project("p",field),value).unwrap();
+            }
+            // B/C were genuine prior C2 participants, now without a route.
+            // Keep their exact known identities as negative catalog facts.
+            for name in ["b","c"] {
+                catalog.data.catalog.set(&node,super::super::catalog::Key::machine(&members.ids[name],"name"),json!(name)).unwrap();
+            }
+            catalog.data.peers.clear();
+            catalog.save().unwrap();
+        }
+        ProjectStore::open(&config.state.join("replica"),"a-idle").unwrap();
+        super::super::transport::sync(config).unwrap();
+        assert!(held(&members,"a",&uuid).unwrap().cutover_seal().unwrap().is_none(),"the first invocation visits the idle earlier project");
+        super::super::transport::sync(config).unwrap();
+        let ready=held(&members,"a",&uuid).unwrap();
+        let seal=ready.cutover_seal().unwrap().expect("manual sync used the protocol-only entry");
+        assert!(seal.not_cut_over.contains_key(&members.ids["b"]));
+        assert_eq!(attempts(&members,&uuid),0);
+        assert!(!record_path(&members,&uuid).exists());
+        let store=ProjectStore::open(&config.state.join("replica"),"p").unwrap();
+        let mut changed=store.load(&uuid).unwrap();
+        store.change_stage(&mut changed,zerus_replica::Stage::Backlog,&zerus_replica::Actor::Person,29).unwrap();
+        changed.comment("Ordinary comment after sync, no Start",&zerus_replica::Actor::Person,30).unwrap();
+        store.save(&mut changed).unwrap();
+        assert_eq!(changed.stage().unwrap(),zerus_replica::Stage::Backlog);
+        assert!(changed.view().unwrap().log.iter().any(|entry|entry.text=="Ordinary comment after sync, no Start"));
+        assert!(changed.view().unwrap().log.iter().all(|entry|!matches!(entry.kind.as_str(),"started"|"reported"|"attempt")));
+        drop(store);
+        assert!(!record_path(&members,&uuid).exists());
+    }
+
+    fn never_certified_fixture() -> (Members, String) {
+        let members=members(&["a","b","c"],&[("a","b"),("a","c")]);
+        let mut task=TaskDoc::create(zerus_replica::NewTask{project:"p",id:"T-a1b2c3",text:"historical first floor",
+            stage:zerus_replica::Stage::Todo,target:zerus_replica::Target::Any,author:zerus_replica::Actor::Person,rank:"V",now:1}).unwrap();
+        let uuid=task.uuid().to_owned();
+        {
+            let store=ProjectStore::open(&members.configs["a"].state.join("replica"),"p").unwrap();
+            store.save_legacy_for_test(&mut task).unwrap();
+        }
+        for name in ["b","c"] {
+            let store=ProjectStore::open(&members.configs[name].state.join("replica"),"p").unwrap();
+            assert!(store.import_updates(vec![Update{document:Document::Task(uuid.clone()),bytes:task.snapshot().unwrap()}]).unwrap().refused.is_empty());
+        }
+        synced(&members,"a");
+        assert_eq!(floor_within(&members.configs["a"],"p",&uuid,soon()).unwrap(),Floor::Written);
+        let floored=held(&members,"a",&uuid).unwrap();
+        assert!(floored.cutover_seal().unwrap().is_none());
+        {
+            let store=ProjectStore::open(&members.configs["c"].state.join("replica"),"p").unwrap();
+            assert!(store.import_updates(vec![Update{document:Document::Task(uuid.clone()),bytes:floored.snapshot().unwrap()}]).unwrap().refused.is_empty());
+        }
+        assert!(!record_path(&members,&uuid).exists());
+        (members,uuid)
+    }
+
+    #[test]
+    fn a_never_certified_c2_floor_starts_with_b_offline_and_refuses_its_old_branch() {
+        let (members,uuid)=never_certified_fixture();
+        let net=InProcess::new(&members,Faults{offline:BTreeSet::from([members.ids["b"].clone()]),..Faults::default()});
+        let old=universe_with(&members.configs["a"],&net,soon()).unwrap();
+        assert_eq!(old.nodes[&members.ids["b"]].closed,Some("unreachable"));
+        assert!(!record_path(&members,&uuid).exists());
+        let runs=std::cell::Cell::new(0);
+        let first=admit_attempt(&members.configs["a"],&net,"p",&uuid,soon(),send(FIRST,&runs)).unwrap();
+        assert!(matches!(first,Admission::Reserved{..}),"{first:?}");
+        assert_eq!(runs.get(),1);
+        let certificate:Certificate=serde_json::from_slice(&std::fs::read(record_path(&members,&uuid)).unwrap()).unwrap();
+        assert!(!certificate.nodes.contains_key(&members.ids["b"]));
+        assert_eq!(certificate.not_cut_over[&members.ids["b"]].store,Some(ProjectStore::store_id(&members.configs["b"].state.join("replica")).unwrap()));
+        let bytes={
+            let store=ProjectStore::open(&members.configs["b"].state.join("replica"),"p").unwrap();
+            let mut old=store.load(&uuid).unwrap();
+            old.comment("old offline branch",&zerus_replica::Actor::Person,20).unwrap();
+            store.save_legacy_for_test(&mut old).unwrap();
+            old.snapshot().unwrap()
+        };
+        for name in ["a","c"] {
+            let store=ProjectStore::open(&members.configs[name].state.join("replica"),"p").unwrap();
+            let _=store.load(&uuid).unwrap();
+            let paths=["loro","updates","managed","cutover"].map(|ext|store.dir().join("tasks").join(format!("{uuid}.{ext}")));
+            let before=paths.iter().map(std::fs::read).collect::<Vec<_>>();
+            let refused=store.import_updates(vec![Update{document:Document::Task(uuid.clone()),bytes:bytes.clone()}]).unwrap();
+            assert_eq!(refused.refused.len(),1,"{name}");
+            for (path,before) in paths.iter().zip(before) {
+                assert_eq!(std::fs::read(path).ok(),before.ok(),"{name}: {}",path.display());
+            }
+        }
+        assert_eq!(attempts(&members,&uuid),1);
+    }
+
+    #[test]
+    fn a_clean_prefloor_b_adopts_the_same_root_then_saves_a_new_original() {
+        let (members,uuid)=never_certified_fixture();
+        let runs=std::cell::Cell::new(0);
+        let offline=InProcess::new(&members,Faults{offline:BTreeSet::from([members.ids["b"].clone()]),..Faults::default()});
+        assert!(matches!(admit_attempt(&members.configs["a"],&offline,"p",&uuid,soon(),send(FIRST,&runs)).unwrap(),Admission::Reserved{..}));
+        not_admitted(&members,&uuid,FIRST); // The fixture offered no native input.
+        synced(&members,"b");
+        let online=InProcess::new(&members,Faults::default());
+        let next=admit_attempt(&members.configs["b"],&online,"p",&uuid,soon(),send(SECOND,&runs)).unwrap();
+        assert!(matches!(next,Admission::Reserved{..}),"{next:?}");
+        assert_eq!(runs.get(),2);
+        let a=held(&members,"a",&uuid).unwrap();let b=held(&members,"b",&uuid).unwrap();
+        assert_eq!(a.cutover_seal().unwrap(),b.cutover_seal().unwrap());
+        assert_eq!(b.view().unwrap().execution.unwrap().attempts,2);
+    }
+
     /// desktop-u's control: a later winning lower schema write on one member
     /// (a copy that never saw the floor) is repaired there, and only the
     /// repaired common version, confirmed by every member, proves the fence.
@@ -2066,16 +2674,19 @@ printf '{{"node_id":"{PEER}"}}'
         let net = InProcess::new(&members, Faults::default());
         let config = &members.configs["a"];
         let proof = prove(config, &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
-        assert!(proof.rounds >= 2, "the repair needs another round: {}", proof.rounds);
+        assert!(proof.not_cut_over.contains_key(&members.ids["c"]));
         let here = held(&members, "a", task.uuid()).unwrap();
         assert!(version_includes(&proof.version, &task.applied_version().unwrap()));
-        assert_ne!(Some(&proof.version), task.applied_version().as_ref(), "the common version holds the repair");
-        for name in ["a", "b", "c"] {
+        assert_eq!(Some(&proof.version), task.applied_version().as_ref(), "the stale branch adds no repair or exemption");
+        for name in ["a", "b"] {
             let copy = held(&members, name, task.uuid()).unwrap();
             assert_eq!(copy.applied_version().as_ref(), Some(&proof.version), "{name}");
             assert!(copy.stored_schema() >= TASK_SCHEMA, "{name}");
         }
-        assert_eq!(here.title(), "Rate limiting");
+        assert_ne!(here.title(), "Rate limiting");
+        let kept = held(&members, "c", task.uuid()).unwrap();
+        assert_eq!(kept.title(), "Rate limiting");
+        assert!(kept.cutover_seal().unwrap().is_none());
     }
 
     /// desktop-u's control: a member that answers before it imports and
@@ -2086,8 +2697,10 @@ printf '{{"node_id":"{PEER}"}}'
         let task = floored(&members, "a");
         let faults = Faults { early: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
         let net = InProcess::new(&members, faults);
-        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
-        assert!(matches!(closed.reason, "not_converged" | "damaged"), "{closed:?}");
+        let proof = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        assert!(!proof.nodes.contains_key(&members.ids["c"]));
+        assert!(proof.not_cut_over.contains_key(&members.ids["c"]));
+        assert!(held(&members, "c", task.uuid()).is_none(), "the early reply never imported or admitted the proposal");
         assert!(held(&members, "c", task.uuid()).is_none(), "c never imported the floor");
         // c holds the floored task at an older version, healthy in every
         // other way: answering before it imports, with nothing more to send,
@@ -2100,11 +2713,10 @@ printf '{{"node_id":"{PEER}"}}'
         a.save(&mut newer).unwrap();
         drop(a);
         let faults = Faults { early: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
-        let closed = prove(&members.configs["a"], &InProcess::new(&members, faults), "p", task.uuid(), soon())
-            .unwrap()
-            .1
-            .unwrap_err();
-        assert_eq!(closed.reason, "not_converged");
+        let proof = prove(&members.configs["a"], &InProcess::new(&members, faults), "p", task.uuid(), soon())
+            .unwrap().1.unwrap();
+        assert!(!proof.nodes.contains_key(&members.ids["c"]));
+        assert!(proof.not_cut_over.contains_key(&members.ids["c"]));
         let older = held(&members, "c", task.uuid()).unwrap();
         assert_eq!(older.fence_ready(), None, "c's older copy is healthy");
         assert_ne!(older.applied_version(), newer.applied_version());
@@ -2379,6 +2991,19 @@ printf '{{"node_id":"{PEER}"}}'
         a.save(&mut task).unwrap();
         drop(a);
         assert_eq!(reuse(&members, &uuid), (Ok(()), 1));
+    }
+
+    #[test]
+    fn a_certificate_cannot_retarget_the_admitted_task_seal() {
+        let members=chain_abc();
+        let (uuid,mut certificate)=certified(&members);
+        certificate.seal="00".repeat(32);
+        certificate.digest=certificate.digest_of();
+        assert!(certificate.intact(),"well-formed data is not native admission");
+        std::fs::write(record_path(&members,&uuid),serde_json::to_vec(&certificate).unwrap()).unwrap();
+        let (result,runs)=reuse(&members,&uuid);
+        assert_eq!(result.unwrap_err().reason,"seal_changed");
+        assert_eq!(runs,0);
     }
 
     /// C3e: anything the certificate binds that changed refuses its reuse,
@@ -3033,7 +3658,7 @@ printf '{{"node_id":"{PEER}"}}'
             now: 1,
         })
         .unwrap();
-        store.save(&mut task).unwrap();
+        store.save_legacy_for_test(&mut task).unwrap();
         task
     }
 
@@ -3187,7 +3812,7 @@ printf '{{"node_id":"{PEER}"}}'
             admit_attempt(config, &net, "p", task.uuid(), soon(), send(FIRST, &runs)).unwrap();
         assert_eq!(outcome(held), ("held", None, false));
         assert_eq!((net.calls.get(), runs.get()), (0, 0));
-        // Without a certificate and with c offline, the proof closes.
+        // Without a certificate, c being offline cannot veto current a/b.
         let members = chain_abc();
         let task = floored(&members, "a");
         observe_direct(&members, "a");
@@ -3205,9 +3830,8 @@ printf '{{"node_id":"{PEER}"}}'
             send(FIRST, &runs),
         )
         .unwrap();
-        let (_, node, legacy) = outcome(closed);
-        assert_eq!((node, legacy), (Some(members.ids["c"].clone()), false));
-        assert_eq!((runs.get(), attempts(&members, task.uuid())), (0, 0));
+        assert!(matches!(closed, Admission::Reserved { .. }));
+        assert_eq!((runs.get(), attempts(&members, task.uuid())), (1, 1));
     }
 
     /// desktop-u's (i): a task's first floor needs the bootstrap gate read
@@ -3234,7 +3858,7 @@ printf '{{"node_id":"{PEER}"}}'
                 send(FIRST, &runs),
             )
             .unwrap();
-            assert_eq!((net.calls.get(), runs.get()), (0, 0));
+            assert_eq!(runs.get(), 0, "read-only source discovery never reserves native input");
             assert!(
                 !held(&members, "a", task.uuid())
                     .unwrap()
@@ -3257,14 +3881,14 @@ printf '{{"node_id":"{PEER}"}}'
         };
         let older = json!({"protocol": PROTOCOL, "task_schema": 6,
                            "store": "77777777-7777-4777-8777-777777777777"});
-        assert_eq!(open(&|_| {}), ("unseen", true, true));
+        assert_eq!(open(&|_| {}), ("unseen", true, false));
         assert_eq!(
             open(&|members| record_b(members, older.clone())),
-            ("task_schema", true, true)
+            ("task_schema", true, false)
         );
         assert_eq!(
             open(&|members| observe_direct(members, "a")),
-            ("no_inventory", true, true)
+            ("no_inventory", true, false)
         );
         assert_eq!(
             open(&|members| {
@@ -3278,14 +3902,14 @@ printf '{{"node_id":"{PEER}"}}'
                 )
                 .unwrap();
             }),
-            ("unreachable", true, true)
+            ("unreachable", true, false)
         );
         assert_eq!(
             open(&|members| {
                 synced(members, "a");
                 hold(members, true);
             }),
-            ("held", false, true)
+            ("held", false, false)
         );
         assert_eq!(
             open(&|members| {
@@ -3438,7 +4062,7 @@ printf '{{"node_id":"{PEER}"}}'
     fn a_hold_or_membership_change_before_the_final_admission_refuses() {
         let refused = |change: &dyn Fn(&Members)| -> (&'static str, bool) {
             let members = chain_abc();
-            let task = unfloored(&members, "a");
+            let task = floored(&members, "a");
             synced(&members, "a");
             let runs = std::cell::Cell::new(0);
             let net = counted(&members, Faults::default());
@@ -3673,13 +4297,13 @@ printf '{{"node_id":"{PEER}"}}'
         let observed = super::super::replica_members::Observed::of(&members.ids["b"], &json!({}));
         super::super::replica_members::seen(a, "b", &observed, 9).unwrap();
         let catalog = LockedStore::load(a).unwrap();
-        assert_eq!(members_disagree(a, &catalog, &BTreeMap::new()), None);
+        assert_eq!(members_disagree(a, &catalog, &BTreeMap::new(), &BTreeMap::new()), None);
         let certified = BTreeMap::from([(
             members.ids["b"].clone(),
             "77777777-7777-4777-8777-777777777777".to_owned(),
         )]);
         assert_eq!(
-            members_disagree(a, &catalog, &certified).unwrap().reason,
+            members_disagree(a, &catalog, &certified, &BTreeMap::new()).unwrap().reason,
             "member_store_changed"
         );
     }
@@ -3710,8 +4334,9 @@ printf '{{"node_id":"{PEER}"}}'
         let task = floored(&members, "a");
         let faults = Faults { wrong_store: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
         let net = InProcess::new(&members, faults);
-        let closed = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
-        assert_eq!(closed, Closed { node: Some(members.ids["c"].clone()), reason: "changed_identity" });
+        let proof = prove(&members.configs["a"], &net, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        assert!(!proof.nodes.contains_key(&members.ids["c"]));
+        assert_eq!(proof.not_cut_over[&members.ids["c"]].reason, "unverified");
     }
 
     /// An unreachable writer, an unfloored task and an exhausted budget all
@@ -3722,8 +4347,9 @@ printf '{{"node_id":"{PEER}"}}'
         let task = floored(&members, "a");
         let faults = Faults { offline: BTreeSet::from([members.ids["c"].clone()]), ..Faults::default() };
         let offline = InProcess::new(&members, faults);
-        let closed = prove(&members.configs["a"], &offline, "p", task.uuid(), soon()).unwrap().1.unwrap_err();
-        assert_eq!(closed, Closed { node: Some(members.ids["c"].clone()), reason: "unreachable" });
+        let proof = prove(&members.configs["a"], &offline, "p", task.uuid(), soon()).unwrap().1.unwrap();
+        assert!(!proof.nodes.contains_key(&members.ids["c"]));
+        assert_eq!(proof.not_cut_over[&members.ids["c"]].reason, "unreachable");
         let store = ProjectStore::open(&members.configs["a"].state.join("replica"), "p").unwrap();
         let mut plain = TaskDoc::create(zerus_replica::NewTask {
             project: "p",
@@ -3871,7 +4497,7 @@ printf '{{"node_id":"{PEER}"}}'
         let universe = universe_of(chain(2), &["node-1"]);
         let node = &universe.nodes["node-1"];
         assert_eq!((node.no_replica, node.closed), (false, Some("unavailable")));
-        assert_eq!(universe.closed(), Some((Some("node-1"), "unavailable")));
+        assert_eq!(universe.closed(), None);
     }
 
     /// desktop-u on #1452: a relay's budget starts on arrival. A catalog

@@ -62,6 +62,15 @@ before-effect refusal. No provider, acknowledgement, slot mutation, native
 input, task history, floor or controller is called. Plan and Begin stay explicitly
 unqualified. Person over the CLI bridge still refuses.
 
+The refusal-only native-turn seam now names that missing association precisely:
+`task_control_native_turn_association_unqualified`, with `attempted: false` and
+`read_only: true`. No current adapter or fixture constructs positive turn
+authority. Existing peer/command/Person guards run first; this route adds no
+task/Teams lookup, write or acknowledgement. Future positive Begin still needs
+independent ordinary own-ack/Teams admission and an exact input-generation/tool
+association, including revocation before downstream use. See the
+[writer/adapter census](../../../docs/task-control-native-turn-census.md).
+
 Exactly matching durable requests, including Reserved and Unknown, are lookup
 only, never another worker or import. In-flight duplicates consult bounded
 memory; changed immutable admissions refuse. A crash before durable admission
@@ -433,6 +442,16 @@ Person proof. It supplies no live runtime freshness or executor queue position;
 the existing project To do order keeps its separate meaning. There is no new
 renderer action, mobile binding, dispatch admission or activation in this leaf.
 
+The desktop inspector reuses that decoder in its selected-task presentation and
+renders a **Saved execution** section. Submission stays begin-unconfirmed;
+recorded begin, pause and ready facts never claim current native work. It shows
+the saved attempt/generation, requirement revisions, executor reference and
+timestamps, retaining conflict and unknown/unexplained warnings. Failed reads
+mark retained evidence as stale. Absent or unsupported data stays unavailable;
+JavaScript-unsafe integers are refused rather than rounded. Live state and the
+executor queue remain explicitly unavailable. No controls, polling, mobile ABI
+or executor-queue storage are added by this renderer leaf.
+
 ### Native and activation controls
 
 Record controls cover lazy/no-op storage, exact identities and slot CAS,
@@ -485,3 +504,31 @@ This qualification does not activate `.4.8`: `TASK_CONTROLS` stays false and the
 non-Linux authority guard-export paths still refuse. A cross-check or ordinary
 GUI preview alone never qualifies the native path. No live agent or owner
 display is needed or used for these controls.
+
+### Mobile saved execution reader (`zerus-cg5h.4.9.3`)
+
+The additive optional `TaskInfo.execution` record carries saved evidence only:
+one current attempt, exact saved identities, generation and requirement revisions,
+recorded phase/times and boolean conflict, unknown-delivery and unexplained-history
+flags. It carries no frozen input, native process proof, history-sized arrays,
+executor-slot claim or control capability. Invalid, unsupported or overbound
+projections are unavailable rather than truncated or rounded into another identity.
+Adding this reader never changes `TaskInfo.writable` or phone write admission.
+
+Android and iOS present these facts in the selected task's **Saved execution**
+section. Submission remains begin-unconfirmed; saved begin/pause/ready events are
+labelled as recorded facts. Unknown delivery in another generation remains visible
+beside the current record. Explicit legacy history remains distinct from absent
+execution data. Both views state that live execution state and executor queue
+information are unavailable, and contain no execution actions or polling.
+
+A failed local-list refresh marks the retained selected-project evidence stale.
+That marker is scoped to the same project and clears on a successful local read;
+it proves neither freshness nor failure of native execution or remote work. The
+shared `mobile/android/app/src/test/resources/task-saved-execution.json` contract
+pins the saved phases, uncertainty, legacy/absent/future and malformed cases for
+the FFI and both client readers. Labels use the English/Russian resource catalogs.
+
+This read-only slice follows admitted qualified-write PR #2436 and precedes its
+separate media/identity row integration. Qualified edits, native current-turn
+association, live freshness and executor queues retain their own contracts.

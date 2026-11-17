@@ -45,6 +45,9 @@ fn native_job(record: &Value, call: &str, command: &str, at: f64) -> Value {
     let mut j = new_job(record, "main", call, command, at);
     j["source"] = json!("native_history");
     j["observed"] = json!(false);
+    // A command/completion identity alone carries no output evidence. Keep
+    // absence distinct from a native result that explicitly recorded "".
+    j.as_object_mut().unwrap().remove("output");
     j
 }
 pub(super) fn collect(record: &Value, jobs: &mut Jobs, live: bool) -> Result<()> {
@@ -62,6 +65,9 @@ pub(super) fn collect(record: &Value, jobs: &mut Jobs, live: bool) -> Result<()>
 pub(super) fn codex_result(value: &Value) -> Value {
     if value.is_object() {
         return value.clone();
+    }
+    if !value.is_string() && !value.is_array() {
+        return Value::Null;
     }
     let s = text(value);
     if let Ok(v) = serde_json::from_str::<Value>(&s) {

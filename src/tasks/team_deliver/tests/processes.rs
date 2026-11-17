@@ -166,6 +166,11 @@ fn entry() {
     } else if mode == "hosted-binding" {
         let args: Vec<String> = serde_json::from_str(&std::env::var("HGS_TEAM_DELIVER_ARGS").unwrap()).unwrap();
         crate::state::dsh::launched_binding_for_test(&args[0], &config.state, Some(&args[1])).map_err(fail)
+    } else if mode == "planned-write" {
+        let args: Vec<String> =
+            serde_json::from_str(&std::env::var("HGS_TEAM_DELIVER_ARGS").unwrap()).unwrap();
+        super::super::planned::write(&config, &args[0], args[1].parse().unwrap(), &args[2], false)
+            .map(|state| json!({"state":state}))
     } else if mode == "init" {
         crate::swarm::dispatch(&config, &["initialize".into()], false).map(|_| json!({}))
     } else if mode == "tmux-env" {
@@ -303,6 +308,14 @@ impl Fixture {
         Self::with_agent("codex")
     }
     fn with_agent(agent: &str) -> Self {
+        Self::with_intake_seed(agent, true)
+    }
+    // Explicit historical fixture: an independently bound lead queues the
+    // initial task, so there is no new Person-original evidence to erase.
+    fn with_legacy_session_intake() -> Self {
+        Self::with_intake_seed("codex", false)
+    }
+    fn with_intake_seed(agent: &str, native_person: bool) -> Self {
         let h = Harness::empty();
         let config = Config {
             home: h.temp.path().display().to_string(),
@@ -378,11 +391,15 @@ impl Fixture {
             f.task.uuid = task.uuid().into();
             tasks.save(&mut task).unwrap();
         }
-        let reply = crate::teams::tasks::send(
+        let reply = crate::teams::tasks::models::send(
             &crate::teams::tasks::Caller {
                 state: &f.config.state,
                 machine: &home,
-                actor: Actor::Person,
+                actor: if native_person {
+                    Actor::Person
+                } else {
+                    Actor::Agent(f.lead.clone())
+                },
             },
             &f.task,
             TEAM,
@@ -1038,7 +1055,7 @@ fn an_effect_cannot_authorize_a_different_valid_node_or_member() {
             };
             store.save(&mut doc).unwrap();
             drop(store);
-            let reply = crate::teams::tasks::send(
+            let reply = crate::teams::tasks::models::send(
                 &crate::teams::tasks::Caller {
                     state: &f.config.state,
                     machine: &f.lead.machine,
@@ -1071,6 +1088,10 @@ fn an_effect_cannot_authorize_a_different_valid_node_or_member() {
 fn delivery_cutover_repeats_reserve_nothing_and_recovery_never_sends() {
     let f = Fixture::new();
     let store = crate::tasks::store(&f.config, &f.task.project).unwrap();
+    // This control holds an already admitted task, after its first floor.
+    let mut task = store.load(&f.task.uuid).unwrap();
+    task.floor().unwrap();
+    store.save(&mut task).unwrap();
     let mut project = store.project().unwrap();
     project
         .set_cutover_hold(true, &Actor::Person, now())
@@ -1170,6 +1191,7 @@ fn service_requests_refuse_unknown_authority_fields_without_writing() {
 }
 
 mod clear_tests;
+mod publication_tests;
 mod stage_tests;
 mod terminal_clear_tests;
 
@@ -1181,8 +1203,10 @@ mod return_text_tests;
 
 mod attempt_tests;
 
+mod reservation_readiness;
 mod removal_tests;
 pub(crate) use removal_tests::{removed_stage_cancel, RealCancel};
+pub(crate) use attempt_tests::{cutover_delivery::fence_delivery_cycle, legacy_cancel::with_legacy_cancel};
 
 /// What keeps a hand-out from its reservation in [`blocked_handout`].
 #[derive(Clone, Copy, Debug)]

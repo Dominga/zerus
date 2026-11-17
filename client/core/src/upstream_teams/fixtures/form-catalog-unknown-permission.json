@@ -1,0 +1,297 @@
+{
+  "catalog": {
+    "pipelines": [
+      {
+        "accept": "lead",
+        "id": "code",
+        "implementer": "developer",
+        "max_rounds": 0,
+        "name": "Code: review, test, lead",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          },
+          {
+            "kind": "test",
+            "role": "tester"
+          }
+        ]
+      },
+      {
+        "accept": "lead",
+        "id": "reviewed",
+        "implementer": "developer",
+        "max_rounds": 0,
+        "name": "Reviewed: review, lead",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          }
+        ]
+      },
+      {
+        "accept": "pipeline",
+        "id": "docs",
+        "implementer": "developer",
+        "max_rounds": 0,
+        "name": "Docs: review, then accepted",
+        "stages": [
+          {
+            "kind": "review",
+            "role": "reviewer"
+          }
+        ]
+      },
+      {
+        "accept": "lead",
+        "id": "check",
+        "implementer": "developer",
+        "max_rounds": 0,
+        "name": "Check: lead",
+        "stages": []
+      }
+    ],
+    "planning_rules": [
+      "Aim at 20 to 25 tasks in a phase and offer a split above 25.",
+      "Use a hard dependency only where it is needed, and none across phases: use a barrier phase.",
+      "Plan shared foundations first.",
+      "A reviewer never writes what it reviews.",
+      "A tester never implements.",
+      "Make each task text self-contained, with criteria a reviewer can check.",
+      "The lead never builds, tests or merges a member's work by hand."
+    ],
+    "roles": [
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "context": "keep",
+        "effort": "",
+        "id": "developer",
+        "model": "",
+        "name": "Developer",
+        "pipeline": ""
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "context": "keep",
+        "effort": "",
+        "id": "reviewer",
+        "model": "",
+        "name": "Reviewer",
+        "pipeline": ""
+      },
+      {
+        "account": {
+          "mode": "freest"
+        },
+        "agent": "claude",
+        "context": "keep",
+        "effort": "",
+        "id": "tester",
+        "model": "",
+        "name": "Tester",
+        "pipeline": ""
+      }
+    ],
+    "templates": [
+      {
+        "default_pipeline": "code",
+        "description": "Planned work on one goal: two developers, a reviewer and a tester.",
+        "digest": "a13f8ce303eeec0f3a1eeae443bc1a1594696e48c365e18d5099afec353e722a",
+        "id": "feature-delivery",
+        "lead": {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "model": "",
+          "rules": ""
+        },
+        "name": "Feature delivery",
+        "roster": [
+          {
+            "count": 2,
+            "optional": false,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "optional": false,
+            "role": "reviewer"
+          },
+          {
+            "count": 1,
+            "optional": false,
+            "role": "tester"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 6,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "lead",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        },
+        "unknown_fields": [],
+        "unknown_permissions": []
+      },
+      {
+        "default_pipeline": "reviewed",
+        "description": "A queue of independent fixes: a developer and a reviewer.",
+        "digest": "6d15fdbdd92ac4d5c5bc53f0bd6da7871c0dbf1842f4d4f25bf94aebc95bbb9d",
+        "id": "bugfix",
+        "lead": {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "model": "",
+          "rules": ""
+        },
+        "name": "Bugfix",
+        "roster": [
+          {
+            "count": 1,
+            "optional": false,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "optional": false,
+            "role": "reviewer"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 6,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "direct",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        },
+        "unknown_fields": [],
+        "unknown_permissions": [
+          "future_power"
+        ]
+      },
+      {
+        "default_pipeline": "reviewed",
+        "description": "A small task or a tight budget: one implementer and an independent checker.",
+        "digest": "21c4239b52e8ad7d9e94146beb6a88921494c860e3067cec96e8deeecabe59b2",
+        "id": "small",
+        "lead": {
+          "account": {
+            "mode": "freest"
+          },
+          "agent": "claude",
+          "effort": "",
+          "model": "",
+          "rules": ""
+        },
+        "name": "Small",
+        "roster": [
+          {
+            "count": 1,
+            "optional": false,
+            "role": "developer"
+          },
+          {
+            "count": 1,
+            "optional": false,
+            "role": "reviewer"
+          }
+        ],
+        "settings": {
+          "caps": {
+            "max_members": 2,
+            "max_open_questions": 3,
+            "max_open_tasks": 500,
+            "max_phase_tasks": 50
+          },
+          "delegations": {
+            "accept_results": true,
+            "answer_members": true,
+            "confirm_trust": true,
+            "merge_accepted": true,
+            "resume_exited": true
+          },
+          "integration": "branch",
+          "land_allowed": false,
+          "phase_acceptance": "lead",
+          "plan_approval": "review",
+          "queue": true,
+          "routing": "lead",
+          "timers": {
+            "answer_escalate_minutes": 10,
+            "inbox_interval_seconds": 120,
+            "lead_stall_minutes": 20,
+            "remind_lead_minutes": 15,
+            "remind_person_minutes": 60,
+            "report_timeout_seconds": 120,
+            "resume_limit_per_hour": 3,
+            "start_timeout_seconds": 180
+          }
+        },
+        "unknown_fields": [],
+        "unknown_permissions": []
+      }
+    ]
+  },
+  "ok": true
+}

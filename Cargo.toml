@@ -15,6 +15,12 @@ path = "src/main.rs"
 # WhiteWh fork: optional extensions (src/extensions.rs), off by default.
 socraticode = []
 
+# Fresh, single-threaded private kernel owners; no installed command entry.
+[[test]]
+name = "linux-custody"
+path = "tests/linux_custody.rs"
+harness = false
+
 [dependencies]
 canonicalpath-rust = { git = "https://github.com/romanilyin/canonicalpath", rev = "50b390675a146874b1555f361e491d1efeb393a7" }
 anyhow = "1"
@@ -41,6 +47,7 @@ uuid = { version = "1", features = ["v4"] }
 ruzstd = { version = "0.8", default-features = false }
 ureq = { version = "3.4", default-features = false, features = ["rustls", "platform-verifier"] }
 zerus-replica = { path = "crates/replica" }
+zerus-mobile-task-edit = { path = "crates/mobile-task-edit" }
 zerus-team-plan = { path = "crates/team-plan" }
 zerus-file-lock = { path = "crates/file-lock" }
 zerus-watch-protocol = { path = "crates/watch-protocol" }

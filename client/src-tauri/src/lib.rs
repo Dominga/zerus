@@ -17,6 +17,7 @@ mod active_app;
 mod analytics;
 #[cfg(feature = "live")]
 mod approvals;
+#[cfg(feature = "live")]
 // The path-shared child_environment module must use the linked core gate,
 // never a second copy of unix_spawn.rs and its process-local mutex.
 #[cfg(unix)]
@@ -230,6 +231,10 @@ mod task_forms;
 mod task_settings;
 #[cfg(feature = "live")]
 mod task_start;
+mod task_team;
+#[cfg(feature = "live")]
+#[cfg(feature = "live")]
+#[cfg(feature = "live")]
 #[cfg(feature = "live")]
 mod teams;
 #[cfg(feature = "live")]
@@ -1988,6 +1993,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         actions::inspect_session,
         actions::composer_state,
         actions::clear_input,
+        desktop_service::acknowledge_input,
         actions::inspect_subagent_identity,
         session_folders::session_folder_status,
         session_folders::session_folder_open,

@@ -128,7 +128,7 @@ pub(crate) fn set_hand_back(db: &Connection, team: &str, node: u32, value: bool)
 }
 
 pub(crate) fn deps(db: &Connection, team: &str, id: u32) -> Result<Vec<Dep>> {
-    let mut statement=db.prepare("SELECT dependency,kind FROM dependencies WHERE team=?1 AND node=?2 ORDER BY dependency LIMIT 201").map_err(storage)?;
+    let mut statement=db.prepare("SELECT dependency,kind FROM dependencies WHERE team=?1 AND node=?2 UNION ALL SELECT dependency,kind FROM phase_draft_dependencies WHERE team=?1 AND node=?2 ORDER BY dependency LIMIT 201").map_err(storage)?;
     let deps = statement
         .query_map(params![team, id], |r| {
             Ok(Dep {
@@ -297,6 +297,24 @@ pub(crate) fn hand_back_item(
     Ok(db.last_insert_rowid() as u64)
 }
 /// The merge commit recorded for a decision, if a merge fact was written.
+/// The commit of one acceptance's integration fact, if it has one. A
+/// conflict fact stores NULL, so this reads the column as an Option.
+pub(crate) fn integration_commit(
+    db: &Connection,
+    team: &str,
+    node: u32,
+    decision: u64,
+) -> Result<Option<String>> {
+    db.query_row(
+        "SELECT commit_id FROM integration_facts WHERE team=?1 AND node=?2 AND decision=?3",
+        params![team, node, decision],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(storage)
+    .map(|row| row.flatten())
+}
+
 pub(crate) fn merged_commit(db: &Connection, team: &str, decision: u64) -> Result<Option<String>> {
     db.query_row(
         "SELECT commit_id FROM integration_facts WHERE team=?1 AND decision=?2 AND commit_id IS NOT NULL LIMIT 1",

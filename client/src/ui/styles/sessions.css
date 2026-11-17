@@ -3,7 +3,18 @@
    list keeps today's structure and sizes. Colors come from skin tokens; the
    list.* group carries the Qt badge, edge and frame colours. No hover changes
    layout: only backgrounds and colours change. */
+.sp-reveal-notice { padding: 6px 12px; color: var(--z-color-muted); font-size: 11px; }
+.vrow.locate-pulse-a::after, .vrow.locate-pulse-b::after {
+  content: ""; position: absolute; inset: 3px 5px; border-radius: 9px; pointer-events: none; z-index: 2;
+  background: color-mix(in srgb, var(--z-color-accent) 22%, transparent); border: 2px solid var(--z-color-accent);
+  opacity: 0; animation: locate-session-a 750ms ease-in-out 2;
+}
+.vrow.locate-pulse-b::after { animation-name: locate-session-b; }
+.vrow.locate-static::after { animation: none; opacity: .8; }
+@keyframes locate-session-a { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
+@keyframes locate-session-b { 0%, 100% { opacity: 0; } 35%, 65% { opacity: 1; } }
 @layer components {
+  .sc-favorite { display: inline-flex; flex: none; margin-inline-start: 4px; color: var(--z-color-accent); }
   .sessions-pane { width: var(--pane-w); flex: none; position: relative; display: flex; flex-direction: column; min-height: 0; background: var(--z-color-pane); border-right: 1px solid var(--z-color-divider); }
   .layout-right .sessions-pane { order: 3; border-right: 0; border-left: 1px solid var(--z-color-divider); }
 
@@ -43,7 +54,7 @@
     scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: var(--z-color-scrollbar) transparent; }
   .sp-foot { display: flex; align-items: center; gap: 2px; height: 30px; margin: 0 -4px; padding: 0 6px 0 12px; border-top: 1px solid var(--z-color-divider); font-size: 11px; color: var(--z-color-muted); }
   .sp-foot .icon-btn.small { width: 26px; height: 26px; }
-  .sp-foot .icon-btn.cleanup-review { width: auto; min-width: 26px; gap: 3px; padding: 0 4px; color: var(--z-color-muted); }
+  .sp-foot .icon-btn.cleanup-review { display: inline-flex; align-items: center; justify-content: center; flex: none; width: auto; min-width: 26px; gap: 3px; padding: 0 4px; white-space: nowrap; color: var(--z-color-muted); }
   .sp-foot .cleanup-review.attention { color: var(--z-color-accent); }
   .sp-foot .cleanup-review.warn { color: var(--z-color-warn); }
   .worktree-review-count { font-size: 10px; font-weight: 600; }
@@ -588,15 +599,24 @@
 .sc-cold button { height: 18px; padding: 0 6px; font-size: 11px; line-height: 16px; border-radius: 5px; }
 .sc-from { flex: 0 1 auto; min-width: 0; max-width: 34%; }
 
-.agent-team-heading {
-  display: flex;
-  align-items: center;
-  height: 40px;
-  padding: 0 14px;
-  font-weight: 600;
-  color: var(--z-list-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .sc-team-role { flex: 0 1 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 8px; color: var(--z-list-muted); }
+
+/* TeamStrip adapted from WhiteWh, 12d02d58a / 065ebb036. */
+  .sc-team-strip { position: absolute; left: 7px; right: 7px; top: 84px; height: 24px; box-sizing: border-box; display: flex; align-items: center;
+    gap: 7px; padding: 0 8px; font-family: inherit; text-align: left; border: 1px solid var(--z-color-card-border); border-radius: 7px; background: var(--z-color-card);
+    font-size: 10px; color: var(--z-list-muted); overflow: hidden; white-space: nowrap; cursor: pointer; }
+  .sc-team-strip:hover { border-color: color-mix(in srgb, var(--z-color-accent) 35%, var(--z-color-card-border)); }
+  .sc-team-strip .grow { flex: 1; }
+  .sc-team-strip:focus-visible { outline: 2px solid var(--z-color-focus); outline-offset: -1px; }
+  .sc-team-count { flex: none; font-size: 11px; color: var(--z-list-text, var(--z-color-text-2)); font-variant-numeric: tabular-nums; }
+  .tbar { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+  .tbar-label { font-variant-numeric: tabular-nums; }
+  .tbar-track { width: 26px; height: 3px; border-radius: 2px; background: var(--z-color-border); overflow: hidden; }
+  .tbar-fill { display: block; height: 100%; border-radius: 2px; background: var(--z-color-accent); }
+  .tbar.muted .tbar-fill { background: var(--z-color-accent-muted); }
+  .sc-team-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; padding: 1px 7px; border-radius: 9px; color: var(--z-color-text-3); }
+  .sc-team-status.stuck { color: var(--z-color-warn); background: color-mix(in srgb, var(--z-color-warn) 11%, transparent); }
+  .sc-team-answers { flex: none; font-weight: 600; color: var(--z-color-text-3); }
+
+.scard.compact.agent-team-lead { padding-bottom: 28px; }
+.scard.compact.agent-team-lead .sc-team-strip { top: auto; bottom: 2px; }

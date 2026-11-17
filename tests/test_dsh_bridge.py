@@ -19,7 +19,7 @@ class ModelSelection(unittest.TestCase):
         script = """
 import assert from 'node:assert/strict';
 const { modelSelectionAdapter: adapt, completedForkCut, matchesForkCut,
-        scheduleSession, manageSchedule, compactAvailable, compactCommand } = await import(process.argv[2]);
+        scheduleSession, manageSchedule, compactAvailable, compactCommand, blockingQuestion } = await import(process.argv[2]);
 const route = { provider: 'fixture', model: 'selected', reasoningEffort: 'off' };
 const control = () => ({
   composeAgent: async () => ({ setup() {}, agentPreset: 'standard' }),
@@ -31,6 +31,23 @@ const control = () => ({
         result = subprocess.run(['node', '--input-type=module', '-', BRIDGE.as_uri()],
                                 input=script, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_blocking_question_requires_owned_root_foreground_and_no_person_intent(self):
+        self.run_js("""
+const agent = {}, request = {agent, questions:[{id:'q',question:'Pick one'}]};
+assert.equal(blockingQuestion(request,agent),true);
+assert.equal(blockingQuestion({...request,wait:{callId:'tool-1'}},agent),true);
+assert.equal(blockingQuestion({...request,wait:{callId:'tool-1',timed:false}},agent),true);
+assert.equal(blockingQuestion(request,{}),false);
+assert.equal(blockingQuestion({...request,agent:undefined},undefined),false);
+for(const wait of [null,{},[],{callId:''},{callId:'tool-1',timed:true},{callId:'tool-1',timed:null},{callId:'tool-1',timed:'false'}]) {
+  assert.equal(blockingQuestion({...request,wait},agent),false,JSON.stringify(wait));
+}
+for(const intent of [{kind:'approval'},{kind:'plan-review'},{kind:'trust'},{},null]) {
+  assert.equal(blockingQuestion({...request,questions:[{...request.questions[0],intent}]},agent),false);
+}
+for(const questions of [[],null,{},[null],[[]],[{}],[{id:"",question:"?"}]])assert.equal(blockingQuestion({...request,questions},agent),false);
+""")
 
     def test_legacy_reads_never_install_selection_and_keep_native_composition(self):
         self.run_js("""

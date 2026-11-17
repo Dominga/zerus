@@ -345,7 +345,7 @@ fn list_reads_the_teams_of_this_computer_in_id_order() {
         assert!(row["revision"].as_u64().is_some());
         assert_eq!(
             row.as_object().unwrap().len(),
-            if id == TEAM { 9 } else { 8 }
+            if id == TEAM { 10 } else { 9 }
         );
     }
     let bound = rows.iter().find(|row| row["id"] == TEAM).unwrap();

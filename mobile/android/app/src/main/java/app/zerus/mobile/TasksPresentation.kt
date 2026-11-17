@@ -26,13 +26,13 @@ data class TaskCard(val uuid: String, val id: String, val text: String, val tab:
                     val anySession: Boolean = false, val queue: Int = 0, val filedBy: String = "", val stageAt: Long = 0)
 
 /** The session Tasks is for: it receives new tasks and Any session tasks are sent to it. */
-data class ChosenSession(val name: String, val computerId: String, val machineId: String)
+data class ChosenSession(val name: String, val computerId: String, val machineId: String, val sessionId: String = "")
 
 enum class ChipDot { WORKING, ATTENTION, READY }
 data class SessionChip(val session: ChosenSession, val dot: ChipDot)
 
 /** The computer a Send now or Cancel goes to, and the session it names; `direct` when that is the session's own computer. */
-data class SendRoute(val computerId: String, val session: String, val direct: Boolean = true)
+data class SendRoute(val computerId: String, val session: String, val direct: Boolean = true, val sessionId: String = "")
 sealed interface RouteState {
     data class Ready(val route: SendRoute) : RouteState
     data class Blocked(val reason: String) : RouteState
@@ -57,7 +57,30 @@ object TasksPresentation {
     }
 
     private fun same(ref: SessionRef?, chosen: ChosenSession?) =
-        ref != null && chosen != null && ref.machine == chosen.machineId && ref.session == chosen.name
+        ref != null && chosen != null && ref.machine == chosen.machineId &&
+            if (ref.sessionId.isEmpty()) ref.session == chosen.name else ref.sessionId == chosen.sessionId
+
+    /** Native task keys are opaque. A graph ID, coercion or trimmed value cannot replace one. */
+    fun nativeIdentity(session: Session): String {
+        for (field in listOf("launch_id", "run_id")) {
+            val value = session.raw.opt(field)
+            if (value is String && value.isNotEmpty()) return "$field:$value"
+        }
+        return ""
+    }
+
+    fun resolve(ref: SessionRef, machines: List<Machine>, connectionId: String, sessions: List<Session>): Session? {
+        val machine = computer(ref, machines, connectionId) ?: return null
+        return sessions.filter { session ->
+            session.target.connectionId == connectionId && session.target.computerId == machine.id &&
+                !SessionFilters.archived(session) &&
+                if (ref.sessionId.isEmpty()) session.target.session == ref.session else nativeIdentity(session) == ref.sessionId
+        }.singleOrNull()
+    }
+
+    fun sameSelection(first: ChosenSession?, second: ChosenSession?): Boolean = first != null && second != null &&
+        first.machineId == second.machineId && first.computerId == second.computerId &&
+        if (first.sessionId.isNotEmpty()) first.sessionId == second.sessionId else first.name == second.name
 
     /** Pinned to the chosen session in To do and Backlog; sent to it in the other stages. */
     fun highlighted(task: TaskInfo, chosen: ChosenSession?): Boolean = when (task.stage) {
@@ -96,13 +119,13 @@ object TasksPresentation {
     private fun anySession(task: TaskInfo) = task.target is TaskTarget.AnySession && task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG)
 
     /** The session a task is pinned to or ran in; an Any session task names the chosen session it goes to now. */
-    fun sessionLabel(task: TaskInfo, chosen: ChosenSession? = null): String {
-        val target = (task.target as? TaskTarget.Session)?.session?.session
-        val name = when (task.stage) {
+    fun sessionLabel(task: TaskInfo, chosen: ChosenSession? = null, current: (SessionRef) -> String? = { null }): String {
+        val target = (task.target as? TaskTarget.Session)?.session
+        val ref = when (task.stage) {
             TaskStage.TODO, TaskStage.BACKLOG -> target
-            else -> task.session?.session ?: target
+            else -> task.session ?: target
         } ?: return if (chosen != null && anySession(task)) "any · now ${shortName(chosen.name)}" else "any session"
-        return shortName(name)
+        return shortName(current(ref) ?: ref.session)
     }
 
     fun note(task: TaskInfo): String = when {
@@ -112,7 +135,8 @@ object TasksPresentation {
     }
 
     fun cards(tasks: List<TaskInfo>, tab: TaskTab, chosen: ChosenSession?, onlyThisSession: Boolean,
-              send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState): List<TaskCard> =
+              send: (TaskInfo) -> RouteState, cancel: (TaskInfo) -> RouteState,
+              current: (SessionRef) -> String? = { null }): List<TaskCard> =
         tasks.filter { tab(it.stage) == tab && visible(it, chosen, onlyThisSession) }.map { task ->
             val stageActions = actions(tab)
             val states = stageActions.map { action ->
@@ -130,15 +154,15 @@ object TasksPresentation {
             }
             // To do keeps its project-wide numbers whatever the filter hides.
             val queue = if (task.stage == TaskStage.TODO) tasks.filter { it.stage == TaskStage.TODO }.indexOf(task) + 1 else 0
-            val filer = (task.author as? TaskActor.Agent)?.session?.session
-                ?.takeIf { task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG) }?.let(::shortName).orEmpty()
-            TaskCard(task.uuid, task.id, task.text, tab, sessionLabel(task, chosen), highlighted(task, chosen), note(task), states,
+            val filer = (task.author as? TaskActor.Agent)?.session
+                ?.takeIf { task.stage in listOf(TaskStage.TODO, TaskStage.BACKLOG) }?.let { shortName(current(it) ?: it.session) }.orEmpty()
+            TaskCard(task.uuid, task.id, task.text, tab, sessionLabel(task, chosen, current), highlighted(task, chosen), note(task), states,
                 anySession(task), queue, filer, task.stageAt)
         }
 
     /** The computer of `ref` among this connection's machines. */
     private fun computer(ref: SessionRef, machines: List<Machine>, connectionId: String) =
-        machines.firstOrNull { it.connectionId == connectionId && it.machineId.isNotBlank() && it.machineId == ref.machine }
+        machines.filter { it.connectionId == connectionId && it.machineId.isNotEmpty() && it.machineId == ref.machine }.singleOrNull()
 
     /** A session takes tasks once its computer reports its native ID, which tasks pin. */
     private fun outdated(session: String) = "$session is on a computer that needs an update to take tasks"
@@ -156,16 +180,16 @@ object TasksPresentation {
     fun route(task: TaskInfo, chosen: ChosenSession?, machines: List<Machine>, connectionId: String,
               operations: (Machine) -> Set<String>, sessions: List<Session>): RouteState {
         val ref = (task.target as? TaskTarget.Session)?.session
-            ?: chosen?.let { SessionRef(it.machineId, it.name) }
+            ?: chosen?.let { SessionRef(it.machineId, it.name, it.sessionId) }
             ?: return RouteState.Blocked("Choose a session for this task")
         if (ref.machine.isBlank()) return RouteState.Blocked(outdated(ref.session))
         val machine = computer(ref, machines, connectionId)
             ?: return RouteState.Blocked("${ref.session} is on a computer this phone does not reach")
         if (!reachable(machine)) return RouteState.Blocked("${machine.name} is offline")
         if ("task_send" !in operations(machine)) return RouteState.Blocked("${machine.name} needs an update to send tasks")
-        if (sessions.none { it.target.computerId == machine.id && it.target.session == ref.session && it.target.archiveId.isBlank() })
-            return RouteState.Blocked("${ref.session} no longer exists — choose another session")
-        return RouteState.Ready(SendRoute(machine.id, ref.session))
+        val live = resolve(ref, machines, connectionId, sessions)
+            ?: return RouteState.Blocked("${ref.session} no longer exists — choose another session")
+        return RouteState.Ready(SendRoute(machine.id, live.target.session, sessionId = nativeIdentity(live)))
     }
 
     /** Cancel goes to the session's computer, or, while it is out of reach, to any online computer of the project, which cancels it there as hgs does. */
@@ -187,7 +211,7 @@ object TasksPresentation {
                 SessionFilters.working(session, online) -> ChipDot.WORKING
                 else -> ChipDot.READY
             }
-            SessionChip(ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty()), dot)
+            SessionChip(ChosenSession(session.target.session, session.target.computerId, machine?.machineId.orEmpty(), nativeIdentity(session)), dot)
         }
 
     /** "Show older (N)": the older Done tasks, while some are not shown. */

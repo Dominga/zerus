@@ -727,6 +727,47 @@ fn snapshot(record:&Value,screen:&str)->Option<(Value,usize)> {
 fn acknowledged(screen:&str)->bool {!screen.trim().is_empty()&&!visible(screen)}
 
 pub(super) fn current(record:&Value)->Option<Value> {current_with(record,false)}
+// A negative read-only screen parse grants no native identity or answer
+// authority. A positive/failed observation needs the original canonical path.
+pub(super) fn listing_needs_record(record: &Value) -> bool {
+    record["agent"] == "claude"
+        && kimi_tui_choice::capture(record)
+            .ok()
+            .is_none_or(|screen| !public_live_screen(&screen))
+}
+// Positive recognition of the complete ordinary composer, NOT a failed menu
+// parse. Blank, clipped, control-bearing and unfamiliar screens stay canonical.
+fn public_live_screen(screen: &str) -> bool {
+    if screen.len() > 512 * 1024
+        || screen
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r'))
+    {
+        return false;
+    }
+    let rows: Vec<_> = screen.trim_end().lines().map(str::trim).collect();
+    let Some(bottom) = rows.iter().rposition(|row| rule(row, '─')) else {
+        return false;
+    };
+    let Some(top) = rows[..bottom].iter().rposition(|row| rule(row, '─')) else {
+        return false;
+    };
+    let Some(prompt) = rows.get(top + 1).and_then(|row| row.strip_prefix('❯')) else {
+        return false;
+    };
+    let footers: Vec<_> = rows[bottom + 1..]
+        .iter()
+        .filter(|row| !row.is_empty())
+        .collect();
+    if footers.len() != 1 {
+        return false;
+    }
+    let footer = footers[0].to_lowercase();
+    bottom > top + 1
+        && prompt.chars().next().is_none_or(char::is_whitespace)
+        && !visible(screen)
+        && (footer.contains("? for shortcuts") || footer.contains("esc to interrupt"))
+}
 /// The card a question listing shows. Only a listing may first fit a clipped
 /// panel into its unviewed pane, and only for a recorded request; guards and
 /// answers read the screen as it is.
@@ -735,10 +776,21 @@ pub(super) fn listed(record:&Value)->Option<Value> {current_with(record,true)}
 // questions' tests pin which reads are listings.
 #[cfg(test)]
 thread_local! {pub(super) static LAST_FIT:std::cell::Cell<Option<bool>>=const {std::cell::Cell::new(None)};}
-fn current_with(record:&Value,fit:bool)->Option<Value> {
-    #[cfg(test)] LAST_FIT.with(|last|last.set(Some(fit)));
-    if record["agent"]!="claude"||pause_active(record)||!string(record,"error").is_empty()
-        ||!active_phase(record) {return None;}
+fn current_with(record: &Value, fit: bool) -> Option<Value> {
+    #[cfg(test)]
+    LAST_FIT.with(|last| last.set(Some(fit)));
+    if record["agent"] != "claude"
+        || pause_active(record)
+        || !string(record, "error").is_empty()
+        || !active_phase(record)
+    {
+        return None;
+    }
+    if storage::listing_scope::public(record) {
+        // Defence in depth: the public row must never request a native card.
+        storage::listing_scope::refuse();
+        return None;
+    }
     let live=kimi_tui_choice::identity(record).ok();
     let mut screen=live.as_ref().and_then(|live|kimi_tui_choice::capture(live).ok());
     // A waiting permission hook needs no taller pane; a decision it took or
@@ -1107,6 +1159,31 @@ pub(super) fn reconcile(record:Value)->Value {
     const OUTSIDE:&str="────────────────────────────────────────\n Read outside the working directories\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Read(/home/user/.codex/generated_images/0000aaaa-1111-2222-3333-444455556666/exec-77778888-9999-aaaa-bbbb-cc\n ccddddeeee.png)\n╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n Auto mode and the sandbox read outside the working directories without asking. Yes or No answers for this read; the\n rest is for later reads. Block: the file tools refuse reads outside the working directories in every project.\n\n Allow this read outside the working directories?\n ❯ 1. Yes, and keep allowing any reads outside the working directories\n   2. No, and block reads outside the working directories from now on\n   3. No, and ask again next time\n   4. Yes, but ask again next time\n\n Esc to cancel · Tab to amend\n";
     const PATH:&str="/home/user/.codex/generated_images/0000aaaa-1111-2222-3333-444455556666/exec-77778888-9999-aaaa-bbbb-ccccddddeeee.png";
     const DENIED:&str="❯ Use the tool now.\n\n● Fetch(https://example.com)\n  ⎿  Interrupted · What should Claude do instead?\n\n────────────────────────────────────────\n❯ \n────────────────────────────────────────\n  ⏸ manual mode on · ? for shortcuts\n";
+    #[test]
+    fn listing_negative_requires_a_complete_ordinary_composer() {
+        for screen in [
+            include_str!("../../tests/fixtures/claude-approval-running.txt"),
+            include_str!("../../tests/fixtures/claude-approval-denied.txt"),
+        ] {
+            assert!(public_live_screen(screen));
+        }
+        for screen in [
+            "",
+            "unknown native frame",
+            BASH,
+            WRITE,
+            FETCH,
+            OUTSIDE,
+            "────────────────────────\n❯ \n────────────────────────\nunknown footer",
+            "❯ incomplete\n? for shortcuts",
+            "────────────────────────\n❯ \n────────────────────────\n? for shortcuts\nUnknown menu",
+            "\x1b[0m? for shortcuts",
+        ] {
+            assert!(!public_live_screen(screen), "{screen:?}");
+        }
+        assert!(!public_live_screen(&"x".repeat(512 * 1024 + 1)));
+    }
+
     fn record(tool:&str,input:Value)->Value {
         json!({"agent":"claude","phase":"approval","run_id":"run","conversation_id":"conversation","pending_approval_at":10.0,
             "active_tools":{"toolu_one":{"name":tool}},"pending_approval":{"hook_event_name":"PermissionRequest","tool_name":tool,"tool_input":input}})

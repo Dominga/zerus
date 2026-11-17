@@ -3,15 +3,19 @@ use super::*;
 pub(super) use store::OPEN_EFFECT_STATES;
 pub(super) struct Context<'a> {
     pub db: &'a Connection,
+    pub state: &'a std::path::Path,
     pub actor: &'a Actor,
     pub team: &'a Team,
     pub op: &'a Operation,
+    pub request_id: &'a str,
+    pub task_custody: Option<&'a Result<store::phase_controls::task_custody::TaskCustody>>,
     pub now: i64,
     pub reply: Reply,
     pub event: Option<&'static str>,
     /// The earlier decision this operation's decision replaced, for the
     /// journal.
     pub superseded: Option<u64>,
+    pub timing: Option<super::observed_timing::Decision>,
 }
 impl Context<'_> {
     pub fn node(&self, id: u32) -> Result<Node> {
@@ -49,6 +53,12 @@ impl Context<'_> {
                 |r| r.get(0),
             )
             .map_err(storage)
+    }
+    /// Work charged to the admitted-task cap includes separate draft rows.
+    pub fn task_capacity_used(&self) -> Result<u32> {
+        Ok(self
+            .count(true)?
+            .saturating_add(store::drafts::count(self.db, &self.team.id)?))
     }
     pub fn person_stopped(&self, member: &str) -> Result<bool> {
         self.db

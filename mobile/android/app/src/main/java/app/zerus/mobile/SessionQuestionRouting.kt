@@ -18,7 +18,7 @@ data class QuestionRouting(val sendToParent: Boolean, val revision: Long, val pe
 object SessionQuestionRouting {
     const val operation = "session_question_routing"
     const val unavailable = "Question routing is unavailable. Update and refresh Zerus on this computer."
-    const val notChild = "Question routing belongs to a live Claude child session."
+    const val notChild = "Question routing belongs to a supported child session."
     const val hint = "Applies to this child session on all devices."
     private fun integer(value: Any?): Long? = when(value) { is Int -> value.toLong();is Long -> value;else -> null }?.takeIf { it >= 0 }
 
@@ -32,9 +32,9 @@ object SessionQuestionRouting {
     const val personLatched = "A person turned this child's questions off. Turn them on again from its own computer or a phone on an encrypted workspace."
     private fun agent(target: Target, raw: JSONObject) =
         (raw.opt("cmd") as? String).orEmpty().ifBlank { (raw.opt("agent") as? String).orEmpty() }.ifBlank { target.session.substringBefore('/') }
-    /** A live Claude session with a parent link: only those route their questions in this version. */
+    /** A qualified session with a parent link; the host validates each blocking question. */
     fun applies(target: Target, raw: JSONObject?): Boolean = raw != null && target.agentId.isBlank() && target.archiveId.isBlank() &&
-        raw.optJSONObject("parent") != null && raw.opt("state") != "archived" && agent(target,raw) == "claude"
+        raw.optJSONObject("parent") != null && raw.opt("state") != "archived" && agent(target,raw) in setOf("claude","kimi","dsh","opencode")
     fun parentName(raw: JSONObject?): String =
         (raw?.optJSONObject("parent")?.opt("name") as? String)?.substringAfterLast('/')?.takeIf { it.isNotBlank() } ?: "parent"
     /** What choosing it does: turn sending off, turn it on, or (unknown) nothing yet. */

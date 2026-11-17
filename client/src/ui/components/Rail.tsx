@@ -18,9 +18,9 @@ import { installedAppName, railVersion } from "../screens/settings/about-version
 
 // The side screen switcher stays on the side (owner decision 2026-10-27).
 // Order follows SessionsWindow: brand -> Overview, New session, Sessions,
-// Projects, Machines, Accounts; window pin, Settings and the version at the bottom.
+// Projects, Machines, Accounts, then the preview Teams entries; window pin,
+// Settings and the version stay at the bottom.
 // Glyphs and the 24px icon size follow tray/src/SessionsWindow.cpp:328-351.
-// Sessions is the one live screen of this phase; the others show where they will be.
 
 // Task #361: Qt's rail has no New team button; a new team starts at
 // "+ New team" on the selected session's tab row (SessionDetail).
@@ -45,11 +45,11 @@ export function Rail() {
   const shown = () => ITEMS.filter((item) => item.id !== "modelservers" || modelServers.available());
   return (
     <nav class="rail" classList={{ labeled: labeled() }} aria-label={tr("Screens")}>
-      <button class="rail-brand" classList={{ on: page() === "dashboard" }} data-tip={shortcutTooltip(tr("Home — %1", installedAppName(appBuildInfo())), "go.overview")} data-tip-pos="right" onClick={() => setPage("dashboard")}>
+      <button class="rail-brand" aria-label={tr("Overview")} classList={{ on: page() === "dashboard" }} data-tip={shortcutTooltip(tr("Home — %1", installedAppName(appBuildInfo())), "go.overview")} data-tip-pos="right" onClick={() => setPage("dashboard")}>
         <ZerusLogo attention={counts().attention > 0} motion={logoMotion()} size={28} />
         <Show when={labeled()}><span>{tr("Overview")}</span></Show>
       </button>
-      <button class="rail-new" data-tip={shortcutTooltip(tr("New session"), "session.new")} data-tip-pos="right" onClick={newSessionFromRail}>
+      <button class="rail-new" aria-label={tr("New session")} data-tip={shortcutTooltip(tr("New session"), "session.new")} data-tip-pos="right" onClick={newSessionFromRail}>
         <Icon name="add" size={24} />
         <Show when={labeled()}><span>{tr("New")}</span></Show>
       </button>
@@ -78,7 +78,7 @@ export function Rail() {
         onClick={() => void setWindowLayer(!windowLayer().on)}>
         <Icon name={windowLayer().on ? "pinned" : "unpinned"} size={24} />
       </button>
-      <button class="rail-btn" classList={{ on: page() === "settings" }} data-tip={labeled() ? undefined : shortcutTooltip(tr("Settings"), "go.settings")} data-tip-pos="right" onClick={() => setPage("settings")}>
+      <button class="rail-btn" aria-label={tr("Settings")} classList={{ on: page() === "settings" }} data-tip={labeled() ? undefined : shortcutTooltip(tr("Settings"), "go.settings")} data-tip-pos="right" onClick={() => setPage("settings")}>
         <Icon name="settings" size={24} />
         <Show when={labeled()}><span>{tr("Settings")}</span></Show>
       </button>

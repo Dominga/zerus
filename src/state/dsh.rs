@@ -22,6 +22,7 @@ pub(in crate::state) mod host_identity;
 #[cfg(unix)]
 mod shell_identity;
 pub(crate) mod witness;
+mod answer;
 pub(in crate::state) mod dispatch_lock;
 #[cfg(all(test, unix))]
 pub(super) use host_identity::record_running_for_test;
@@ -52,6 +53,8 @@ pub(crate) enum HostCheck {
     Outside,
     /// A recorded host is an ancestor.
     Under,
+    /// A native DeepSeek host is above the caller without its native record.
+    Unregistered,
     /// The ancestry or a record could not be verified: refused like `Under`,
     /// with the sentence that names the path and how to clear it.
     Unverified(String),
@@ -62,6 +65,9 @@ pub(crate) enum HostCheck {
 pub(crate) fn host_check() -> HostCheck {
     #[cfg(unix)]
     {
+        if !matches!(host_identity::unregistered::ancestor(), Ok(false)) {
+            return HostCheck::Unregistered;
+        }
         let found: std::result::Result<Option<Host>, Refusal> = hosted_ancestor();
         match found {
             Ok(None) => HostCheck::Outside,
@@ -85,10 +91,13 @@ impl HostCheck {
             HostCheck::Under => Some(host_identity::recorded::UNDER_HOST.to_owned()),
             #[cfg(not(unix))]
             HostCheck::Under => None,
+            HostCheck::Unregistered => Some(UNREGISTERED_HOST.to_owned()),
             HostCheck::Unverified(sentence) => Some(sentence),
         }
     }
 }
+
+pub(crate) const UNREGISTERED_HOST: &str = "This command runs under an unregistered DeepSeek agent host and cannot prove its own session. A hosted tool call never acts as the person or as its launching session. Start a new host with Zerus when convenient; this resident host has been left running.";
 
 /// The sentence that refuses this command as an agent session and as the
 /// person, or `None` outside every recorded host.
@@ -2267,6 +2276,11 @@ pub(crate) fn launch_with_model(
         dispatch_lock::persist(name, &mut expected, &mut record)?;
         return Ok(());
     }
+    if let Some(tag) = name.split('/').nth(2) {
+        if let Some(problem) = zerus_client_core::actions::tag_problem(tag) {
+            return Err(problem.into());
+        }
+    }
     // A new name has no durable destination reservation yet. Keep allocation,
     // persistence and native creation together; an uncertain reply must retain
     // this exact conversation, never allocate another one for the same name.
@@ -2513,6 +2527,104 @@ pub(crate) fn snapshots() -> Result<Vec<Value>> {
     phases.note("hosts", hosts.len() as u64);
     phases.finish_at("ls-dsh", "", 100);
     Ok(out)
+}
+
+/// Compact caller-supplied rows, one host reply per bounded page. Never inventory bindings.
+pub(in crate::state) fn listing_records(
+    records: &[Value],
+    deadline: Instant,
+) -> Result<Vec<Value>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let preferences = notifications::load();
+    let mut hosts = BTreeMap::new();
+    let mut rows = Vec::new();
+    let mut bytes = 0;
+    for record in records {
+        let key = string(record, "agent_home").to_owned();
+        if !hosts.contains_key(&key) {
+            if hosts.len() >= 32 {
+                return Err("Native listing host budget exceeded".into());
+            }
+            hosts.insert(
+                key.clone(),
+                listing_rpc(record, "list", json!({}), deadline).unwrap_or(Value::Null),
+            );
+        }
+        let list = &hosts[&key];
+        let mut row = snapshot_with(record, list, &mut |method, params| {
+            listing_rpc(record, method, params, deadline)
+        });
+        notifications::enrich(
+            &mut row,
+            preferences.as_ref(),
+            journal::journal_name(record),
+        );
+        bytes += serde_json::to_vec(&row)
+            .map_err(|error| error.to_string())?
+            .len();
+        if bytes > 512 << 10 {
+            return Err("Native listing response budget exceeded; use a smaller page".into());
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+#[cfg(unix)]
+fn listing_rpc(record: &Value, method: &str, params: Value, deadline: Instant) -> Result<Value> {
+    use std::io::{Read, Write};
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            .ok_or("Native listing deadline exceeded")
+    };
+    let mut socket =
+        crate::platform::connect_unix(&host_dir(record).join("host.sock"), remaining()?)
+            .map_err(|_| HOST_UNAVAILABLE)?;
+    let request = format!("{}\n", json!({"method":method,"params":params}));
+    let mut rest = request.as_bytes();
+    while !rest.is_empty() {
+        socket
+            .set_write_timeout(Some(remaining()?))
+            .map_err(|error| error.to_string())?;
+        let n = socket.write(rest).map_err(|error| error.to_string())?;
+        if n == 0 {
+            return Err("Native listing request ended".into());
+        }
+        rest = &rest[n..];
+    }
+    let mut response = Vec::new();
+    let mut chunk = [0; 4096];
+    loop {
+        socket
+            .set_read_timeout(Some(remaining()?))
+            .map_err(|error| error.to_string())?;
+        let count = socket.read(&mut chunk).map_err(|error| error.to_string())?;
+        if count == 0 {
+            return Err("Native listing response ended".into());
+        }
+        response.extend_from_slice(&chunk[..count]);
+        if response.len() > 2 << 20 {
+            return Err("Native listing response exceeds its bound".into());
+        }
+        if let Some(end) = response.iter().position(|byte| *byte == b'\n') {
+            remaining()?;
+            let reply: Value =
+                serde_json::from_slice(&response[..end]).map_err(|error| error.to_string())?;
+            if reply["ok"] != true {
+                return Err("Native listing unavailable".into());
+            }
+            return Ok(reply["value"].clone());
+        }
+    }
+}
+/// WhiteWh fork: on Windows the listing read goes through the host's named
+/// pipe (`endpoint`), bounded by the same deadline.
+#[cfg(not(unix))]
+fn listing_rpc(record: &Value, method: &str, params: Value, deadline: Instant) -> Result<Value> {
+    rpc_by(&endpoint(&host_dir(record)), method, params, deadline)
 }
 
 /// The same listing projection, without opening every saved DeepSeek binding.
@@ -3608,7 +3720,14 @@ fn inspect_record(name: &str, record: &Value, agent_id: Option<&str>, include_pr
     if agent_id.is_none() && record.get("account_defaults").is_some() {
         result["account_defaults"] = record["account_defaults"].clone();
     }
-    if agent_id.is_none() { notifications::enrich(&mut result, notifications::load().as_ref(), journal::journal_name(&record)); }
+    if agent_id.is_none() {
+        notifications::enrich(
+            &mut result,
+            notifications::load().as_ref(),
+            journal::journal_name(&record),
+        );
+        question_routing::enrich(&mut result, question_routing::load().as_ref());
+    }
     if let Some(current) = read.and_then(|read| current_read_of(name, &record, read, &inspected)) {
         result["current_read"] = current;
     }
@@ -3658,7 +3777,7 @@ fn question_cards(record: &Value, inspected: &Value) -> Vec<Value> {
         })).collect::<Vec<_>>();
         let hash=format!("{:x}",Sha256::digest(json!([inspected["generation"],q]).to_string().as_bytes()));
         let mut card=json!({"question_id":q["id"],"question_hash":hash,"tool_call_id":q["id"],"run_id":record["run_id"],"conversation_id":record["conversation_id"],
-            "agent_id":"main","source":"dsh_native","approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items});
+            "agent_id":"main","source":"dsh_native","blocking":q["blocking"]==true && q["approval"]==false,"approval":q["approval"]==true,"can_answer":true,"answer_transport":"native_dsh","questions":items});
         // The exact shell command the bridge tied to the approval's call, for a
         // team's safe actions; a host without it shows no command.
         if q["approval"]==true {
@@ -3828,6 +3947,7 @@ pub(super) fn session_action(
         {
             return Err("Rename must preserve the original DeepSeek provider and project".into());
         }
+        rename::validate_new_tag(new)?;
         if new != name && exists(new) {
             return Err("The destination session already exists".into());
         }
@@ -4210,59 +4330,8 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             println!("{receipt}");
         }
         "answer" => {
-            let request = checked_request(&record)?;
-            let inspected = rpc(
-                &record,
-                "inspect",
-                json!({"sessionId":record["conversation_id"]}),
-            )?;
-            let cards = question_cards(&record, &inspected);
-            let card = cards
-                .iter()
-                .find(|q| {
-                    q["question_id"] == request["question_id"]
-                        && q["question_hash"] == request["expected_question_hash"]
-                })
-                .ok_or("This question changed or is no longer pending")?;
-            let mut answers = Vec::new();
-            for answer in request["answers"]
-                .as_array()
-                .ok_or("Answers are required")?
-            {
-                let item = card["questions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|q| q["id"] == answer["question_id"])
-                    .ok_or("Unknown question")?;
-                let mut labels = Vec::new();
-                for id in answer["selected_option_ids"]
-                    .as_array()
-                    .ok_or("Invalid selected options")?
-                {
-                    let option = item["options"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|o| o["id"] == *id)
-                        .ok_or("Unknown answer option")?;
-                    labels.push(option["label"].clone());
-                }
-                if item["allow_other"] != true && !string(answer, "text").is_empty() {
-                    // Task #37 (team ede724c4): name the way through, not only the refusal.
-                    return Err("A DeepSeek approval takes Allow once or Reject only, no text. Send the reason as the answer's top-level \"text\" with hgs team answer: it reaches the agent as a note after the decision".into());
-                }
-                answers.push(json!({"id":answer["question_id"],"selected":labels,"custom":string(answer,"text")}));
-            }
-            rpc(
-                &record,
-                "answer",
-                json!({"sessionId":record["conversation_id"],"id":request["question_id"],"generation":inspected["generation"],"answers":answers}),
-            )?;
-            println!(
-                "{}",
-                json!({"status":"answered","request_id":request["request_id"],"name":name,"question_id":request["question_id"],"question_hash":request["expected_question_hash"],"run_id":record["run_id"],"conversation_id":record["conversation_id"]})
-            );
+            let (request, digest) = answer::read()?;
+            println!("{}", answer::run(name, &record, &request, &digest)?);
         }
         "pause" | "resume" => {
             if args.iter().any(|v| v == "--dry-run") {
@@ -4296,10 +4365,11 @@ pub(crate) fn dispatch(command: &str, args: &[String]) -> Result<i32> {
             if !new.starts_with("dsh/")
                 || new.split('/').count() != 3
                 || new.contains(['\n', '\r', ':'])
-                || new.chars().any(char::is_whitespace)
+                || new.split('/').take(2).any(|part| part.chars().any(char::is_whitespace))
             {
                 return Err("Invalid DeepSeek session name".into());
             }
+            rename::validate_new_tag(new)?;
             if exists(new) {
                 return Err("This name is already used".into());
             }
@@ -5695,6 +5765,38 @@ mod account_model_tests {
 #[cfg(test)]
 mod notification_tests {
     use super::*;
+    #[test]
+    fn only_positive_ordinary_host_proof_marks_a_question_as_blocking() {
+        let record = json!({"run_id":"run","conversation_id":"session-A"});
+        let q = json!({"id":"native-call","approval":false,"blocking":true,"questions":[{
+            "id":"choice","question":"Pick one","options":[{"label":"First"}]}]});
+        let card = |q: &Value| {
+            question_cards(
+                &record,
+                &json!({"generation":"host","pendingQuestions":[q]}),
+            )
+            .remove(0)
+        };
+        let original = card(&q);
+        assert_eq!(original["blocking"], true);
+        for (key, value) in [
+            ("blocking", Value::Null),
+            ("blocking", json!(false)),
+            ("blocking", json!("true")),
+            ("approval", json!(true)),
+            ("approval", Value::Null),
+        ] {
+            let mut changed = q.clone();
+            changed[key] = value;
+            let card = card(&changed);
+            assert_eq!(card["blocking"], false, "{key}");
+            assert_eq!(
+                card["can_answer"], true,
+                "manual availability stays independent"
+            );
+            assert_ne!(card["question_hash"], original["question_hash"]);
+        }
+    }
     #[test]
     fn notification_baseline_observes_only_inspect_and_list_with_matching_generation() {
         let record = json!({"name":"dsh/test/session","backend":"dsh","conversation_id":"session-A","run_id":"run-A"});

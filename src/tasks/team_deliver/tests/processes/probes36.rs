@@ -27,7 +27,7 @@ fn intake(f: &Fixture, uuid: &str, team: &str, step: &str) -> Value {
         project: "example-project".into(),
         uuid: uuid.to_string(),
     };
-    let result = crate::teams::tasks::send(
+    let result = crate::teams::tasks::models::send(
         &crate::teams::tasks::Caller {
             state: &f.config.state,
             machine: &crate::swarm::local_node_id(&f.config).unwrap(),
@@ -655,6 +655,30 @@ fn a_conflicting_cancelled_attempt_is_not_the_nodes_own_cancel() {
 /// mutant (the intake refuses on the mark again) kills this test.
 #[test]
 fn an_older_builds_marked_todo_task_is_queued_and_cleared() {
+    assert_older_marked_intake(None);
+}
+#[test]
+fn a_scheduling_pause_does_not_break_older_build_intake() {
+    assert_older_marked_intake(Some(Duration::from_secs(3)));
+}
+fn assert_older_marked_intake(elapsed: Option<Duration>) {
+    let (f, uuid) = older_marked_todo();
+    let read = || intake(&f, &uuid, TEAM, "older-build marked To do");
+    let queued = match elapsed {
+        Some(elapsed) => zerus_replica::with_proof_budget_for_test(elapsed, 131_072, read),
+        None => read(),
+    };
+    assert_eq!(queued["queued"], true, "{queued}");
+    {
+        let store = crate::tasks::store(&f.config, "example-project").unwrap();
+        let doc = store.load(&uuid).unwrap();
+        let view = doc.view().unwrap();
+        assert_eq!(view.cancelled_at, None, "the binding write clears the mark");
+        assert_eq!(view.cancel_reason, "");
+    }
+}
+
+fn older_marked_todo() -> (Fixture, String) {
     let mut f = Fixture::new();
     let (_id, uuid) = add(&mut f);
     deliver(&mut f, &uuid, "m2");
@@ -669,15 +693,53 @@ fn an_older_builds_marked_todo_task_is_queued_and_cleared() {
         doc.set_cancelled_for_test(now(), "Obsolete");
         store.save(&mut doc).unwrap();
     }
-    let queued = intake(&f, &uuid, TEAM, "older-build marked To do");
-    assert_eq!(queued["queued"], true, "{queued}");
-    {
+    (f, uuid)
+}
+
+#[test]
+fn an_exhausted_older_build_intake_is_retryable_busy_and_changes_nothing() {
+    let (f, uuid) = older_marked_todo();
+    let before = {
         let store = crate::tasks::store(&f.config, "example-project").unwrap();
-        let doc = store.load(&uuid).unwrap();
-        let view = doc.view().unwrap();
-        assert_eq!(view.cancelled_at, None, "the binding write clears the mark");
-        assert_eq!(view.cancel_reason, "");
-    }
+        store.load(&uuid).unwrap().snapshot().unwrap()
+    };
+    let sql_before = f.h.store.team(TEAM).unwrap().unwrap().revision;
+    let sent = std::fs::read(f.h.temp.path().join("submissions")).unwrap();
+    let answer =
+        zerus_replica::with_proof_budget_for_test(Duration::from_secs(31), 131_072, || {
+            let error = crate::teams::tasks::send(
+                &crate::teams::tasks::Caller {
+                    state: &f.config.state,
+                    machine: &crate::swarm::local_node_id(&f.config).unwrap(),
+                    actor: Actor::Agent(zerus_replica::SessionKey {
+                        machine: f.lead.machine.clone(),
+                        session_id: f.lead.session_id.clone(),
+                        session: "codex/private-intake-lead".into(),
+                    }),
+                },
+                &TaskRef {
+                    project: "example-project".into(),
+                    uuid: uuid.clone(),
+                },
+                TEAM,
+                None,
+                None,
+            )
+            .unwrap_err();
+            json!({"error":{"code":error.code,"message":error.message}})
+        });
+    assert_eq!(answer["error"]["code"], "store_busy", "{answer}");
+    assert!(answer["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("try again"));
+    assert_eq!(
+        std::fs::read(f.h.temp.path().join("submissions")).unwrap(),
+        sent
+    );
+    assert_eq!(f.h.store.team(TEAM).unwrap().unwrap().revision, sql_before);
+    let store = crate::tasks::store(&f.config, "example-project").unwrap();
+    assert_eq!(store.load(&uuid).unwrap().snapshot().unwrap(), before);
 }
 
 /// Decision 2: every observation the build writes through

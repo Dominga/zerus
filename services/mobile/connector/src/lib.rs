@@ -37,6 +37,7 @@ pub mod pyvalue;
 pub mod repositories;
 pub mod request;
 pub mod runtime;
+pub mod send_outcome;
 pub mod send_receipt;
 mod session_labels;
 pub mod session_notifications;
@@ -46,6 +47,7 @@ pub mod session_question_routing;
 pub mod session_selector;
 pub mod speech;
 pub mod startup;
+mod task_edit;
 pub mod url;
 pub mod validate;
 pub mod watch_listing;
@@ -249,13 +251,21 @@ pub fn run(started: Started) -> u8 {
             settings,
             Box::new(now),
         ));
+        let native_edits_slot = session_labels::Selection::allows_native_edits(labels.as_ref());
         let work = async {
             if let Some(private_dir) = config.encrypted_workspace {
                 #[cfg(unix)]
                 let stop = signals(&connector.stopping);
                 #[cfg(windows)]
                 let stop = windows_management::signals(&connector.stopping, stop_state, generation);
-                return encrypted_runtime::run(&connector, &relay, &private_dir, stop).await;
+                return encrypted_runtime::run(
+                    &connector,
+                    &relay,
+                    &private_dir,
+                    native_edits_slot,
+                    stop,
+                )
+                .await;
             }
             #[cfg(unix)]
             let result = serve(&connector, &relay, signals(&connector.stopping)).await;

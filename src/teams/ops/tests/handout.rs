@@ -52,8 +52,8 @@ fn unknown_outcome_never_retries_the_same_effect_or_opens_a_second_slot() {
         HandoutOutcome::Uncertain {
             reason: "Lost receipt".into(),
         },
-        HandoutOutcome::CuttingOver {
-            reason: "Cutting over".into(),
+        HandoutOutcome::Uncertain {
+            reason: "Cutting over; the receipt is unknown".into(),
         },
     ] {
         let mut h = Harness::new();
@@ -686,18 +686,23 @@ fn readiness_view_contains_only_live_nodes_and_their_archived_direct_leaves() {
     let actor = service();
     let ctx = Context {
         db: h.store.db.as_ref().unwrap(),
+        state: h.temp.path(),
         actor: &actor,
         team: &team,
         op: &op,
+        request_id: TEAM,
+        task_custody: None,
         now: 1234,
         reply: Reply {
             ok: true,
             revision: 0,
+            member: None,
             node: None,
             item: None,
         },
         event: None,
         superseded: None,
+        timing: None,
     };
     let nodes = super::super::handout::kernel_nodes(&ctx).unwrap();
     assert_eq!(nodes.iter().map(|n| n.id).collect::<Vec<_>>(), vec![3, 4]);

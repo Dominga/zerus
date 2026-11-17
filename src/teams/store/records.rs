@@ -56,6 +56,9 @@ pub struct Page<T> {
 /// (none otherwise).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueRow {
+    pub assigned_base: Option<String>,
+    /// Store-owned pre-start/attempt/effect predicate, from this page's snapshot.
+    pub deps_editable: bool,
     pub node: zerus_team_plan::model::Node,
     pub holder: Option<String>,
     pub pending: Option<String>,

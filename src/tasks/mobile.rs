@@ -22,6 +22,14 @@ const RECENT_MS: i64 = 7 * 24 * 3600 * 1000;
 const PROJECT_WAIT: Duration = Duration::from_secs(2);
 
 fn request<T: DeserializeOwned>() -> Result<T> {
+    decode(request_value(&[1])?)
+}
+
+fn decode<T: DeserializeOwned>(value: Value) -> Result<T> {
+    serde_json::from_value(value).map_err(|e| fail(format!("invalid request: {e}")))
+}
+
+fn request_value(schemas: &[u64]) -> Result<Value> {
     let mut bytes = Vec::new();
     std::io::stdin()
         .take(MAX_REQUEST + 1)
@@ -34,11 +42,21 @@ fn request<T: DeserializeOwned>() -> Result<T> {
         // WhiteWh fork (H2): PowerShell 5.1 pipes JSON with a UTF-8 BOM.
         serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|e| fail(format!("invalid request: {e}")))?;
     match value.get("schema").and_then(Value::as_u64) {
-        Some(1) => {}
+        Some(schema) if schemas.contains(&schema) => {}
         Some(other) => return Err(fail(format!("unknown request schema {other}"))),
         None => return Err(fail("invalid request: missing schema")),
     }
-    serde_json::from_value(value).map_err(|e| fail(format!("invalid request: {e}")))
+    Ok(value)
+}
+
+/// An opaque native key, passed unchanged; never infer one from the label.
+fn session_identity(id: &str) -> Result<()> {
+    if id.trim().is_empty() || id.chars().count() > 1024 || id.chars().any(char::is_control) {
+        return Err(fail(
+            "invalid request: session_id must be a nonempty bounded identity",
+        ));
+    }
+    Ok(())
 }
 
 /// Phone strings become hgs arguments: none may look like an option.
@@ -93,49 +111,81 @@ struct Done {
 /// `hgs task mobile-send --json`: pastes the task into a session this computer
 /// runs, as `hgs task send TASK --session SESSION` does.
 pub(super) fn send(config: &Config) -> Result<Value> {
-    let request: Send = request()?;
+    let value = request_value(&[1, 2])?;
+    let session_id = if value["schema"] == 2 {
+        let id = value["session_id"]
+            .as_str()
+            .ok_or_else(|| fail("invalid request: missing string session_id"))?;
+        session_identity(id)?;
+        Some(id.to_owned())
+    } else {
+        None
+    };
+    let request: Send = decode(value)?;
     task_uuid(&request.task)?;
     if request.session.trim().is_empty() || request.session.starts_with('-') {
         return Err(fail(format!("{:?} is not a session name", request.session)));
     }
-    plain(&request.project, || format!("{:?} is not a project", request.project))?;
-    let args = [
+    plain(&request.project, || {
+        format!("{:?} is not a project", request.project)
+    })?;
+    let mut args = vec![
         request.task,
         "--project".into(),
         request.project,
         "--session".into(),
         request.session,
     ];
+    if let Some(id) = session_id {
+        args.extend(["--session-id".into(), id]);
+    }
     let out = change_within(config, "send", &args, Some(PROJECT_WAIT))?;
     // The receipt's identity and status, never the prompt it carries: a
     // mutation's receipt stays in the relay for days.
     let receipt = &out["receipt"];
-    Ok(json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
+    Ok(
+        json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
               "session": out["task"]["session"],
               "receipt": {"request_id": receipt["request_id"], "status": receipt["status"],
                           "name": receipt["name"], "run_id": receipt["run_id"],
-                          "conversation_id": receipt["conversation_id"], "submitted_at": receipt["submitted_at"]}}))
+                          "conversation_id": receipt["conversation_id"], "submitted_at": receipt["submitted_at"]}}),
+    )
 }
 
 /// `hgs task mobile-cancel --json`: cancels the task as `hgs task cancel` does.
 pub(super) fn cancel(config: &Config) -> Result<Value> {
     let request: Cancel = request()?;
     task_uuid(&request.task)?;
-    plain(&request.project, || format!("{:?} is not a project", request.project))?;
+    plain(&request.project, || {
+        format!("{:?} is not a project", request.project)
+    })?;
     let mut args = vec![request.task, "--project".into(), request.project];
     if let Some(reason) = request.reason.filter(|reason| !reason.is_empty()) {
-        plain(&reason, || format!("a cancel reason cannot look like an option ({reason:?})"))?;
+        plain(&reason, || {
+            format!("a cancel reason cannot look like an option ({reason:?})")
+        })?;
         args.extend(["--reason".into(), reason]);
     }
     let out = change_within(config, "cancel", &args, Some(PROJECT_WAIT))?;
-    Ok(json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
-              "cancel_message": out["cancel_message"]}))
+    Ok(
+        json!({"schema": 1, "ok": true, "task": out["task"]["uuid"], "stage": out["task"]["stage"],
+              "cancel_message": out["cancel_message"]}),
+    )
 }
 
 /// `hgs task mobile-done --json`: one page of the project's Done tasks, newest
 /// first, or of those sent to one session.
 pub(super) fn done(config: &Config) -> Result<Value> {
-    let request: Done = request()?;
+    let value = request_value(&[1, 2])?;
+    let identity_bound = value["schema"] == 2;
+    let request: Done = decode(value)?;
+    if identity_bound {
+        let session = request
+            .session
+            .as_ref()
+            .ok_or_else(|| fail("invalid request: missing session with session_id"))?;
+        session_identity(&session.session_id)?;
+    }
     if !(1..=PAGE).contains(&request.limit) {
         return Err(fail(format!("a Done page holds 1 to {PAGE} tasks")));
     }
@@ -149,16 +199,28 @@ pub(super) fn done(config: &Config) -> Result<Value> {
     let before = request.before.map(|cursor| (cursor.at, cursor.uuid));
     // From the task index while it may answer (zerus-cg5h.23); else every
     // task is read, as before.
-    let indexed = super::index::Index::open(&store).and_then(|mut index| match index.done_entries() {
-        Ok(entries) => entries,
-        Err(failure) => {
-            index.discard(&failure);
-            None
-        }
-    });
+    let indexed =
+        super::index::Index::open(&store).and_then(|mut index| match index.done_entries() {
+            Ok(entries) => entries,
+            Err(failure) => {
+                index.discard(&failure);
+                None
+            }
+        });
     let page = match indexed {
-        Some(entries) => store.done_page_of(entries, before, request.limit, now() - RECENT_MS, request.session.as_ref()),
-        None => store.done_page(before, request.limit, now() - RECENT_MS, request.session.as_ref()),
+        Some(entries) => store.done_page_of(
+            entries,
+            before,
+            request.limit,
+            now() - RECENT_MS,
+            request.session.as_ref(),
+        ),
+        None => store.done_page(
+            before,
+            request.limit,
+            now() - RECENT_MS,
+            request.session.as_ref(),
+        ),
     }
     .map_err(fail)?;
     Ok(json!({"schema": 1, "tasks": page.tasks,

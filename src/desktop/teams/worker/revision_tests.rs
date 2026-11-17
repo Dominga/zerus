@@ -54,7 +54,7 @@ fn another_connections_commit_wakes_the_worker_before_the_safety_interval() {
             TeamStatus::Running
         );
         let t = h.store.team(TEAM).unwrap().unwrap();
-        ops::apply(
+        ops::tests::apply_fixture(
             &mut h.store,
             &person(),
             &request(t.revision, Operation::Pause),

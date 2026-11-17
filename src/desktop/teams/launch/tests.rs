@@ -545,6 +545,7 @@ fn an_unopenable_items_file_leaves_the_bind_successful_and_saved() {
         parent: None,
         launch_id: "00000000-0000-4000-8000-000000000009".into(),
         session_name: String::new(),
+        member_generation: None,
     };
     let observed = super::super::ports::ObservedSession {
         machine: machine.clone(),
@@ -768,5 +769,33 @@ fn a_restart_derives_the_saved_requests_parameters_at_the_first_card_write() {
             ("member".to_owned(), "lead".to_owned()),
             ("code".to_owned(), "worktree_unavailable".to_owned()),
         ]
+    );
+}
+
+#[test]
+fn advance_base_keeps_a_completed_integration_creation_plan_valid_without_git_writes() {
+    use crate::teams::ops::tests::base_advance::GitFixture;
+    let f = GitFixture::new();
+    let mut h = f.harness();
+    let team = h.store.team(TEAM).unwrap().unwrap();
+    let mut runtime = Runtime::open(h.temp.path(), &team.home, "base-advance").unwrap();
+    runtime.ledger = Some(Ledger::open(h.temp.path()).unwrap());
+    let mut row = Row::new(&team, BRANCH, "base-advance", State::BranchDone);
+    row.branch = Some(BranchPlan::of(
+        &team,
+        crate::desktop::teams::tests::plan_fixture().placement,
+    ));
+    runtime.ledger().insert(&row, 100).unwrap();
+    let req = f.request(&h, &f.next);
+    f.apply(&mut h, &crate::teams::ops::tests::person(), &req)
+        .unwrap();
+    let team = h.store.team(TEAM).unwrap().unwrap();
+    // Never refuses any attempted effect. A completed branch is read-only.
+    assert!(runtime
+        .branch(&mut h.store, &mut Never, &team, 200)
+        .unwrap());
+    assert_eq!(
+        runtime.ledger().get(TEAM, BRANCH).unwrap().unwrap().state,
+        State::BranchDone
     );
 }

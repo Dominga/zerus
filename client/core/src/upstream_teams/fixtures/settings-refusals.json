@@ -1,0 +1,96 @@
+{
+  "native": {
+    "live_members": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_members",
+        "message": "Caps are below admitted tasks, saved drafts or live members."
+      },
+      "ok": false
+    },
+    "live_tasks": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_open_tasks",
+        "message": "Caps are below admitted tasks, saved drafts or live members."
+      },
+      "ok": false
+    },
+    "max_members": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_members",
+        "message": "Settings exceed the supported storage bounds."
+      },
+      "ok": false
+    },
+    "max_open_questions": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_open_questions",
+        "message": "Settings exceed the supported storage bounds."
+      },
+      "ok": false
+    },
+    "max_open_tasks": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_open_tasks",
+        "message": "Settings exceed the supported storage bounds."
+      },
+      "ok": false
+    },
+    "max_phase_tasks": {
+      "error": {
+        "code": "over_cap",
+        "field": "settings.caps.max_phase_tasks",
+        "message": "Settings exceed the supported storage bounds."
+      },
+      "ok": false
+    }
+  },
+  "outcomes": {
+    "live_members": {
+      "code": "over_cap",
+      "detail": "Caps are below admitted tasks, saved drafts or live members.",
+      "field": "settings.caps.max_members",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "live_tasks": {
+      "code": "over_cap",
+      "detail": "Caps are below admitted tasks, saved drafts or live members.",
+      "field": "settings.caps.max_open_tasks",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "max_members": {
+      "code": "over_cap",
+      "detail": "Settings exceed the supported storage bounds.",
+      "field": "settings.caps.max_members",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "max_open_questions": {
+      "code": "over_cap",
+      "detail": "Settings exceed the supported storage bounds.",
+      "field": "settings.caps.max_open_questions",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "max_open_tasks": {
+      "code": "over_cap",
+      "detail": "Settings exceed the supported storage bounds.",
+      "field": "settings.caps.max_open_tasks",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "max_phase_tasks": {
+      "code": "over_cap",
+      "detail": "Settings exceed the supported storage bounds.",
+      "field": "settings.caps.max_phase_tasks",
+      "outcome": "failed",
+      "request_id": "00000000-0000-4000-8000-000000000001"
+    }
+  }
+}

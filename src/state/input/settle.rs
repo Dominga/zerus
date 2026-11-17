@@ -33,6 +33,14 @@ pub(crate) const RESIDUE_CHARS: usize = 2_000;
 /// The most transcript bytes read after the send's starting offset.
 const TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
+#[cfg(test)]
+mod source_tests;
+
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_TRANSCRIPT_READ: std::cell::Cell<Option<fn(&std::path::Path)>> = const { std::cell::Cell::new(None) };
+}
+
 /// The agents whose submissions need this proof.
 pub(in crate::state) fn applies(agent: &str) -> bool {
     agent == "claude"
@@ -216,6 +224,10 @@ fn wait_settled(terminal: &dyn backend::TerminalBackend, claim: &backend::InputC
 /// line (zerus-iitw8.6), at most `TRANSCRIPT_BYTES` after the start in all.
 pub(in crate::state) struct Transcript {
     path: PathBuf,
+    // Hold the selected object against inode reuse. Appends change timestamps.
+    source: Option<(fs::File, (u64, u64))>,
+    length: u64,
+    unavailable: bool,
     /// Where the next read starts: the start plus every complete line read.
     next: u64,
     /// How many bytes after the start have been read.
@@ -224,9 +236,50 @@ pub(in crate::state) struct Transcript {
     partial: Vec<u8>,
 }
 
+fn transcript_source(
+    path: &std::path::Path,
+) -> std::io::Result<(fs::File, (u64, u64), fs::Metadata)> {
+    let file = crate::platform::no_follow(fs::OpenOptions::new().read(true)).open(path)?;
+    let (identity, metadata) = crate::platform::FileIdentity::with_metadata(&file)?;
+    if !metadata.is_file() || identity.inode == 0 {
+        return Err(std::io::Error::other(
+            "Claude transcript is not a regular identifiable file",
+        ));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            != 0
+        {
+            return Err(std::io::Error::other(
+                "Claude transcript is a reparse point",
+            ));
+        }
+    }
+    Ok((file, (identity.device, identity.inode), metadata))
+}
+
 impl Transcript {
     pub(in crate::state) fn at(path: PathBuf, start: u64) -> Self {
-        Transcript { path, next: start, read: 0, partial: Vec::new() }
+        let opened = transcript_source(&path);
+        let unavailable = opened
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+        let (source, length) = opened
+            .map(|(file, id, metadata)| (Some((file, id)), metadata.len()))
+            .unwrap_or_default();
+        Transcript {
+            path,
+            source,
+            length,
+            unavailable,
+            next: start,
+            read: 0,
+            partial: Vec::new(),
+        }
     }
 
     /// The transcript the record names, from its length now. None when the
@@ -236,8 +289,14 @@ impl Transcript {
         if !path.is_absolute() {
             return None;
         }
-        let start = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        Some(Transcript::at(path, start))
+        let mut transcript = Transcript::at(path, 0);
+        if !super::acceptance::allows_pending(record) {
+            transcript.unavailable = true;
+        }
+        transcript.next = transcript.length;
+        // A named but unreadable source stays present: never fall back to a
+        // composer's empty state as proof of this send.
+        Some(transcript)
     }
 
     /// Where the next read starts (WhiteWh fork: the receipt keeps it for a
@@ -246,36 +305,77 @@ impl Transcript {
         self.next
     }
 
-    /// The complete rows appended since the last call, in order.
-    fn rows(&mut self) -> Vec<Value> {
+    /// Complete appended rows, or unknown physical evidence. A failed read
+    /// never consumes a row or becomes an empty-transcript success.
+    fn rows(&mut self) -> Option<Vec<Value>> {
+        if self.unavailable {
+            return None;
+        }
+        let rows = self.read_rows();
+        if rows.is_none() && self.source.is_some() {
+            // Once selected, a changed/unreadable source cannot be adopted by
+            // a later poll of this send. Genuinely absent new files may appear.
+            self.unavailable = true;
+        }
+        rows
+    }
+
+    fn read_rows(&mut self) -> Option<Vec<Value>> {
         let budget = TRANSCRIPT_BYTES.saturating_sub(self.read);
         if budget == 0 {
-            return Vec::new();
+            return None;
         }
-        let Ok(mut file) = fs::File::open(&self.path) else {
-            return Vec::new();
-        };
+        let (mut file, source, metadata) = transcript_source(&self.path).ok()?;
+        if self
+            .source
+            .as_ref()
+            .is_some_and(|(_, selected)| *selected != source)
+            || metadata.len() < self.length
+        {
+            return None;
+        }
+        if self.source.is_none() {
+            self.source = Some((file.try_clone().ok()?, source));
+        }
         let mut bytes = Vec::new();
-        let at = self.next + self.partial.len() as u64;
-        if file.seek(SeekFrom::Start(at)).is_err() || file.take(budget).read_to_end(&mut bytes).is_err() {
-            return Vec::new();
+        let at = self.next.checked_add(self.partial.len() as u64)?;
+        if metadata.len() < at {
+            return None;
         }
+        file.seek(SeekFrom::Start(at)).ok()?;
+        (&mut file).take(budget).read_to_end(&mut bytes).ok()?;
+        #[cfg(test)]
+        AFTER_TRANSCRIPT_READ.with(|slot| {
+            if let Some(hook) = slot.take() {
+                hook(&self.path);
+            }
+        });
+        let (_, named, _) = transcript_source(&self.path).ok()?;
+        let length = file.metadata().ok()?.len();
+        if named != source || length < at.checked_add(bytes.len() as u64)? {
+            return None;
+        }
+        self.length = length;
         self.read += bytes.len() as u64;
         self.partial.extend_from_slice(&bytes);
         let Some(end) = self.partial.iter().rposition(|&b| b == b'\n') else {
-            return Vec::new();
+            return Some(Vec::new());
         };
         let complete: Vec<u8> = self.partial.drain(..=end).collect();
         self.next += complete.len() as u64;
-        complete
-            .split(|&b| b == b'\n')
-            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-            .collect()
+        Some(
+            complete
+                .split(|&b| b == b'\n')
+                .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+                .collect(),
+        )
     }
 
     /// The first new row that records `message` as submitted or queued.
     fn proof(&mut self, message: &str, pasted_at: f64) -> Option<Proof> {
-        self.rows().iter().find_map(|row| row_proof(row, message, pasted_at))
+        self.rows()?
+            .iter()
+            .find_map(|row| row_proof(row, message, pasted_at))
     }
 }
 
@@ -461,7 +561,7 @@ fn comparison(line: &str) -> String {
 /// The lines that must reach the transcript, in order: the message without
 /// blank lines, image-path lines Claude attaches instead, Claude's own
 /// `[Image #N]` tokens and its `<pasted_content>` wrapper.
-fn significant(text: &str) -> Vec<String> {
+pub(in crate::state) fn significant(text: &str) -> Vec<String> {
     text.lines()
         .map(|line| {
             let mut line = line.trim();
@@ -654,6 +754,24 @@ mod tests {
     }
 
     const MESSAGE: &str = "<zerus-message from=\"codex/x/peer\" host=\"arch\">\nReady.\n- Item 1.\nScreenshots:\n/srv/peer/target/a.png\n\"/srv/peer/target/b c.png\"\n</zerus-message>\n\nInspect the attached image at \"/state/attachments/m/01-row.png\"";
+
+    #[test]
+    fn unreadable_named_transcripts_never_fall_back_to_an_empty_composer() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in [dir.path().to_owned(), dir.path().join("missing.jsonl")] {
+            let mut transcript = Transcript::of(&json!({"transcript":path}));
+            let frames = Frames::new(vec![(screen("", "ready"), 2, 2)]);
+            assert!(confirm(
+                &frames,
+                &claim(),
+                transcript.as_mut(),
+                "message",
+                0.0,
+                soon(120)
+            )
+            .is_err());
+        }
+    }
 
     #[test]
     fn the_transcript_must_record_exactly_the_messages_lines_in_order() {

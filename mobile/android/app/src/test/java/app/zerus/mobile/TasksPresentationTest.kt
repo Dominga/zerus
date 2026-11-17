@@ -167,4 +167,95 @@ class TasksPresentationTest {
         assertEquals("Show older (2)", TasksPresentation.olderLabel(total = 10, recent = 3, shown = 8, expanded = true, more = true))
         assertEquals(null, TasksPresentation.olderLabel(total = 10, recent = 3, shown = 10, expanded = true, more = false))
     }
+
+    @Test fun anImmutableTaskTargetUsesItsCurrentLabelAfterRename() {
+        val original = SessionRef("node-1", "codex/old-label", "launch_id:original")
+        val renamed = session("codex/current-label", raw = """{"activity":"idle","launch_id":"original","run_id":"current-run"}""")
+        val routed = route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = listOf(renamed))
+        assertTrue(routed is RouteState.Ready)
+        assertEquals("codex/current-label", (routed as RouteState.Ready).route.session)
+    }
+
+    @Test fun aReusedLabelCannotReplaceTheTasksMissingImmutableIdentity() {
+        val original = SessionRef("node-1", "codex/api", "launch_id:original")
+        val replacement = session("codex/api", raw = """{"activity":"idle","launch_id":"replacement","run_id":"new-run"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = listOf(replacement)) is RouteState.Blocked)
+    }
+
+    @Test fun aSessionFromAnotherConnectionCannotSatisfyTheTaskRoute() {
+        val other = session("codex/api").let { it.copy(target = it.target.copy(connectionId = "workspace-b")) }
+        assertTrue(route(task(TaskStage.TODO, pinned("codex/api")), sessions = listOf(other)) is RouteState.Blocked)
+    }
+
+    @Test fun duplicateImmutableBindingsAreRefusedEvenWhenOneRetainsTheOldLabel() {
+        val original = SessionRef("node-1", "codex/api", "launch_id:original")
+        val twins = listOf("codex/api", "codex/other-label").map { name ->
+            session(name, raw = """{"activity":"idle","launch_id":"original","run_id":"run"}""")
+        }
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = twins) is RouteState.Blocked)
+    }
+
+    @Test fun aNameOnlySelectionDoesNotHighlightAnIdentityBoundTask() {
+        val original = SessionRef("node-1", "codex/api", "launch_id:original")
+        assertFalse(TasksPresentation.highlighted(task(TaskStage.TODO, TaskTarget.Session(original)), chosen))
+    }
+
+
+    @Test fun aGraphSessionIdCannotSubstituteForTheNativeTaskKey() {
+        val graph = SessionRef("node-1", "codex/api", "graph-session-id")
+        val native = session("codex/api", raw = """{"session_id":"graph-session-id","launch_id":"original","run_id":"run"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(graph)), sessions = listOf(native)) is RouteState.Blocked)
+    }
+
+    @Test fun runIdentityIsUsedOnlyWhenTheNativeLaunchIdentityIsAbsent() {
+        val legacyRun = SessionRef("node-1", "codex/old-label", "run_id:original-run")
+        val renamed = session("codex/current-label", raw = """{"launch_id":"","run_id":"original-run"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(legacyRun)), sessions = listOf(renamed)) is RouteState.Ready)
+        val launched = renamed.copy(raw = JSONObject("""{"launch_id":"current-launch","run_id":"original-run"}"""))
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(legacyRun)), sessions = listOf(launched)) is RouteState.Blocked)
+    }
+
+    @Test fun nonStringLaunchMetadataCannotCreateAnImmutableIdentity() {
+        val invented = SessionRef("node-1", "codex/api", "launch_id:7")
+        val native = session("codex/api", raw = """{"launch_id":7,"run_id":"original-run"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(invented)), sessions = listOf(native)) is RouteState.Blocked)
+        val run = SessionRef("node-1", "codex/old-label", "run_id:original-run")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(run)), sessions = listOf(native)) is RouteState.Ready)
+    }
+
+    @Test fun opaqueNativeIdentityIsKeptVerbatim() {
+        val original = SessionRef("node-1", "codex/old-label", "launch_id: original ")
+        val native = session("codex/current-label", raw = """{"launch_id":" original ","run_id":"run"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = listOf(native)) is RouteState.Ready)
+    }
+
+    @Test fun anArchivedRowCannotSupplyAnIdentityBoundSendRoute() {
+        val original = SessionRef("node-1", "codex/api", "launch_id:original")
+        val archived = session("codex/api", raw = """{"launch_id":"original","state":"archived"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(original)), sessions = listOf(archived)) is RouteState.Blocked)
+    }
+
+    @Test fun duplicatePhysicalComputerBindingsCannotResolveAnImmutableTask() {
+        val ref = SessionRef("node-1", "codex/api", "launch_id:original")
+        val live = session("codex/api", raw = """{"launch_id":"original"}""")
+        assertTrue(route(task(TaskStage.TODO, TaskTarget.Session(ref)), machines = listOf(here, here.copy(id = "alias")), sessions = listOf(live)) is RouteState.Blocked)
+    }
+    @Test fun strongSelectionHighlightsTheOriginalAfterRenameOnly() {
+        val ref = SessionRef("node-1", "codex/old-label", "launch_id:original")
+        val original = task(TaskStage.TODO, TaskTarget.Session(ref))
+        assertTrue(TasksPresentation.highlighted(original, chosen.copy(name = "codex/current-label", sessionId = ref.sessionId)))
+        assertFalse(TasksPresentation.highlighted(original, chosen.copy(name = ref.session, sessionId = "launch_id:replacement")))
+    }
+    @Test fun chipSelectionUsesOpaqueIdentityInsteadOfTheCaption() {
+        val original = chosen.copy(sessionId = "launch_id:original")
+        assertTrue(TasksPresentation.sameSelection(original.copy(name = "codex/renamed"), original))
+        assertFalse(TasksPresentation.sameSelection(original.copy(sessionId = "launch_id:replacement"), original))
+    }
+    @Test fun currentLabelsDoNotRewriteTheStoredTaskKey() {
+        val ref = SessionRef("node-1", "codex/old-label", "launch_id:original")
+        val row = task(TaskStage.TODO, TaskTarget.Session(ref))
+        assertEquals("current-label", TasksPresentation.sessionLabel(row, current = { "codex/current-label" }))
+        assertEquals(ref, (row.target as TaskTarget.Session).session)
+    }
+
 }

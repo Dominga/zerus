@@ -9,17 +9,38 @@ mod cross;
 mod guards;
 pub(crate) use guards::Guard;
 mod decision_state;
-mod holder;
+pub(crate) mod dependency_edit;
 mod disposition;
+pub(crate) mod drafts;
+pub(crate) mod editing;
+mod holder;
+pub(crate) mod layout;
+pub(crate) mod phase_controls;
+mod phase_read;
+pub(crate) mod phase_snapshot;
+pub(crate) mod planning;
+pub(crate) mod publication;
+pub(crate) mod rework;
 pub(crate) use holder::{hand_back_return, holder_of, return_without_holder, NOT_RECEIVED};
 mod member_sessions;
+mod native_floor;
+mod native_person;
+pub(in crate::teams) mod non_delivery;
+pub(crate) mod observed_timing;
+pub(crate) mod person_actions;
 pub use decision_state::DecisionState;
+pub(crate) mod bases;
 pub(crate) mod pages;
+mod progress;
+mod recorded_timings;
 mod records;
+pub(crate) use progress::{TeamProgress, STUCK_SERVICE_KINDS};
+mod roster;
 pub(crate) mod rows;
 mod stage;
 pub(crate) mod timers;
 pub(crate) mod unstaffed;
+pub(crate) mod versions;
 pub use records::*;
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
@@ -31,7 +52,12 @@ use std::{
 use zerus_team_plan::{model::*, problem::code, Problem};
 
 pub(crate) const OPEN_EFFECT_STATES: &str = "('reserved','submitted','uncertain','cutting_over')";
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+// Cumulative native admission preserves the original layout-four nonce and
+// receipts while installing every publication/rework prerequisite at seven.
+pub(crate) const LEGACY_QUEUE_LAYOUT: u32 = versions::CORE_LEGACY;
+pub(crate) const LEGACY_PLANNING_LAYOUT: u32 = versions::CORE_PLANNING;
+pub(crate) const NATIVE_PERSON_LAYOUT: u32 = versions::CORE_NATIVE_PERSON;
+pub(crate) const SCHEMA_VERSION: u32 = versions::CORE_CURRENT;
 
 pub type Result<T> = std::result::Result<T, Problem>;
 
@@ -111,6 +137,9 @@ impl Store {
     }
     pub(crate) fn active(&self) -> Result<()> {
         if super::enabled(&self.state) {
+            if let Some(db) = &self.db {
+                execution_fence(db)?;
+            }
             Ok(())
         } else {
             Err(Problem::new(code::TEAMS_INACTIVE, "Teams preview is off."))
@@ -143,6 +172,19 @@ impl Store {
                 .optional()
                 .map_err(storage)?;
             content.map(|text| decode(&text)).transpose()
+        })
+    }
+    /// Whether the node still lives in the team's plan; an archived node has
+    /// left live work even while its task document keeps its observed stage.
+    pub fn node_live(&self, team: &str, node: u32) -> Result<bool> {
+        self.active()?;
+        self.db.as_ref().map_or(Ok(false), |db| {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM nodes WHERE team=?1 AND id=?2)",
+                params![team, node],
+                |r| r.get(0),
+            )
+            .map_err(storage)
         })
     }
     pub fn team(&self, id: &str) -> Result<Option<Team>> {
@@ -267,11 +309,14 @@ fn connect_mode(path: &Path, create: bool, migrate: bool) -> Result<Connection> 
     .map_err(storage)?;
     #[cfg(unix)]
     crate::sqlite_file::bind_private(&db, path, identity).map_err(storage)?;
+    bases::register_writer(&db)?;
     db.busy_timeout(Duration::from_secs(8)).map_err(storage)?;
     if migrate {
         initialize(&mut db)?;
-        db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
-            .map_err(storage)?;
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
+        )
+        .map_err(storage)?;
     }
     Ok(db)
 }
@@ -280,7 +325,7 @@ fn initialize(db: &mut Connection) -> Result<()> {
     let version: u32 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
-    if version == 1 {
+    if version == versions::RETIRED_PREVIEW {
         return Err(Problem::new(
             code::INVALID_STATE,
             "Version-1 Teams store belongs to an unsupported pre-release build.",
@@ -292,7 +337,8 @@ fn initialize(db: &mut Connection) -> Result<()> {
             "store schema is newer than this version of Zerus",
         ));
     }
-    if version == SCHEMA_VERSION {
+    if version == versions::CORE_NATIVE_FLOOR {
+        native_floor::validate(db)?;
         return schema_extensions(db);
     }
     let tx = db
@@ -302,25 +348,41 @@ fn initialize(db: &mut Connection) -> Result<()> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(storage)?;
     let sql = match current {
-        0 => Some(include_str!("schema.sql")),
-        1 => {
+        versions::UNINITIALIZED => Some(include_str!("schema.sql")),
+        versions::RETIRED_PREVIEW => {
             return Err(Problem::new(
                 code::INVALID_STATE,
                 "Version-1 Teams store belongs to an unsupported pre-release build.",
             ))
         }
-        SCHEMA_VERSION => None,
+        LEGACY_QUEUE_LAYOUT | LEGACY_PLANNING_LAYOUT => None,
+        native if layout::native(native) => None,
         _ => return Err(Problem::new(code::INVALID_STATE, "store schema changed")),
     };
     if let Some(sql) = sql {
         tx.execute_batch(
-            &sql.replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
-                .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
-                .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
+            &sql.replace(
+                "__CORE_LEGACY_VERSION__",
+                &versions::CORE_LEGACY.to_string(),
+            )
+            .replace("__OPEN_EFFECT_STATES__", OPEN_EFFECT_STATES)
+            .replace("__DECISION_PENDING__", DecisionState::Pending.as_str())
+            .replace("__DECISION_SETTLED__", DecisionState::Settled.as_str()),
         )
         .map_err(storage)?;
     }
-    schema_extensions(&tx)?;
+    if current == versions::CORE_NATIVE_FLOOR {
+        // Another current opener won the writer. A current but damaged leaf
+        // cannot be mistaken for an unmigrated legacy store.
+        native_floor::validate(&tx)?;
+    } else {
+        if layout::native(current) {
+            native_person::validate(&tx)?;
+        }
+        native_floor::legacy(&tx, current)?;
+        schema_extensions(&tx)?;
+        native_floor::migrate(&tx)?;
+    }
     tx.commit().map_err(storage)
 }
 
@@ -359,8 +421,45 @@ fn schema_extensions(db: &Connection) -> Result<()> {
     handles_schema(db)?;
     key_clear_schema(db)?;
     card_parameters(db)?;
+    drafts::extend(db)?;
+    planning::extend(db)?;
+    publication::extend(db)?;
+    rework::validate(db)?;
+    phase_controls::extend(db)?;
     read_indexes(db)?;
     timers::extend(db)
+}
+
+/// Recheck under every writer lock before execution or native receipt replay.
+/// The combined layout fences both pre-planning and pre-native engines.
+pub(crate) fn execution_fence(db: &Connection) -> Result<()> {
+    let version: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if version > SCHEMA_VERSION {
+        return Err(Problem::new(
+            code::INVALID_STATE,
+            "store schema is newer than this version of Zerus",
+        ));
+    }
+    if version == versions::CORE_NATIVE_FLOOR {
+        native_floor::validate(db)?;
+    }
+    Ok(())
+}
+
+/// Raise the private execution floor without lowering an already-published
+/// store when another team starts planning. Called under the operation lock.
+pub(crate) fn raise_execution_floor(db: &Connection, floor: u32) -> Result<()> {
+    execution_fence(db)?;
+    let current: u32 = db
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .map_err(storage)?;
+    if current < floor {
+        db.pragma_update(None, "user_version", floor)
+            .map_err(storage)?;
+    }
+    Ok(())
 }
 
 /// The notes columns beside the member's own words (zerus-63rru.69). They are
@@ -475,10 +574,13 @@ fn parameters_present(db: &Connection) -> Result<bool> {
 }
 
 /// The common batches: only `CREATE ... IF NOT EXISTS` statements.
-const COMMON_SCHEMA: [&str; 3] = [
+const COMMON_SCHEMA: [&str; 6] = [
     include_str!("pipeline-schema.sql"),
     include_str!("observation-schema.sql"),
+    include_str!("validation-settings.sql"),
     include_str!("read-indexes.sql"),
+    include_str!("base-schema.sql"),
+    include_str!("non-delivery-schema.sql"),
 ];
 /// The closed-key sweep's finished marker (zerus-63rru.32 round 2). Applied
 /// once per store, when the table is absent, so the ordinary open performs

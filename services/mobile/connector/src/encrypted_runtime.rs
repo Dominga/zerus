@@ -1411,6 +1411,9 @@ mod tests {
         let mut flags = f.connector.flags.get();
         flags.task_exchange = true;
         flags.task_admitted_edit = true;
+        // WhiteWh fork: a Windows connector is always a Windows gateway, which
+        // never takes task edits; this route is the ordinary gateway's.
+        flags.windows_gateway = false;
         f.connector.flags.set(flags);
         f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
         let engine = f.engine();
@@ -1453,6 +1456,9 @@ mod tests {
         let mut flags = f.connector.flags.get();
         flags.task_exchange = true;
         flags.task_admitted_edit = true;
+        // WhiteWh fork: a Windows connector is always a Windows gateway, which
+        // never takes task edits; this route is the ordinary gateway's.
+        flags.windows_gateway = false;
         f.connector.flags.set(flags);
         f.connector.native.edit_timeout.set(true);
         f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
@@ -1530,6 +1536,9 @@ mod tests {
         let mut flags = f.connector.flags.get();
         flags.task_exchange = true;
         flags.task_admitted_edit = true;
+        // WhiteWh fork: a Windows connector is always a Windows gateway, which
+        // never takes task edits; this route is the ordinary gateway's.
+        flags.windows_gateway = false;
         f.connector.flags.set(flags);
         f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
         let profile = workspace::load_active(&f.private_dir).unwrap();
@@ -1657,6 +1666,9 @@ mod tests {
         let mut flags = f.connector.flags.get();
         flags.task_exchange = true;
         flags.task_admitted_edit = true;
+        // WhiteWh fork: a Windows connector is always a Windows gateway, which
+        // never takes task edits; this route is the ordinary gateway's.
+        flags.windows_gateway = false;
         f.connector.flags.set(flags);
         f.connector.state.borrow_mut().snapshot_seen_at = Some(f.connector.clock());
         let engine = f.engine();

@@ -5237,8 +5237,9 @@ select everything stay as above.
 On a Windows computer, a terminal that connects first receives the lines the
 session printed above its screen (the newest 2000 its session host keeps), so
 Terminal can scroll back to them right away instead of showing the current
-screen alone (WhiteWh fork; `ScreenModel::history`). A program on the alternate
-screen keeps its own history view.
+screen alone (WhiteWh fork; `ScreenModel::history`). One empty line follows
+them: without it, the pseudoconsole the attach client runs in dropped the last
+of those lines. A program on the alternate screen keeps its own history view.
 Right-click opens **Copy selection** and **Paste**. While the agent reads
 the mouse, a right-click goes to the agent; hold Shift for the menu.
 

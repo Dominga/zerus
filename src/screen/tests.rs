@@ -280,18 +280,20 @@ fn history_fills_a_fresh_terminals_scrollback_before_the_repaint() {
     attached.process(&screen.history(2000));
     // Every line left the screen: it is blank for the repaint that follows.
     assert_eq!(plain(&attached), "\n\n\n\n\n");
-    assert_eq!(attached.screen.grid.hsize, screen.screen.grid.hsize);
-    assert_eq!(history_rows(&attached), history_rows(&screen));
+    // The pane's lines, then the one empty line that ends the replay.
+    let mut expected = history_rows(&screen);
+    expected.push(history_rows(&model(5, 20, b"\r\n\r\n\r\n\r\n\r\n")).remove(0));
+    assert_eq!(attached.screen.grid.hsize, screen.screen.grid.hsize + 1);
+    assert_eq!(history_rows(&attached), expected);
     attached.process(&screen.repaint());
     assert_eq!(attached.visual(), screen.visual());
     assert_eq!(attached.info(), screen.info());
-    assert_eq!(history_rows(&attached), history_rows(&screen));
+    assert_eq!(history_rows(&attached), expected);
     // A limit keeps the newest lines.
     let mut newest = ScreenModel::new(5, 20);
     newest.process(&screen.history(7));
-    assert_eq!(newest.screen.grid.hsize, 7);
-    let all = history_rows(&screen);
-    assert_eq!(history_rows(&newest), all[all.len() - 7..]);
+    assert_eq!(newest.screen.grid.hsize, 8);
+    assert_eq!(history_rows(&newest)[..7], expected[expected.len() - 8..expected.len() - 1]);
 }
 
 #[test]

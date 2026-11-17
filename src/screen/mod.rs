@@ -474,6 +474,13 @@ impl ScreenModel {
             cursor_to(&mut out, sy - 1, 0);
             out.extend(std::iter::repeat_n(b'\n', page.len()));
         }
+        // One more line: a Windows pseudoconsole between the host and the
+        // terminal (the attach client's own console) drops the line that
+        // scrolled out last when the repaint's erase follows it at once
+        // (measured with the inbox console of Windows 11 26300: line 471 of
+        // 471 was missing in the terminal, every time). The terminal gets one
+        // empty line between the history and the screen instead.
+        out.push(b'\n');
         out
     }
 

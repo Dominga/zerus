@@ -1,6 +1,7 @@
 //! Kimi 2.6 no longer runs Stop at a successful main turn's end. Its bounded
 //! main wire is an alternative typed completion source, never reply-text proof.
 use super::*;
+use sha2::Digest;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -277,8 +278,30 @@ fn not_after(record: &Value, key: &str, at: f64) -> bool {
     })
 }
 
+/// Whether the wire's ended turn is the one this record has open.
+///
+/// WhiteWh fork (owner, 2026-11-17: a team member showed Working for half an
+/// hour after its turn had ended, and its relaunch waited for that "open
+/// turn"). Kimi does not wait for its TurnStarted hook, so the hook can come
+/// late or not at all, and the clock then stays at the turn before: no end of
+/// the newer turn could ever match it. The clock is not the only identity:
+/// the UserPromptSubmit hook, which Kimi does wait for, names the prompt, and
+/// the wire names the prompt of the turn that ended. A wire turn newer than
+/// the clock is this record's turn when its prompt is exactly the prompt of
+/// the latest submission. An older wire turn, a turn without that identity
+/// and a clock ahead of the wire still match nothing.
+fn current_turn(record: &Value, end: &End) -> bool {
+    let Some(turn) = eligible(record) else {
+        return false;
+    };
+    turn == end.turn
+        || (turn < end.turn
+            && end.prompt_id.is_some()
+            && end.prompt_id.as_deref() == prompt_id(&record["kimi_submission"]["prompt_id"]))
+}
+
 fn matches(record: &Value, end: &End) -> bool {
-    eligible(record) == Some(end.turn)
+    current_turn(record, end)
         // A queued/new submission whose TurnStarted hook is still in flight
         // must not be settled by the preceding turn's terminal event.
         && submission_matches(record, end)
@@ -441,6 +464,14 @@ pub(super) fn reconcile(original: Value) -> Value {
         let completed_at = proof.end.at.min(now());
         keep_warm::observe(&mut record, &mut event, completed_at);
         journal::update_activity(&mut record, &event);
+        // This turn's start hook never came (`current_turn`): the clock
+        // follows the turn the wire ended, so the next one compares with it.
+        if record["kimi_turn_clock"]["started"]
+            .as_u64()
+            .is_some_and(|started| started < proof.end.turn)
+        {
+            record["kimi_turn_clock"]["started"] = json!(proof.end.turn);
+        }
         keep_warm::settle(&mut record, &event, completed_at);
         if !proof.current() {
             return Ok(None);
@@ -454,6 +485,176 @@ pub(super) fn reconcile(original: Value) -> Value {
         Ok(Some(record))
     })();
     settled.ok().flatten().unwrap_or(original)
+}
+
+/// The latest main turn of a wire tail and how it ended, read leniently: rows
+/// that do not parse are skipped. For [`refusal`] only; it proves nothing.
+fn latest_main_turn(bytes: &[u8], clipped: bool) -> Option<(u64, Option<String>)> {
+    let mut latest = None;
+    for (index, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        if (clipped && index == 0) || line.len() > 1024 * 1024 {
+            continue;
+        }
+        // Most rows are deltas and tool output: only turn rows are parsed.
+        let names = |kind: &[u8]| line.windows(kind.len()).any(|part| part == kind);
+        if !names(b"\"turn.prompt\"") && !names(b"\"turn.ended\"") {
+            continue;
+        }
+        let Ok(event) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if event["agentId"] != "main" {
+            continue;
+        }
+        let Some(turn) = event["turnId"].as_u64() else {
+            continue;
+        };
+        match string(&event, "type") {
+            "turn.prompt" => latest = Some((turn, None)),
+            "turn.ended" if latest.as_ref().is_some_and(|(open, _)| *open == turn) => {
+                latest = Some((turn, Some(journal::clipped(&event["reason"], 40))));
+            }
+            _ => {}
+        }
+    }
+    latest
+}
+
+/// The first reason the wire's completed turn `end` does not end `record`'s
+/// turn, in the order [`matches`] asks; None when it does.
+fn refused_by(record: &Value, end: &End) -> Option<String> {
+    let clock = &record["kimi_turn_clock"];
+    if clock["run_id"] != record["run_id"] || clock["conversation_id"] != record["conversation_id"] {
+        return Some("no turn start was recorded for this run and conversation".into());
+    }
+    let open: Vec<String> = record["active_tools"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .take(4)
+        .map(|(_, tool)| journal::clipped(&tool["name"], 40))
+        .collect();
+    if !open.is_empty() {
+        return Some(format!(
+            "tool calls are still recorded as running ({}): their end hook did not arrive",
+            open.join(", ")
+        ));
+    }
+    if record.get("pending_approval").is_some_and(|pending| !pending.is_null()) {
+        return Some("an approval is still recorded as pending".into());
+    }
+    let Some(turn) = eligible(record) else {
+        return Some(format!(
+            "the turn clock cannot be compared (started {}, stopped {})",
+            clock["started"], clock["stopped"]
+        ));
+    };
+    if !current_turn(record, end) {
+        return Some(format!(
+            "the hooks last started turn {turn}, the wire's latest main turn is {} (prompt {}), and the latest submitted prompt is {}",
+            end.turn,
+            end.prompt_id.as_deref().unwrap_or("without an ID"),
+            prompt_id(&record["kimi_submission"]["prompt_id"]).unwrap_or("without an ID")
+        ));
+    }
+    if !submission_matches(record, end) {
+        let submission = &record["kimi_submission"];
+        let missing: Vec<&str> = submission["pending_prompt_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|id| !end.prompts.contains(*id))
+            .take(4)
+            .collect();
+        return Some(if !submission.is_object() {
+            "a prompt was submitted after the wire's latest turn began, without a native ID".into()
+        } else if submission["complete"] != true {
+            "an earlier prompt hook of this conversation carried no usable ID, so its prompts cannot be told apart".into()
+        } else if !missing.is_empty() {
+            format!(
+                "submitted prompts are not in the last 8 MiB of the wire ({}): they are queued, or older than that",
+                missing.join(", ")
+            )
+        } else if submission.get("at") != record.get("recovery_user_at") {
+            "the latest prompt hook and the recorded prompt time disagree".into()
+        } else {
+            "a prompt without a native ID was submitted after the wire's latest turn began".into()
+        });
+    }
+    if !not_after(record, "input_pending_at", end.prompt_at) {
+        return Some("Zerus typed input after the wire's latest turn began, and no turn has taken it yet".into());
+    }
+    (!matches(record, end)).then(|| "the turn was already settled for another prompt".into())
+}
+
+// Bump when the wording or the checks of `refusal` change.
+const REFUSAL_CACHE: &str = "kimi-turn-end-refusal-v1";
+
+/// WhiteWh fork (owner, 2026-11-17): why a Kimi session still shows Working
+/// although its wire ends the latest main turn, for `hgs inspect`
+/// (`turn_end_refusal`). Kimi 2.6 sends no Stop for a finished turn, so the
+/// end is taken from the wire only when every check of [`matches`] agrees, and
+/// a session whose checks never agree stays Working without a word about
+/// which one. This names the first check that refuses. It reads the same
+/// bounded tail once per wire version and record state, changes nothing and
+/// proves nothing: the status still follows [`reconcile`] alone.
+pub(super) fn refusal(record: &Value) -> Option<String> {
+    if string(record, "agent") != "kimi" || !["working", "tool"].contains(&string(record, "phase")) {
+        return None;
+    }
+    let paths = questions::wire_paths(record).ok()?;
+    let [path] = paths.as_slice() else {
+        return None;
+    };
+    let state = json!([
+        record["run_id"], record["conversation_id"], record["phase"], record["main_done"],
+        record["kimi_turn_clock"], record["kimi_submission"], record["active_tools"],
+        record.get("pending_approval").is_some_and(|pending| !pending.is_null()),
+        record["input_pending_at"], record["recovery_user_at"]
+    ]);
+    let key = format!("{:x}", sha2::Sha256::digest(state.to_string().as_bytes()));
+    let scan = || -> Option<Value> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(path).ok()?;
+        let (version, metadata) = crate::platform::FileIdentity::with_metadata(&file).ok()?;
+        if !metadata.is_file() {
+            return None;
+        }
+        let len = metadata.len();
+        let offset = len.saturating_sub(MAX_BYTES);
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = Vec::new();
+        (&mut file).take(MAX_BYTES).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 != len - offset || !wire_current(path, version, len) {
+            return None;
+        }
+        let Some((turn, Some(reason))) = latest_main_turn(&bytes, offset > 0) else {
+            // The wire's latest main turn has not ended: it is working.
+            return Some(Value::Null);
+        };
+        Some(match terminal(&bytes, offset > 0) {
+            Some(end) => json!(refused_by(record, &end).map(|why| format!(
+                "Kimi's wire ends main turn {} as completed, but Zerus does not take it as this turn's end: {why}",
+                end.turn
+            ))),
+            None if reason == "completed" => json!(format!(
+                "Kimi's wire ends main turn {turn} as completed, but the last 8 MiB of the wire cannot be verified as whole turns (a line over 1 MiB, a gap, a turn end without a known reason or a prompt without an identity): the end counts once that row is older"
+            )),
+            None => json!(format!(
+                "Kimi's wire ends main turn {turn} as {reason}, which completes no reply: Zerus waits for its Stop, Interrupt or StopFailure hook"
+            )),
+        })
+    };
+    scan_cache::cached(REFUSAL_CACHE, path, &key, scan)?
+        .as_str()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -999,6 +1200,101 @@ mod tests {
         }
     }
 
+    /// The wire of two turns: turn 0 and, 200 ms later, turn 1.
+    fn two_turns() -> Vec<Value> {
+        let mut next = prompt(1);
+        next["time"] = json!(1200);
+        let mut done = end(1);
+        done["time"] = json!(1300);
+        vec![prompt(0), end(0), next, done]
+    }
+
+    /// WhiteWh fork (owner, 2026-11-17): a Kimi team member stayed Working
+    /// for half an hour after its turn ended. Kimi does not wait for its
+    /// TurnStarted hook; when that hook never comes the clock stays at the
+    /// turn before, and no end of the newer turn could match it. The prompt
+    /// the awaited UserPromptSubmit hook named identifies the turn instead.
+    #[test]
+    fn a_turn_whose_start_hook_never_came_ends_by_its_prompt_identity() {
+        let latest = terminal(&bytes(&two_turns()), false).unwrap();
+        assert_eq!((latest.turn, latest.prompt_id.as_deref()), (1, Some("msg_1")));
+        // Turn 0 was settled from the wire; its clock says started 0, stopped 0.
+        let mut r = record();
+        r["kimi_turn_clock"]["stopped"] = json!(0);
+        submission(&mut r, json!("msg_1"), 1.15);
+        assert_eq!(eligible(&r), Some(0), "the start hook of turn 1 never came");
+        assert!(matches(&r, &latest));
+        assert_eq!(refused_by(&r, &latest), None);
+        // A turn that was never settled has no stopped mark: the same.
+        let mut open = record();
+        submission(&mut open, json!("msg_1"), 1.15);
+        assert!(matches(&open, &latest));
+        // The wire's turn must be the latest submission's own prompt.
+        for other in [json!("msg_2"), json!("msg_0"), Value::Null] {
+            let mut wrong = record();
+            wrong["kimi_turn_clock"]["stopped"] = json!(0);
+            submission(&mut wrong, other.clone(), 1.15);
+            assert!(!matches(&wrong, &latest), "{other}");
+            assert!(refused_by(&wrong, &latest).is_some(), "{other}");
+        }
+        // A prompt queued after it keeps the session working for its own turn.
+        let mut queued = r.clone();
+        submission(&mut queued, json!("msg_2"), 1.25);
+        assert!(!matches(&queued, &latest));
+        // Open tool calls, a pending approval and input typed later still refuse.
+        for (key, value) in [
+            ("active_tools", json!({"call":{"name":"Shell"}})),
+            ("pending_approval", json!({})),
+            ("input_pending_at", json!(1.25)),
+            ("phase", json!("approval")),
+        ] {
+            let mut wrong = r.clone();
+            wrong[key] = value;
+            assert!(!matches(&wrong, &latest), "{key}");
+        }
+        // A clock ahead of the wire (a newer turn began) matches nothing,
+        // and neither does the end of an older turn.
+        let mut ahead = r.clone();
+        ahead["kimi_turn_clock"]["started"] = json!(2);
+        assert!(!matches(&ahead, &latest));
+        let old = terminal(&bytes(&[prompt(0), end(0)]), false).unwrap();
+        let mut newer = r.clone();
+        newer["kimi_turn_clock"]["started"] = json!(1);
+        assert!(!matches(&newer, &old));
+    }
+
+    #[test]
+    fn a_refused_turn_end_names_its_first_reason() {
+        let latest = terminal(&bytes(&two_turns()), false).unwrap();
+        let mut r = record();
+        r["kimi_turn_clock"]["started"] = json!(1);
+        submission(&mut r, json!("msg_1"), 1.15);
+        assert_eq!(refused_by(&r, &latest), None);
+        let why = |change: &dyn Fn(&mut Value)| {
+            let mut wrong = r.clone();
+            change(&mut wrong);
+            refused_by(&wrong, &latest).unwrap_or_default()
+        };
+        assert!(why(&|r| r["active_tools"] = json!({"call":{"name":"TodoList"}})).contains("TodoList"));
+        assert!(why(&|r| r["pending_approval"] = json!({})).contains("approval"));
+        assert!(why(&|r| r["kimi_turn_clock"]["run_id"] = json!("other")).contains("no turn start"));
+        assert!(why(&|r| r["kimi_turn_clock"]["started"] = json!(3)).contains("wire's latest main turn is 1"));
+        assert!(why(&|r| r["kimi_submission"]["complete"] = json!(false)).contains("no usable ID"));
+        assert!(why(&|r| r["kimi_submission"]["pending_prompt_ids"] = json!(["msg_1", "msg_9"])).contains("msg_9"));
+        assert!(why(&|r| r["input_pending_at"] = json!(1.25)).contains("typed input"));
+        // The lenient reader names the latest main turn and its end, skipping what it cannot read.
+        let mut rows = bytes(&two_turns());
+        rows.extend_from_slice(b"not json\n");
+        assert_eq!(latest_main_turn(&rows, false), Some((1, Some("completed".into()))));
+        assert_eq!(latest_main_turn(&bytes(&[prompt(0), end(0), prompt(1)]), false), Some((1, None)));
+        let mut cancelled = end(1);
+        cancelled["reason"] = json!("cancelled");
+        assert_eq!(
+            latest_main_turn(&bytes(&[prompt(0), end(0), prompt(1), cancelled]), false),
+            Some((1, Some("cancelled".into())))
+        );
+    }
+
     #[test]
     fn newer_input_cannot_hide_behind_a_delayed_or_duplicate_old_hook() {
         let old = terminal(&bytes(&[prompt(0), end(0)]), false).unwrap();
@@ -1468,6 +1764,54 @@ mod tests {
                 "agent_id":"main","agent_name":"profile-1","turn_id":0}));
             assert_eq!(parent["subagents"]["profile-1"]["state"], "working", "{ordering}");
         }
+        // WhiteWh fork: the start hooks of two turns in a row never came. Each
+        // turn still ends by its prompt's identity, and the clock follows.
+        let mut lost = record();
+        lost["run_id"] = json!("lost-start");
+        lost["kimi_turn_clock"]["run_id"] = json!("lost-start");
+        lost["agent_home"] = json!(native);
+        submission(&mut lost, json!("msg_0"), 1.01);
+        let mut rows = vec![prompt(0), end(0)];
+        fs::write(&wire, bytes(&rows)).unwrap();
+        write(&mut lost).unwrap();
+        let mut settled = reconcile(lost);
+        assert!(telemetry::settled(&settled), "{settled}");
+        for turn in 1..=2u64 {
+            journal::update_activity(
+                &mut settled,
+                &json!({"hook_event_name":"UserPromptSubmit","prompt_id":format!("msg_{turn}"),"prompt":"next"}),
+            );
+            assert!(!telemetry::settled(&settled));
+            write(&mut settled).unwrap();
+            let mut next = prompt(turn);
+            next["time"] = json!(1000 + turn * 300);
+            rows.push(next);
+            fs::write(&wire, bytes(&rows)).unwrap();
+            assert!(!telemetry::settled(&reconcile(settled.clone())), "turn {turn} still runs");
+            assert_eq!(refusal(&settled), None, "a running turn has nothing to explain");
+            let mut done = end(turn);
+            done["time"] = json!(1100 + turn * 300);
+            rows.push(done);
+            fs::write(&wire, bytes(&rows)).unwrap();
+            settled = reconcile(settled);
+            assert!(telemetry::settled(&settled), "turn {turn}: {settled}");
+            assert_eq!(settled["kimi_turn_clock"]["started"], json!(turn));
+            assert_eq!(settled["kimi_turn_clock"]["stopped"], json!(turn));
+            // The start hook, late after all, reopens nothing.
+            journal::update_activity(
+                &mut settled,
+                &json!({"hook_event_name":"TurnStarted","agent_id":"main","turn_id":turn}),
+            );
+            assert!(telemetry::settled(&settled), "turn {turn}: a late start hook");
+        }
+        // A turn end Zerus does not take says why in the inspection.
+        journal::update_activity(
+            &mut settled,
+            &json!({"hook_event_name":"PreToolUse","tool_name":"TodoList","tool_call_id":"call_1"}),
+        );
+        write(&mut settled).unwrap();
+        let why = refusal(&settled).unwrap_or_default();
+        assert!(why.contains("main turn 2 as completed") && why.contains("TodoList"), "{why}");
         let mut record = record();
         record["agent_home"] = json!(native);
         fs::write(&wire, bytes(&[prompt(0), end(0)])).unwrap();

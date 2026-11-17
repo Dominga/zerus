@@ -1035,6 +1035,18 @@ TurnStarted identity is required; a newer prompt, incomplete wire, outstanding
 tool or changed run/conversation prevents settlement. Reply text never proves
 completion. Stop and wire evidence share one durable completion and reply ID;
 background jobs and subagents remain active until their own work finishes.
+Kimi does not wait for its TurnStarted hook, so that hook can come late or not
+at all (WhiteWh fork, 2026-11-17: a team member showed Working for half an hour
+after its turn ended, and its relaunch waited for the "open turn"). A wire turn
+newer than the last started one is then taken as the current turn only when its
+prompt is exactly the prompt the latest UserPromptSubmit or UserPromptQueued
+hook named; every other check stays, and a late start hook reopens nothing.
+While a Kimi session stays working although its wire ends the latest main
+turn, `hgs inspect` adds `turn_end_refusal`: the first check that refuses the
+end (open tool calls, a pending approval, the turn clock, a prompt without an
+ID, a prompt outside the last 8 MiB of the wire, input typed later, or a wire
+tail that cannot be verified). It is text for a person, read once per wire
+version and record state; the status never follows it.
 For older attachment callbacks that lack that ID, a complete bounded native
 history and a unique exact staged-file input can associate their rich file card
 with the one native turn. The confirmed local delivery can supply the receipt

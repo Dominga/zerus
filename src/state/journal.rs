@@ -1438,6 +1438,13 @@ pub(super) fn inspection_with(
         output["restore_name_busy"] = json!(lifecycle::restore_name_busy(name)?);
     }
     drop(_guard);
+    // WhiteWh fork: a Kimi session that stays working although its wire ends
+    // the latest turn says which check refuses the end. Text only.
+    if archive_id.is_none() {
+        if let Some(why) = kimi_completion::refusal(&record) {
+            output["turn_end_refusal"] = json!(why);
+        }
+    }
     phases.mark("summary");
     // Before the listed questions and the provider messages below.
     if current_read && archive_id.is_none() {

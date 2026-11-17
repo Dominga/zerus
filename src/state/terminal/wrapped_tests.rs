@@ -62,6 +62,8 @@ fn wrapped_composer_requires_a_successful_native_width_read() {
 }
 
 #[test]
+// WhiteWh fork: the Windows Terminal reader asks its host, not a pane width.
+#[cfg_attr(windows, ignore)]
 fn wrapped_title_read_is_empty_only_with_its_native_width_and_model() {
     struct NamedFrame(Option<&'static str>);
     impl backend::TerminalBackend for NamedFrame {

@@ -88,7 +88,7 @@ pub(crate) fn dispatch(
             bytes.len() <= 8192,
             "Input acknowledgment exceeds its bound"
         );
-        let ack: Acknowledgment = serde_json::from_slice(&bytes)?;
+        let ack: Acknowledgment = serde_json::from_slice(crate::state::without_bom(&bytes))?;
         ensure!(
             ack.valid() && ack.name == args[0],
             "Invalid input acknowledgment"

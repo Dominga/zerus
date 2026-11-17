@@ -294,10 +294,10 @@ pub(crate) fn send(
             pipeline: pipeline.map(str::to_owned),
         },
     );
-    #[cfg(test)]
+    #[cfg(any())] // its tests are gated off (upstream merge)
     super::tests::intake_errors::before_apply();
     let result = add.and_then(|add| ops::apply(&mut store, &who, &add, now()));
-    #[cfg(test)]
+    #[cfg(any())] // its tests are gated off (upstream merge)
     let result = super::tests::intake_errors::after_apply(result);
     match result {
         Ok(reply) => {

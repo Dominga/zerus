@@ -5116,6 +5116,10 @@ mod tests {
                     ""
                 )
                 .replace(
+                    "       Desktop Teams Person ABI: desktop-team-person-v1\n       Desktop Teams Person actions ABI: desktop-team-person-actions-v2\n",
+                    ""
+                )
+                .replace(
                     "       Desktop creation worktree ABI: desktop-creation-worktree-v1\n       Desktop creation worktree receipt control: future-fence-v1\n",
                     ""
                 )

@@ -17,7 +17,7 @@ fn public_terminal_summaries_match_the_canonical_builder() {
         "fork-origin",
         "provider-error",
     ] {
-        let home = tempfile::tempdir().unwrap();
+        let home = crate::host::staging::private_tempdir();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

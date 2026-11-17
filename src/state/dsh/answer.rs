@@ -13,7 +13,7 @@ pub(super) fn read() -> Result<(Value, String)> {
     if bytes.len() > 128 * 1024 {
         return Err("answer payload exceeds128 KiB".into());
     }
-    let request = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    let request = serde_json::from_slice(crate::state::without_bom(&bytes)).map_err(|error| error.to_string())?;
     Ok((request, format!("{:x}", Sha256::digest(&bytes))))
 }
 

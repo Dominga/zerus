@@ -14,7 +14,7 @@ fn enable(root: &Path) {
         .unwrap();
 }
 fn fixture() -> tempfile::TempDir {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::host::staging::private_tempdir();
     enable(root.path());
     root
 }
@@ -22,7 +22,7 @@ fn fixture() -> tempfile::TempDir {
 #[test]
 fn publication_removal_and_repair_require_explicit_opt_in() {
     for operation in ["write", "remove", "repair"] {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::host::staging::private_tempdir();
         let path = path(root.path());
         let value = record();
         storage::atomic(&path, &value.to_string()).unwrap();
@@ -997,7 +997,7 @@ fn an_unfinished_rename_journal_keeps_display_coverage_incomplete_after_a_crash(
 #[test]
 #[cfg(unix)]
 fn a_changed_root_alias_cannot_attach_new_seed_data_to_an_old_canonical_file() {
-    let parent = tempfile::tempdir().unwrap();
+    let parent = crate::host::staging::private_tempdir();
     let a = parent.path().join("a");
     let b = parent.path().join("b");
     private_dir(&a).unwrap();

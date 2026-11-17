@@ -364,7 +364,7 @@ mod tests {
             page(&store, task.uuid(), 2, None, false).unwrap();
         }
         assert!(platform::verify_private(&dir, platform::Private::Directory).unwrap());
-        assert!(platform::verify_private(&dir.join("task-index-v2.sqlite3"), platform::Private::File).unwrap());
+        assert!(platform::verify_private(&dir.join("task-index-v3.sqlite3"), platform::Private::File).unwrap());
         assert!(!platform::verify_private(&config.state, platform::Private::Directory).unwrap(),
             "the existing parent keeps its foreign grant");
     }

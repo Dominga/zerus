@@ -157,5 +157,7 @@ fn publish<T>(
     result
 }
 
-#[cfg(test)]
+// Upstream merge 2026-11-17: the listing index is active on Linux only
+// (docs/reference.md: macOS/Windows activation is a separate follow-up).
+#[cfg(all(test, not(windows)))]
 mod tests;

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn terminal_provider_and_id_publishers_are_covered_without_native_machine_identity() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::host::staging::private_tempdir();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap());
     child.args([
         "--exact",

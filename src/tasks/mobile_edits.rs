@@ -11,7 +11,7 @@ pub(super) fn entry(config: &crate::config::Config) -> Result<Value> {
     if bytes.len() > 2 * 1024 * 1024 {
         return Err(fail("the authenticated mobile envelope exceeds 2 MiB"));
     }
-    let envelope: zerus_mobile_task_edit::EncryptedEnvelope = serde_json::from_slice(&bytes)
+    let envelope: zerus_mobile_task_edit::EncryptedEnvelope = serde_json::from_slice(crate::state::without_bom(&bytes))
         .map_err(|_| fail("invalid authenticated mobile envelope"))?;
     let machine = crate::swarm::existing_node_id(
         &crate::swarm::read_regular(&config.dir.join("swarm/catalog.json"), 128 * 1024 * 1024)

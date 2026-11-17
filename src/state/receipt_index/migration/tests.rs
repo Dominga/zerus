@@ -286,6 +286,10 @@ fn an_explicit_question_step_waits_before_reading_while_another_writer_is_active
 }
 
 #[test]
+// WhiteWh fork (upstream merge 2026-11-17): off Unix `unchanged` never reuses
+// a row, so zero-budget advances restart discovery and never converge here;
+// the detached worker keeps one migration and still completes.
+#[cfg_attr(windows, ignore)]
 fn bounded_advances_resume_discovery_instead_of_restarting_the_same_prefix() {
     let temp = tempfile::tempdir().unwrap();
     let directory = temp.path().join("input_receipts");

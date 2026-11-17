@@ -75,7 +75,7 @@ fn live_public_classification_is_versioned_and_excludes_private_or_unknown_input
 
 #[test]
 fn overlay_file_and_deadline_refusals_are_distinct_before_opening_a_source() {
-    let root = tempfile::tempdir().unwrap();
+    let root = crate::host::staging::private_tempdir();
     let mut bytes = 0;
     let mut files = 16;
     let error = listing::selected_record(
@@ -119,7 +119,7 @@ fn automatic_activation_preserves_explicit_or_unrecognized_policy() {
         "malformed-disabled",
         "enabled-directory",
     ] {
-        let root = tempfile::tempdir().unwrap();
+        let root = crate::host::staging::private_tempdir();
         let dir = root.path().join("listing-metadata");
         fs::create_dir(&dir).unwrap();
         match mode {

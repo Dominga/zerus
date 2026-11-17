@@ -49,6 +49,10 @@ mod inventory {
         ("team lead dsh/x/lead", NotACard),
         ("team_run", NotACard),
         ("team_stage", NotACard),
+        // Upstream merge 2026-11-17: a parent fixture of listing parity and a
+        // codex task recovery record, neither a question card.
+        ("fixture", NotACard),
+        ("original_native_prompt", NotACard),
         ("claude_native_question", NativePrompt),
         ("claude_tool_approval", NativePrompt),
         ("claude_permission_mode", NativePrompt),

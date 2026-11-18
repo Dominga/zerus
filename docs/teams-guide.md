@@ -86,6 +86,12 @@ cookie for the lead produces a small joke inside the reader.
 
 Open **New team** and fill in:
 
+(WhiteWh fork) **+ New team** on a session of another computer makes the team
+on that computer: its `hgs` creates the draft, the lead and the members, and
+the form offers that computer's catalog, accounts and models. Its folder is
+that computer's path, checked by its `hgs` at Start planning; its members run
+on that computer.
+
 | Field | What to enter |
 |---|---|
 | **Name** | A short name for the team. |

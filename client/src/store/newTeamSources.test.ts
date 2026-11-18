@@ -97,6 +97,9 @@ describe("New team sources", () => {
     const row = { computer: "", name: "dsh/app/coord", model: "deepseek-flash", status: "working", state: "running" } as never;
     expect(coordinatorOf(row)).toEqual({ name: "dsh/app/coord", agent: "dsh", model: "deepseek-flash", busy: true });
     expect(coordinatorOf({ ...(row as object), computer: "studio" } as never)).toBeUndefined();
+    // WhiteWh fork: a team made on "studio" is led by a session there, not by this computer's.
+    expect(coordinatorOf({ ...(row as object), computer: "studio" } as never, "studio")?.name).toBe("dsh/app/coord");
+    expect(coordinatorOf(row, "studio")).toBeUndefined();
     expect(coordinatorOf({ ...(row as object), state: "archived" } as never)).toBeUndefined();
     expect(coordinatorOf(undefined)).toBeUndefined();
   });

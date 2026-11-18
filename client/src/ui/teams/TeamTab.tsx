@@ -339,7 +339,7 @@ function TeamWorkspace(props: { computer: ComputerId; team: TeamView; owner: boo
         </aside>
       </div>
       <Show when={settingsOpen()}>
-        <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
+        <TeamSettingsDialog team={props.team} computer={props.computer} onClose={() => setSettingsOpen(false)} />
       </Show>
       <Show when={catalogOpen()}>
         <TeamCatalogEditor onOpenDesigner={() => { setCatalogOpen(false); setPage("designer"); }} />
@@ -424,7 +424,7 @@ function LeadTeamBar(props: { computer: ComputerId; team: TeamView }) {
       <TeamBar computer={props.computer} team={props.team} state={state()} problemTasks={problemTasks()}
         onPhase={() => setDetailTab("team")} onSettings={() => setSettingsOpen(true)} />
       <Show when={settingsOpen()}>
-        <TeamSettingsDialog team={props.team} onClose={() => setSettingsOpen(false)} />
+        <TeamSettingsDialog team={props.team} computer={props.computer} onClose={() => setSettingsOpen(false)} />
       </Show>
       <Show when={catalogOpen()}>
         <TeamCatalogEditor onOpenDesigner={() => { setCatalogOpen(false); setPage("designer"); }} />

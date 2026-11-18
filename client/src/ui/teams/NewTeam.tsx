@@ -257,23 +257,31 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
     members: counted(), max: maxMembers(settings()), preflightErrors: store.view()?.validation.errors.length ?? 0 });
   const startWhy = () => (fields().folder.trim() && props.folderChecking ? tr("Checking the folder…") : startReason(fields().folder, folderOk(), lead()));
   // Task 200 (Qt m_accounts[host]): a member's accounts are those of its computer.
-  const accountsFor = (agent: string, at: ComputerId = "") =>
-    (at && props.accountsFor ? props.accountsFor(at) : props.accounts ?? []).filter((account) => account.provider === agent);
+  // WhiteWh fork (owner, 2026-11-18): a team made on another computer lives
+  // there; "" in its rows is that computer, whose accounts and models apply.
+  const placed = <T extends { computer: string }>(item: T): T => ({ ...item, computer: item.computer || computer() });
+  const accountsFor = (agent: string, at: ComputerId = "") => {
+    const where = at || computer();
+    return (where && props.accountsFor ? props.accountsFor(where) : props.accounts ?? []).filter((account) => account.provider === agent);
+  };
   // Task 200 (Qt task #19): the models an agent's account offers on that computer, as the model field's list.
   const [modelTick, setModelTick] = createSignal(0);
   const models = createModelCatalogs((at, agent, account) => teamRoleModels(at, agent, account), () => setModelTick((n) => n + 1));
   interface ModelItem { [key: string]: unknown; computer: string; agent: string; account: string; model: string; effort: string }
-  const modelsFor = (item: ModelItem) => {
+  const modelsFor = (shown: ModelItem) => {
+    const item = placed(shown);
     modelTick();
     models.request(item);
     return modelOptions(item, models.get(item));
   };
-  const effortsFor = (item: ModelItem) => {
+  const effortsFor = (shown: ModelItem) => {
+    const item = placed(shown);
     modelTick();
     models.request(item);
     return effortOptions(item.model, models.get(item), item.effort, item.agent);
   };
-  const changedModel = (item: ModelItem, value: string) => {
+  const changedModel = (shown: ModelItem, value: string) => {
+    const item = placed(shown);
     const next = selectModel(normalizeModelCatalog(models.get(item) ?? []), value, item.effort);
     return { model: next.modelId, effort: next.effortId };
   };
@@ -479,8 +487,9 @@ export function NewTeam(props: NewTeamProps): JSX.Element {
                 <For each={PERMISSIONS}>{([value, label]) => <option value={value}>{label()}</option>}</For>
               </select>
               <select class="nt-computer" value={member.computer} aria-label={tr("Computer")} onChange={(event) => setMember(index(), { computer: event.currentTarget.value, account: "", model: "", effort: "" })}>
-                <option value="">{tr("this computer")}</option>
-                <For each={props.computers.filter((choice) => choice.alias)}>{(choice) => <option value={choice.alias}>{choice.label}</option>}</For>
+                <option value="">{computer() ? props.computers.find((choice) => choice.alias === computer())?.label || computer() : tr("this computer")}</option>
+                {/* A team on another computer names its members' computers by that computer's aliases, which this one does not know. */}
+                <For each={computer() ? [] : props.computers.filter((choice) => choice.alias)}>{(choice) => <option value={choice.alias}>{choice.label}</option>}</For>
               </select>
               <select class="nt-account" value={member.account} aria-label={tr("Account")} onChange={(event) => setMember(index(), { account: event.currentTarget.value, model: "", effort: "" })}>
                 <option value="" selected={!member.account}>{tr("Default account")}</option>

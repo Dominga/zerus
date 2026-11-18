@@ -50,9 +50,13 @@ export function accountChoices(view: Pick<AccountsView, "accounts"> | undefined,
   }));
 }
 
-/** The selected local, live session that may lead (Qt's coordinator); none for a peer's or an archived one. */
-export function coordinatorOf(row: Pick<Session, "computer" | "name" | "model" | "status" | "state" | "accountId"> | undefined) {
-  if (!row || row.computer !== "" || row.state === "archived" || !row.name) return undefined;
+/**
+ * The selected live session that may lead (Qt's coordinator): one on the
+ * team's computer ("" is this one); none for another computer's or an
+ * archived one.
+ */
+export function coordinatorOf(row: Pick<Session, "computer" | "name" | "model" | "status" | "state" | "accountId"> | undefined, computer: ComputerId = "") {
+  if (!row || row.computer !== computer || row.state === "archived" || !row.name) return undefined;
   return { name: row.name, agent: row.name.split("/")[0] || "claude", model: row.model || undefined,
     ...(row.accountId ? { account: row.accountId } : {}), busy: row.status === "working" };
 }

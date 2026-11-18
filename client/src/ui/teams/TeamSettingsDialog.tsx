@@ -5,7 +5,7 @@ import { Icon } from "../lib/icons";
 import { teamAction, teamRoleModels } from "../../bridge";
 import { createModelCatalogs, effortOptions, modelOptions } from "./catalogControls";
 import { normalizeModelCatalog, selectModel } from "../provider-selection";
-import type { TeamMemberView, TeamView } from "../../types";
+import type { ComputerId, TeamCall, TeamMemberView, TeamView } from "../../types";
 import { checkTestConfig, overrideText, parseOverride, readTestConfig, sourceLine, testsLines, testsPatch, type TestConfig } from "./testsSettings";
 import "../styles/newteam.css";
 import { TextArea, TextInput } from "../lib/TextField";
@@ -16,6 +16,8 @@ type TeamSettings = Record<string, unknown>;
  * the build broker, phases and each member's iron rules, one `settings` call. */
 export interface TeamSettingsDialogProps {
   team: TeamView;
+  /** WhiteWh fork (owner, 2026-11-18): the computer the team lives on ("" is this one). */
+  computer?: ComputerId;
   onClose: () => void;
   onSaved?: () => void;
 }
@@ -30,6 +32,8 @@ function text(value: unknown): string {
 
 export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element {
   const current = props.team;
+  // WhiteWh fork: a team on another computer is changed there, not here.
+  const send = (call: TeamCall) => teamAction({ ...call, computer: props.computer ?? "" });
   const settings = current.settings as TeamSettings;
   const [rules, setRules] = createSignal(lines(settings.iron_rules).join("\n"));
   const [memberRules, setMemberRules] = createSignal<Record<string, string>>(
@@ -57,7 +61,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [modelTick, setModelTick] = createSignal(0);
   const catalogs = createModelCatalogs((computer, agent, account) => teamRoleModels(computer, agent, account), () => setModelTick((n) => n + 1));
   const catalogItem = (member: TeamMemberView) => ({
-    computer: member.computer ?? "", agent: member.agent, account: member.account ?? "",
+    computer: member.computer || props.computer || "", agent: member.agent, account: member.account ?? "",
     model: adding()[member.id]?.model ?? "", effort: adding()[member.id]?.effort ?? "",
   });
   createEffect(() => {
@@ -86,10 +90,10 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const intake = async (action: { kind: "intake_key"; label?: string; revoke?: string }) => {
     setIntakeError("");
     try {
-      let outcome = await teamAction({ team: current.id, team_name: current.name, action });
+      let outcome = await send({ team: current.id, team_name: current.name, action });
       if (outcome.outcome === "confirm") {
         if (!window.confirm(outcome.confirmation.text)) return undefined;
-        outcome = await teamAction({ team: current.id, team_name: current.name, action, confirmed: true });
+        outcome = await send({ team: current.id, team_name: current.name, action, confirmed: true });
       }
       if (outcome.outcome !== "done") { setIntakeError(outcome.outcome === "confirm" ? outcome.confirmation.text : outcome.detail); return undefined; }
       return outcome.receipt as Record<string, unknown>;
@@ -120,12 +124,12 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
   const [checking, setChecking] = createSignal(false);
   const [proposal, setProposal] = createSignal(false);
   onMount(() => {
-    void readTestConfig(teamAction, current.id, current.name).then(setTestConfig).catch((cause) => setTestConfig({ ok: false, error: String(cause) }));
+    void readTestConfig(send, current.id, current.name).then(setTestConfig).catch((cause) => setTestConfig({ ok: false, error: String(cause) }));
   });
   const checkTests = async () => {
     setChecking(true);
     try {
-      const result = await checkTestConfig(teamAction, current.id, current.name, tests());
+      const result = await checkTestConfig(send, current.id, current.name, tests());
       setTestCheck({ message: result.message, good: result.good });
       if (result.good && result.config) setTestConfig(result.config);
     } catch (cause) {
@@ -178,7 +182,7 @@ export function TeamSettingsDialog(props: TeamSettingsDialogProps): JSX.Element 
     setBusy(true);
     setError("");
     try {
-      const outcome = await teamAction({
+      const outcome = await send({
         team: current.id,
         team_name: current.name,
         action: { kind: "settings", settings: patch, members_update: memberPatch },

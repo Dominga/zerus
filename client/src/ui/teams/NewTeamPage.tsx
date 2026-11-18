@@ -9,6 +9,7 @@ import { groupOf, headerOf } from "../../store/organization";
 import { showCatalog, showTeam, showTeamList, teams } from "../../store/teams";
 import { accountChoices, catalogOf, computerChoices, coordinatorOf, draftLedBy, draftsOf, projectOfRow } from "../../store/newTeamSources";
 import { NewTeam } from "./NewTeam";
+import type { ComputerId } from "../../types";
 import { TeamSettingsDialog } from "./TeamSettingsDialog";
 
 /**
@@ -16,13 +17,15 @@ import { TeamSettingsDialog } from "./TeamSettingsDialog";
  * typed folder, read shortly after the last keystroke; another computer's
  * folder or a browser without the host is taken as typed.
  */
-function useFolderProbe(folder: () => string) {
+function useFolderProbe(folder: () => string, remote: () => boolean = () => false) {
   const [probe, setProbe] = createSignal<{ folder: string; exists: boolean; git: boolean } | undefined>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   createEffect(on(folder, (path) => {
     clearTimeout(timer);
     const typed = path.trim();
     if (!typed) { setProbe(undefined); return; }
+    // WhiteWh fork: another computer's folder is taken as typed; its hgs checks it.
+    if (remote()) { setProbe({ folder: typed, exists: true, git: true }); return; }
     timer = setTimeout(() => {
       localFolderProbe(typed).then(
         (answer) => { if (folder().trim() === typed) setProbe({ folder: typed, ...answer }); },
@@ -48,9 +51,13 @@ function useFolderProbe(folder: () => string) {
  * the draft the selected session leads shown again, and this computer's
  * drafts to reopen. `draft` opens one draft (the lead session's Team tab).
  */
-export function NewTeamPage(props: { draft?: string; embedded?: boolean } = {}): JSX.Element {
+export function NewTeamPage(props: { draft?: string; embedded?: boolean; computer?: ComputerId } = {}): JSX.Element {
+  // WhiteWh fork (owner, 2026-11-18): a team started from a peer's session
+  // lives on that computer: its hgs makes the draft, the lead and the members,
+  // with that computer's catalog, accounts and folder.
+  const computer = () => props.computer ?? "";
   const store = createNewTeam({ action: (call) => teamAction(call) });
-  const row = () => { const found = selected(); return found && found.computer === "" && found.state !== "archived" ? found : undefined; };
+  const row = () => { const found = selected(); return found && found.computer === computer() && found.state !== "archived" ? found : undefined; };
   onMount(() => {
     store.openNew();
     void loadAccounts();
@@ -63,19 +70,20 @@ export function NewTeamPage(props: { draft?: string; embedded?: boolean } = {}):
   const led = createMemo(() => draftLedBy(teams.teamOf(row()), row()));
   createEffect(on(led, (draft) => { if (draft && !store.draftId() && store.dirty().size === 0) store.openDraft(draft); }));
   // The catalog and this computer's team list are read while the form shows.
-  onCleanup(showCatalog(""));
-  onCleanup(showTeamList(""));
-  const probe = useFolderProbe(() => store.fields().folder);
+  onCleanup(showCatalog(computer()));
+  onCleanup(showTeamList(computer()));
+  const probe = useFolderProbe(() => store.fields().folder, () => computer() !== "");
   const computers = createMemo(() => computerChoices(sessions.computers, accountsPage().hosts ?? [], (computer) => computer === "" || computerFresh(computer)));
-  const accounts = createMemo(() => accountChoices(accountsPage()));
-  const catalog = createMemo(() => catalogOf(teams.catalog("")));
-  const coordinator = createMemo(() => coordinatorOf(selected()));
-  const project = createMemo(() => { const found = row(); return found ? projectOfRow(groupOf(found.key), (id) => headerOf(id)?.name) : {}; });
+  const accounts = createMemo(() => accountChoices(accountsPage(), computer()));
+  const catalog = createMemo(() => catalogOf(teams.catalog(computer())));
+  const coordinator = createMemo(() => coordinatorOf(selected(), computer()));
+  // This window's projects are its own; another computer's hgs does not know them.
+  const project = createMemo(() => { const found = row(); return found && !computer() ? projectOfRow(groupOf(found.key), (id) => headerOf(id)?.name) : {}; });
   const [settingsOpen, setSettingsOpen] = createSignal(false);
-  const draftTeam = () => (store.draftId() ? teams.team("", store.draftId()) : undefined);
-  createEffect(() => { const id = store.draftId(); if (settingsOpen() && id) onCleanup(showTeam("", id)); });
+  const draftTeam = () => (store.draftId() ? teams.team(computer(), store.draftId()) : undefined);
+  createEffect(() => { const id = store.draftId(); if (settingsOpen() && id) onCleanup(showTeam(computer(), id)); });
   const form = (
-    <NewTeam store={store} computer="" computers={computers()} accounts={accounts()} accountsFor={(computer) => accountChoices(accountsPage(), computer)}
+    <NewTeam store={store} computer={computer()} computers={computers()} accounts={accounts()} accountsFor={(computer) => accountChoices(accountsPage(), computer)}
       catalog={catalog()} coordinator={coordinator()} git={probe.git()} folderOk={probe.exists()} folderChecking={probe.checking()}
       project={project().project} projectId={project().projectId}
       onOpenSettings={() => setSettingsOpen(true)} onAskDesigner={() => setPage("designer")}
@@ -83,7 +91,7 @@ export function NewTeamPage(props: { draft?: string; embedded?: boolean } = {}):
       onDiscarded={() => { if (!props.embedded && row()?.cwdPath) store.setFolder(row()!.cwdPath); }} />
   );
   const settingsDialog = (
-    <Show when={settingsOpen() && draftTeam()}>{(team) => <TeamSettingsDialog team={team()} onClose={() => setSettingsOpen(false)} />}</Show>
+    <Show when={settingsOpen() && draftTeam()}>{(team) => <TeamSettingsDialog team={team()} computer={computer()} onClose={() => setSettingsOpen(false)} />}</Show>
   );
   if (props.embedded) return <div class="newteam-page embedded">{form}{settingsDialog}</div>;
   return (

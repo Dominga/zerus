@@ -255,7 +255,8 @@ export const tabs = () => {
     // Task 200 (Qt F5): a draft is not a team yet; its lead's tab is New team, which shows the draft again.
     { id: "team" as const, label: selectedTeam()?.status === "draft" ? tr("New team") : tr("Team"), show: !!selectedTeam() && !subagentOpen() },
     // Task #326 (N2): Qt also offers "+ New team" on a session that has no team.
-    { id: "newteam" as const, label: tr("+ New team"), show: !selectedTeam() && !subagentOpen() && selected()?.computer === "" && selected()?.state !== "archived" },
+    // WhiteWh fork (owner, 2026-11-18): a peer's session starts a team on that computer too.
+    { id: "newteam" as const, label: tr("+ New team"), show: !selectedTeam() && !subagentOpen() && !!selected() && selected()?.state !== "archived" },
   ];
   const s = selected();
   return s ? detailTabs(s.key, all) : all;
@@ -334,6 +335,8 @@ createRoot(() => createEffect(() => {
 
 export function SessionDetail() {
   followProjectTasks();
+  // WhiteWh fork: the selected session's computer, which a New team form is made on.
+  const selectedComputer = createMemo(() => selected()?.computer ?? "");
   // Owner, 2026-11-09: Start planning / Create team give the session its team
   // (a draft first); the "+ New team" tab then hides, and the view used to fall
   // back to Activity. It follows the team to the Team tab instead.
@@ -433,9 +436,10 @@ export function SessionDetail() {
                   <Match when={detailTab() === "terminal"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><TerminalTab /></LazyBoundary></Match>
                   <Match when={detailTab() === "native"}><NativeUiTab /></Match>
                   <Match when={detailTab() === "processes"}><LazyBoundary loading={<div class="lazy-waiting">{tr("Loading…")}</div>}><ProcessesTab /></LazyBoundary></Match>
-                  <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selected()!.computer === "" && selectedTeam()}>{(team) => <LazyBoundary><NewTeamPage embedded draft={team().id} /></LazyBoundary>}</Match>
+                  {/* WhiteWh fork: the form belongs to one computer; another computer's session opens a new one. */}
+                  <Match when={detailTab() === "team" && selectedTeam()?.status === "draft" && selectedTeam()}>{(team) => <For each={[selectedComputer()]}>{(computer) => <LazyBoundary><NewTeamPage embedded computer={computer} draft={team().id} /></LazyBoundary>}</For>}</Match>
                   <Match when={detailTab() === "team" && selectedTeam()}>{(team) => <LazyBoundary><TeamTab computer={selected()!.computer} team={team().id} /></LazyBoundary>}</Match>
-                  <Match when={detailTab() === "newteam" && !selectedTeam() && selected()?.computer === ""}><LazyBoundary><NewTeamPage embedded /></LazyBoundary></Match>
+                  <Match when={detailTab() === "newteam" && !selectedTeam() && selected()}><For each={[selectedComputer()]}>{(computer) => <LazyBoundary><NewTeamPage embedded computer={computer} /></LazyBoundary>}</For></Match>
                 </Switch>
               </div>
             </div>

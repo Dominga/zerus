@@ -86,7 +86,7 @@ pub const LAUNCH_ANYWAY: &str = "Launch anyway";
 
 /// The agents New session offers, in Qt's order; a session's own agent
 /// joins them.
-pub const AGENTS: [&str; 6] = ["codex", "claude", "kimi", "qwen", "dsh", "opencode"];
+pub const AGENTS: [&str; 7] = ["codex", "claude", "kimi", "qwen", "hermes", "dsh", "opencode"];
 
 /// Whether the agent starts detached (`-d`): every one but DeepSeek, which
 /// opens in Native UI, and OpenCode, which runs through its server.
@@ -163,7 +163,7 @@ pub fn launch_invocation(
         if !launch.effort.is_empty() {
             args.extend(["--effort".into(), launch.effort.clone()]);
         }
-    } else if ["claude", "codex", "kimi", "qwen"].contains(&launch.agent.as_str()) && !launch.model.is_empty() {
+    } else if ["claude", "codex", "kimi", "qwen", "hermes"].contains(&launch.agent.as_str()) && !launch.model.is_empty() {
         args.push("--".into());
         args.extend(["--model".into(), launch.model.clone()]);
         if !launch.effort.is_empty() {
@@ -1364,7 +1364,7 @@ pub struct Plan {
 /// already in place.
 pub fn plan(choices: &Choices) -> Plan {
     let repository = choices.repository.as_ref();
-    let model = if ["opencode", "claude", "codex", "kimi", "qwen", "dsh"].contains(&choices.agent.as_str()) {
+    let model = if ["opencode", "claude", "codex", "kimi", "qwen", "hermes", "dsh"].contains(&choices.agent.as_str()) {
         choices.model.clone()
     } else {
         String::new()

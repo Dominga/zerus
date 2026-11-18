@@ -20,7 +20,7 @@ export interface ClearInputPort {
 type Shown = Pick<Session, "key" | "catalogKey" | "computer" | "name" | "sessionId" | "status">;
 
 /** The agents whose composer hgs can read and clear (`input::composer::supported`). */
-const READABLE = new Set(["claude", "codex", "kimi", "qwen"]);
+const READABLE = new Set(["claude", "codex", "kimi", "qwen", "hermes"]);
 
 /**
  * The composer read target of a shown session: a live run of an agent whose

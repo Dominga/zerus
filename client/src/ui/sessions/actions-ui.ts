@@ -195,7 +195,7 @@ export function menuState(s: ActionRow, online: boolean, updating: boolean, deta
  * other live session is killed (`kill`).
  */
 export function terminateCopy(s: Pick<ActionRow, "tracked" | "cmd" | "name" | "machine">): { title: string; text: string; detail: string; confirm: string; action: "terminate" | "kill" } {
-  const archives = s.tracked && ["codex", "claude", "kimi", "qwen"].includes(s.cmd);
+  const archives = s.tracked && ["codex", "claude", "kimi", "qwen", "hermes"].includes(s.cmd);
   return {
     title: tr("Terminate session?"),
     text: archives
@@ -402,7 +402,7 @@ export function headerClearSlot(mainContext: boolean, state: ActionRow["state"])
  * compacting, composer sending, rename in flight) have no client state yet.
  */
 export function canStartStopped(s: Pick<ActionRow, "state" | "tracked" | "cmd">, online: boolean, updating: boolean, batchRunning = false): boolean {
-  return online && (s.state === "paused" || s.state === "stopped") && s.tracked && ["codex", "claude", "kimi", "qwen"].includes(s.cmd)
+  return online && (s.state === "paused" || s.state === "stopped") && s.tracked && ["codex", "claude", "kimi", "qwen", "hermes"].includes(s.cmd)
     && !updating && !batchRunning;
 }
 

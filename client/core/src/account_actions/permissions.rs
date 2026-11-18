@@ -211,6 +211,7 @@ impl Catalog {
             "codex" => "Codex".into(),
             "kimi" => "Kimi".into(),
             "qwen" => "Qwen Code".into(),
+            "hermes" => "Hermes Agent".into(),
             "dsh" | "deepseek" => "DeepSeek".into(),
             "" => "harness".into(),
             other => other.into(),

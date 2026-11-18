@@ -367,6 +367,7 @@ pub fn provider_name(provider: &str) -> String {
         "codex" => "Codex",
         "kimi" => "Kimi",
         "qwen" => "Qwen Code",
+        "hermes" => "Hermes Agent",
         "opencode" => "OpenCode",
         "dsh" => "DeepSeek",
         "sh" => "Shell",

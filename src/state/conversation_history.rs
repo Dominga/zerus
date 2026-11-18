@@ -501,7 +501,7 @@ fn paths(record: &Value) -> Result<Vec<PathBuf>> {
     }
     let id = string(record, "conversation_id");
     let path = PathBuf::from(string(record, "transcript"));
-    if !["codex", "claude", "qwen"].contains(&string(record, "agent"))
+    if !["codex", "claude", "qwen", "hermes"].contains(&string(record, "agent"))
         || uuid::Uuid::parse_str(id).is_err()
         || !path.is_absolute()
         || !path

@@ -75,7 +75,7 @@ pub const RECEIPT_INVALID: &str = "session_resume_receipt_invalid";
 pub const AGENT_REFUSED: &str = "session_resume_agent_refused";
 /// The agents this kind takes: terminal agents whose resume starts a
 /// terminal and whose send types into it.
-pub const AGENTS: [&str; 4] = ["claude", "kimi", "codex", "qwen"];
+pub const AGENTS: [&str; 5] = ["claude", "kimi", "codex", "qwen", "hermes"];
 /// Of [`AGENTS`], those whose resumed session shows only on its terminal
 /// that it takes a message: a resumed Codex stays pending until its first
 /// message. The send's own effect-free observation (`hgs send <session>

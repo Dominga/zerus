@@ -683,7 +683,8 @@ pub(super) fn provider_event(agent: &str, event: &Value) -> Option<(Value, &'sta
                 "kimi_wire",
             )
         }
-        "claude" => {
+        // WhiteWh fork: hgs writes a Hermes session's turns in Claude's format.
+        "claude" | "hermes" => {
             // A compaction summary is Claude's own context, written as a user turn.
             if event["isMeta"] == true || event["isSidechain"] == true || event["isCompactSummary"] == true {
                 return None;

@@ -19,7 +19,7 @@ const [busy, setBusy] = createSignal(false);
 export const parentChangeBusy = busy;
 
 /** Agents whose sessions carry parent links (the host refuses others). */
-const LINKED = new Set(["claude", "codex", "kimi", "qwen", "dsh", "opencode"]);
+const LINKED = new Set(["claude", "codex", "kimi", "qwen", "hermes", "dsh", "opencode"]);
 export const parentLinkEligible = (s: Session) => !!s.sessionId && !!s.runId && !!s.conversationId && s.state !== "archived" && LINKED.has(s.cmd);
 
 /** Whether `child` may be made a child of `parent`: both identified, on one computer, not the same session. */

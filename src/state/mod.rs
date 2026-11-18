@@ -43,6 +43,11 @@ mod guarded_recovery;
 mod external_agents;
 mod fork;
 mod goals;
+mod hermes;
+/// WhiteWh fork: the Hermes session an hgs conversation of Hermes came from.
+pub(crate) fn hermes_native_id(conversation: &str) -> Option<String> {
+    hermes::native_id(conversation)
+}
 mod hooks;
 mod heartbeat;
 mod command_guard;
@@ -333,7 +338,7 @@ pub(crate) fn state_root() -> PathBuf {
 }
 
 pub(super) type Result<T> = std::result::Result<T, String>;
-pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi", "qwen"];
+pub(super) const AGENTS: &[&str] = &["claude", "codex", "kimi", "qwen", "hermes"];
 
 /// The entry points other modules call fail first where this computer runs no
 /// local sessions (a Windows control console), as they always have there.
@@ -420,6 +425,7 @@ pub(super) fn home_var(agent: &str) -> Result<&'static str> {
         "codex" => Ok("CODEX_HOME"),
         "kimi" => Ok("KIMI_CODE_HOME"),
         "qwen" => Ok("QWEN_HOME"),
+        "hermes" => Ok("HERMES_HOME"),
         _ => Err(format!("unsupported agent: {agent}")),
     }
 }

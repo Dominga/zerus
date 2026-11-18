@@ -11,7 +11,7 @@ import { tr } from "../i18n";
 export const switchable = (provider: string) => provider === "claude" || provider === "codex";
 
 /** Agents a session moves between, in the menu's group order. */
-export const MOVE_AGENTS = ["claude", "codex", "kimi", "qwen", "dsh", "opencode"] as const;
+export const MOVE_AGENTS = ["claude", "codex", "kimi", "qwen", "hermes", "dsh", "opencode"] as const;
 export const movable = (provider: string) => (MOVE_AGENTS as readonly string[]).includes(provider);
 
 /** The session's account id as the switch reads it: none is the native one. */

@@ -107,7 +107,7 @@ export interface ListInput {
 /** A listed parent that has ended: not running (stopped or paused) or its agent ended, and not archived. */
 export const endedParent = (s: Session) => s.state !== "archived" && (s.state !== "running" || s.status === "ended");
 
-const AGENTS: readonly AgentKind[] = ["claude", "codex", "kimi", "qwen", "deepseek", "opencode", "sh"];
+const AGENTS: readonly AgentKind[] = ["claude", "codex", "kimi", "qwen", "hermes", "deepseek", "opencode", "sh"];
 
 /** The title of a session name `agent/project/tag`: its tag. */
 const tagOf = (name: string) => name.slice(name.lastIndexOf("/") + 1) || name;

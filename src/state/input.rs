@@ -639,6 +639,8 @@ struct TerminalStyle {
     underline: bool,
     /// A foreground colour other than the default.
     foreground: bool,
+    /// Italic, as Hermes draws its empty prompt's placeholder.
+    italic: bool,
 }
 
 fn styled_cells(row: &str, style: &mut TerminalStyle) -> Vec<(char, TerminalStyle)> {
@@ -659,6 +661,8 @@ fn styled_cells(row: &str, style: &mut TerminalStyle) -> Vec<(char, TerminalStyl
                                 "" | "0" => *style = TerminalStyle::default(),
                                 "22" => style.dim = false,
                                 "2" => style.dim = true,
+                                "3" => style.italic = true,
+                                "23" => style.italic = false,
                                 "7" => style.inverse = true,
                                 "27" => style.inverse = false,
                                 "49" => style.background = false,
@@ -792,6 +796,7 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
             agent_mode && (cursor == 1 && plain.trim().is_empty() && previous.contains(" input "))
         }
         "qwen" => qwen_prompt_empty(row, &previous, cursor),
+        "hermes" => hermes_prompt_empty(row, &previous, cursor),
         _ => false,
     }
 }
@@ -801,6 +806,45 @@ fn prompt_empty(agent: &str, row: &str, previous: &str, screen: &str, cursor: us
 /// underlined cell at column 2 and, when empty, only its placeholder after it
 /// ("Type your message or @path/to/file"), drawn in a set colour. A draft is in
 /// the default colour and moves the caret past its text.
+/// A Hermes rule: full width, possibly titled (`──── reply preview ─`).
+fn hermes_rule(row: &str) -> bool {
+    row.starts_with('─') && row.trim_end().ends_with('─') && row.chars().filter(|ch| *ch == '─').count() >= 12
+}
+
+/// Hermes Agent's empty prompt (0.23.2): `❯ ` below its rule with the caret
+/// after it and only an italic placeholder beyond. A busy turn's `☤ ❯` and an
+/// approval's `⚠ ❯` are never ready: Enter would redirect or answer them.
+fn hermes_prompt_empty(row: &str, previous: &str, cursor: usize) -> bool {
+    let cells = styled_cells(row, &mut TerminalStyle::default());
+    cursor == 2
+        && hermes_rule(previous)
+        && matches!(cells.first(), Some(('❯', _)))
+        && cells.get(1).is_some_and(|(ch, _)| *ch == ' ')
+        && cells.iter().skip(2).all(|(ch, style)| ch.is_whitespace() || style.italic)
+}
+
+/// Hermes Agent's draft: the rows between its two rules around the cursor,
+/// the first after `❯ `, the others after their two-column indent. None for
+/// its empty prompt and outside that frame.
+pub(super) fn hermes_draft(screen: &str, cursor_y: usize) -> Option<String> {
+    let rows: Vec<String> = screen.lines().map(|row| styled_row(row).iter().map(|(ch, _)| ch).collect()).collect();
+    let cursor = cursor_y.min(rows.len().checked_sub(1)?);
+    let start = (1..=cursor).rev().take_while(|&index| !hermes_rule(&rows[index])).find(|&index| hermes_rule(&rows[index - 1]) && rows[index].starts_with("❯ "))?;
+    if composer_empty("hermes", screen, 2, start) {
+        return None;
+    }
+    let mut lines = vec![rows[start].strip_prefix("❯ ")?.trim_end().to_owned()];
+    for row in &rows[start + 1..] {
+        if hermes_rule(row) {
+            let text = lines.join("
+").trim_end().to_owned();
+            return (!text.trim().is_empty()).then_some(text);
+        }
+        lines.push(row.strip_prefix("  ").unwrap_or(row).trim_end().to_owned());
+    }
+    None
+}
+
 fn qwen_prompt_empty(row: &str, previous: &str, cursor: usize) -> bool {
     let cells = styled_cells(row, &mut TerminalStyle::default());
     let rule = !previous.starts_with(char::is_whitespace)
@@ -1214,10 +1258,11 @@ fn composer_empty_for_model(agent: &str, screen: &str, cursor_x: usize, cursor_y
         }
         // Claude and Python kimi-cli terminate the input with an unindented
         // full-width separator. Draft continuation lines have an input indent.
-        if matches!(agent, "claude" | "kimi" | "qwen")
+        if (matches!(agent, "claude" | "kimi" | "qwen")
             && !plain.starts_with(char::is_whitespace)
             && plain.chars().count() >= 12
-            && plain.chars().all(|ch| "─━╌".contains(ch))
+            && plain.chars().all(|ch| "─━╌".contains(ch)))
+            || (agent == "hermes" && hermes_rule(&plain))
         {
             return true;
         }
@@ -1680,6 +1725,7 @@ pub(super) fn native_draft(record: &Value, styled: &str, plain: &str, cursor_y: 
         "codex" => codex_draft(record, plain, cursor_y).filter(|draft| !draft.trim().is_empty()),
         "kimi" => kimi_draft(plain, cursor_y),
         "qwen" => qwen_draft(styled, cursor_y),
+        "hermes" => hermes_draft(styled, cursor_y),
         _ => None,
     }
 }
@@ -3431,6 +3477,32 @@ and then stop"));
         let record = json!({"agent":"qwen"});
         assert_eq!(composer::read(&record, &frame(draft), 33, 3), composer::Composer::Text("Reply with the single word PONG".into()));
         assert_eq!(composer::read(&record, &frame(empty), 2, 3), composer::Composer::Empty);
+    }
+
+    #[test]
+    fn hermes_empty_composer_is_its_italic_placeholder_between_rules() {
+        // Frames of Hermes Agent 0.23.2 in a 100-column pseudoconsole (2026-11-18).
+        let rule = "\x1b[38;2;205;127;50m".to_owned() + &"─".repeat(99) + "\x1b[0m";
+        let titled = "\x1b[38;2;205;127;50m".to_owned() + &"─".repeat(84) + " OK from fake ─\x1b[0m";
+        let frame = |above: &str, composer: &str| format!("Welcome to Hermes Agent!\n\n{above}\n{composer}\n{rule}\n \u{2624} fake · 13/256K\n");
+        let empty = "\x1b[0;38;2;255;248;220m❯ \x1b[0;38;2;184;134;11;3mSummarize what's in this folder\x1b[0m";
+        assert!(composer_empty("hermes", &frame(&rule, empty), 2, 3));
+        assert!(composer_empty("hermes", &frame(&titled, empty), 2, 3), "a rule titled with the last reply");
+        assert!(composer_empty("hermes", &frame(&rule, "\x1b[0;38;2;255;248;220m❯ \x1b[0m"), 2, 3));
+        let draft = "\x1b[0;38;2;255;191;0;1m❯\x1b[0m \x1b[0;1mSay hi\x1b[0m";
+        assert!(!composer_empty("hermes", &frame(&rule, draft), 8, 3));
+        assert!(!composer_empty("hermes", &frame(&rule, draft), 2, 3));
+        // A busy turn's redirect prompt and an approval's prompt are never ready.
+        assert!(!composer_empty("hermes", &frame(&rule, "\u{2624} ❯ \x1b[3mtype to redirect this turn\x1b[0m"), 4, 3));
+        assert!(!composer_empty("hermes", &frame(&rule, "⚠ ❯"), 4, 3));
+        assert!(!composer_empty("claude", &frame(&rule, empty), 2, 3));
+        assert_eq!(hermes_draft(&frame(&rule, draft), 3).as_deref(), Some("Say hi"));
+        let two = format!("{draft}\n  and then stop");
+        assert_eq!(hermes_draft(&frame(&rule, &two), 4).as_deref(), Some("Say hi\nand then stop"));
+        assert_eq!(hermes_draft(&frame(&rule, empty), 3), None);
+        let record = json!({"agent":"hermes"});
+        assert_eq!(composer::read(&record, &frame(&rule, draft), 8, 3), composer::Composer::Text("Say hi".into()));
+        assert_eq!(composer::read(&record, &frame(&rule, empty), 2, 3), composer::Composer::Empty);
     }
 
     #[test]

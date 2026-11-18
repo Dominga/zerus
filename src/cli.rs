@@ -2020,7 +2020,7 @@ fn bound_terminal(session: &str) -> Result<Option<(String, String)>> {
 /// Commands that start a session, one list for the hosted forwarding refusal,
 /// the claimed-parent gate (`fork` takes no `--parent`) and the forwarded
 /// parent link; with `--parent` a launch names its parent.
-const LAUNCH_COMMANDS: &[&str] = &["claude", "codex", "kimi", "qwen", "dsh", "opencode", "fork"];
+const LAUNCH_COMMANDS: &[&str] = &["claude", "codex", "kimi", "qwen", "hermes", "dsh", "opencode", "fork"];
 
 /// Why forwarding `command` to another computer is refused for a resident
 /// DeepSeek host's tool call (`HGS_AGENT=dsh`) without its hosted proof, or
@@ -4051,10 +4051,10 @@ fn launch(
         Vec::new()
     };
     let requested_session = if let Some(id) = &options.resume_id {
-        if !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen") {
+        if !matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen" | "hermes") {
             return Err(Error::new(
                 1,
-                "resuming a conversation ID requires claude, codex, kimi or qwen",
+                "resuming a conversation ID requires claude, codex, kimi, qwen or hermes",
             ));
         }
         if options.tag.is_empty() {
@@ -4178,6 +4178,9 @@ fn launch(
             vec![command_name.clone()],
             vec![command_name.clone(), "-c".into()],
         ),
+        // WhiteWh fork: Hermes's `-c` continues its newest session anywhere,
+        // not this folder's; a resume names the exact session instead.
+        "hermes" => (vec!["hermes".into()], Vec::new()),
         "codex" => (
             vec!["codex".into()],
             vec!["codex".into(), "resume".into(), "--last".into()],
@@ -4229,11 +4232,17 @@ fn launch(
                 "codex" => "resume",
                 "claude" => "--resume",
                 "kimi" => "--session",
-                "qwen" => "--resume",
+                "qwen" | "hermes" => "--resume",
                 _ => unreachable!(),
             }
             .into(),
-            id.clone(),
+            if command_name == "hermes" {
+                state::hermes_native_id(id).ok_or_else(|| {
+                    Error::new(1, format!("hgs knows no Hermes session for conversation {id}"))
+                })?
+            } else {
+                id.clone()
+            },
         ]);
     }
     let mut auto = options.resume && !options.fresh && options.resume_id.is_none();
@@ -4386,7 +4395,7 @@ fn launch(
             Ok(rc)
         };
     }
-    let tracked = matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen")
+    let tracked = matches!(command_name.as_str(), "claude" | "codex" | "kimi" | "qwen" | "hermes")
         && env::var("HGS_TRACKING").as_deref() != Ok("0");
     let allocation = tracked.then(state::launch_identity::Allocation::fresh);
     let helper = if tracked && !options.dry {

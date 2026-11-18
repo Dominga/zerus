@@ -3,7 +3,7 @@ import type { ParentLinkOut, Reply } from "../../types";
 // catalog store's row: the Rust view row plus the presentation fields derived
 // from it once per upsert (store/catalog.ts `toSession`).
 
-export type AgentKind = "claude" | "codex" | "kimi" | "qwen" | "deepseek" | "opencode" | "ollama" | "sh";
+export type AgentKind = "claude" | "codex" | "kimi" | "qwen" | "hermes" | "deepseek" | "opencode" | "ollama" | "sh";
 
 /** Presentation status, in the existing precedence order (design/webui). */
 export type Status =

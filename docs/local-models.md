@@ -83,6 +83,48 @@ A Qwen Code account on a model server keeps the server in its own
 Such an account reports the model server's address as its `gateway`, so a client
 shows the server's speed instead of limits (Model servers in `docs/reference.md`).
 
+## Hermes Agent (WhiteWh fork)
+
+Zerus starts Hermes Agent (Nous Research, verified with 0.23.2 on Windows) as
+a tracked terminal agent: `hgs hermes DIRECTORY`, or Hermes in New session once
+`hermes` is on the computer's PATH. Hermes keeps its own provider and model in
+its home (`%LOCALAPPDATA%\hermes` on Windows, `~/.hermes` elsewhere, or
+`HERMES_HOME`); set them there with `hermes setup` or `hermes model`. For a
+model on GB10, choose the custom OpenAI-compatible provider with the gateway's
+`/v1` address. The native account is `native-hermes`; its permissions stay in
+Hermes's configuration, and `--yolo` in a launch's arguments skips its
+approvals.
+
+- **Hooks.** Hermes runs shell hooks from its configuration and deep-merges a
+  managed layer over the user's file. Zerus never edits `config.yaml`: a
+  session it starts gets `HERMES_MANAGED_DIR` naming Zerus's own layer
+  (`hermes-managed/config.yaml` in the hgs state), which holds only hgs's
+  `__state hook`, and adds those exact `(event, command)` pairs to Hermes's
+  consent list (`shell-hooks-allowlist.json`). An administrator's managed
+  scope (`HERMES_MANAGED_DIR` or `/etc/hermes`) stays in force; such a session
+  is not tracked by hooks. The layer replaces a hook the user configured for
+  the same Hermes event while Zerus's runtime serves it.
+- **One runtime per home.** Hermes 0.23 runs every client's turns in a runtime
+  shared by its home, started with the first client's environment, so a
+  hook's own variables may belong to another session. A fresh start therefore
+  opens `hermes chat -c zerus-SESSION_ID-RUN --create-if-missing`; a hook finds
+  its session by that title in Hermes's `state.db`, and a session Zerus did not
+  start is ignored. A runtime started outside Zerus (another `hermes` running
+  before it) has no hgs hooks until it exits; Hermes ends an idle runtime after
+  ten minutes.
+- **Status and Activity.** Hermes's events become the ones Zerus tracks:
+  `pre_llm_call` the prompt, `on_session_end` the turn's end, the tool calls,
+  and an approval (`pre_approval_request`) or a clarifying question waiting
+  for you. Zerus keeps each session's turns in a Claude-format transcript
+  (`hermes-transcripts/CONVERSATION.jsonl`) whose first line names the Hermes
+  session; the conversation is a UUID derived from Hermes's `local-…` id, and
+  Resume opens that session with `--resume`.
+- **Input.** Zerus types into Hermes's prompt only when it is empty (`❯` below
+  its rule with only the italic placeholder). A busy turn's prompt would
+  redirect the turn and an approval's would answer it, so a message waits for
+  the turn to end. Answer approvals and questions in Terminal; Fork, Clear and
+  Compact are not available for Hermes yet.
+
 ## Codex on an Ollama model
 
 The agent and the inference provider are separate choices. Codex owns tools,

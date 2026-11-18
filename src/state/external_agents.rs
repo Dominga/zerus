@@ -97,6 +97,10 @@ fn codex_parent(meta: &Value, parent: &str) -> bool {
 }
 
 fn provider(event: &Value) -> Option<&'static str> {
+    // WhiteWh fork: hgs's own translation of a Hermes hook names its session.
+    if !string(event, "hermes_session_id").is_empty() {
+        return Some("hermes");
+    }
     let id = string(event, "session_id");
     if id
         .strip_prefix("session_")

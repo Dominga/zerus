@@ -386,7 +386,8 @@ pub(super) fn available(record: &Value, live: bool) -> bool {
 /// tools, and each working subagent with its current tool.
 pub(super) fn unavailable(record: &Value, live: bool) -> Option<String> {
     if !live { return Some("The agent is not running".into()); }
-    if !AGENTS.contains(&string(record,"agent")) { return Some("This provider does not support native context actions".into()); }
+    // WhiteWh fork: Hermes's clear and compaction are not qualified yet.
+    if !AGENTS.contains(&string(record,"agent")) || string(record,"agent") == "hermes" { return Some("This provider does not support native context actions".into()); }
     if string(record,"conversation_id").is_empty() { return Some("Wait for a confirmed conversation".into()); }
     if let Some(reason) = blocked(record) { return Some(reason); }
     if !string(record,"expected_id").is_empty() { return Some("The agent has not confirmed the resumed conversation yet".into()); }

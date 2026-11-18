@@ -100,7 +100,7 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
         }
     }
     for (provider, id) in &catalog.defaults {
-        if !["codex", "claude", "kimi", "qwen"].contains(&provider.as_str())
+        if !["codex", "claude", "kimi", "qwen", "hermes"].contains(&provider.as_str())
             || catalog.hidden_profiles.contains(id)
             || (id != &format!("native-{provider}") && catalog.profiles.get(id).is_none_or(|p| &p.provider != provider)) {
             return Err(Error::new(1, "Invalid default account profile."));
@@ -109,11 +109,11 @@ fn decode(bytes: &[u8]) -> Result<Catalog> {
     Ok(catalog)
 }
 pub fn default_account(config: &Config, provider: &str) -> Result<Option<String>> {
-    if !["codex", "claude", "kimi", "qwen"].contains(&provider) { return Ok(None); }
+    if !["codex", "claude", "kimi", "qwen", "hermes"].contains(&provider) { return Ok(None); }
     Ok(decode(&read(config)?)?.defaults.get(provider).cloned())
 }
 fn native_id(id: &str) -> bool {
-    ["native-codex", "native-claude", "native-kimi", "native-qwen", "native-dsh", "native-opencode"].contains(&id)
+    ["native-codex", "native-claude", "native-kimi", "native-qwen", "native-hermes", "native-dsh", "native-opencode"].contains(&id)
 }
 fn revision(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -148,10 +148,23 @@ pub fn home_var(provider: &str) -> Result<&'static str> {
         "claude" => Ok("CLAUDE_CONFIG_DIR"),
         "kimi" => Ok("KIMI_CODE_HOME"),
         "qwen" => Ok("QWEN_HOME"),
-        _ => Err(Error::new(1, "Accounts support Codex, Claude, Kimi and Qwen Code.")),
+        "hermes" => Ok("HERMES_HOME"),
+        _ => Err(Error::new(1, "Accounts support Codex, Claude, Kimi, Qwen Code and Hermes.")),
     }
 }
 fn native_home(config: &Config, provider: &str) -> PathBuf {
+    // WhiteWh fork: Hermes keeps its home in %LOCALAPPDATA%\hermes on Windows.
+    if provider == "hermes" {
+        if let Some(home) = env::var_os("HERMES_HOME").filter(|v| !v.is_empty()) {
+            return PathBuf::from(home);
+        }
+        if cfg!(windows) {
+            if let Some(local) = env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()) {
+                return PathBuf::from(local).join("hermes");
+            }
+        }
+        return Path::new(&config.home).join(".hermes");
+    }
     if provider=="opencode" {return env::var_os("OPENCODE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(||env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(||Path::new(&config.home).join(".config")).join("opencode"));}
     env::var(if provider == "dsh" {
         "DSH_HOME"
@@ -480,6 +493,8 @@ fn credential_file(home: &Path, provider: &str) -> bool {
         // Qwen OAuth's credentials, or a provider chosen in its settings (an
         // API key in its environment or in the settings' own `env`).
         "qwen" => home.join("oauth_creds.json").is_file() || qwen_auth_selected(home),
+        // Hermes keeps its provider and model in config.yaml (`hermes setup`).
+        "hermes" => home.join("config.yaml").is_file(),
         "kimi" => fs::read_dir(home.join("credentials"))
             .ok()
             .is_some_and(|entries| {
@@ -540,6 +555,14 @@ fn list(config: &Config) -> Result<Value> {
         rows.push(row(config, id, &Profile {
             provider: "qwen".into(),
             label: catalog.native_labels.get(id).cloned().unwrap_or_else(|| default_label("qwen").into()),
+        }, true));
+    }
+    // WhiteWh fork: Hermes Agent's own configuration, wherever it is installed.
+    if platform::available("hermes") || catalog.hidden_profiles.contains("native-hermes") {
+        let id = "native-hermes";
+        rows.push(row(config, id, &Profile {
+            provider: "hermes".into(),
+            label: catalog.native_labels.get(id).cloned().unwrap_or_else(|| default_label("hermes").into()),
         }, true));
     }
     for (id, p) in &catalog.profiles {
@@ -782,7 +805,7 @@ pub(crate) fn provider_of(config: &Config, id: &str) -> Result<String> {
 pub(crate) fn move_target(config: &Config, id: &str) -> Result<(String, String, PathBuf)> {
     let (profile, home, native) = lookup(config, id)?;
     let provider = profile.provider.clone();
-    if !["claude", "codex", "kimi", "qwen", "dsh", "opencode"].contains(&provider.as_str()) {
+    if !["claude", "codex", "kimi", "qwen", "hermes", "dsh", "opencode"].contains(&provider.as_str()) {
         return Err(Error::new(1, format!("Account '{id}' belongs to an agent Zerus cannot start ({provider}).")));
     }
     if !agent_installed(&provider) {
@@ -812,6 +835,7 @@ pub(crate) fn agent_name(provider: &str) -> &'static str {
         "codex" => "Codex",
         "kimi" => "Kimi",
         "qwen" => "Qwen Code",
+        "hermes" => "Hermes Agent",
         "dsh" => "DeepSeek",
         "opencode" => "OpenCode",
         _ => "This agent",
@@ -864,7 +888,7 @@ pub(crate) fn label(config: &Config, id: &str) -> String {
 /// U53: every known account id's label: the native accounts and the profiles.
 pub(crate) fn labels(config: &Config) -> BTreeMap<String, String> {
     let catalog = read(config).ok().and_then(|bytes| decode(&bytes).ok()).unwrap_or_default();
-    let mut labels: BTreeMap<String, String> = ["codex", "claude", "kimi", "qwen"]
+    let mut labels: BTreeMap<String, String> = ["codex", "claude", "kimi", "qwen", "hermes"]
         .into_iter()
         .map(|provider| {
             let id = format!("native-{provider}");
@@ -1219,7 +1243,9 @@ pub fn dispatch(config: &Config, args: &[String], dry: bool) -> Result<i32> {
                 else if p.provider == "claude" { vec!["auth", "login"] }
                 // Qwen Code signs in inside its own terminal (`/auth`); its
                 // `auth` command is gone.
-                else if p.provider == "qwen" { vec![] } else { vec!["login"] };
+                else if p.provider == "qwen" { vec![] }
+                // Hermes chooses its provider and model in its own wizard.
+                else if p.provider == "hermes" { vec!["setup"] } else { vec!["login"] };
             if dry {println!("{}",json!({"provider":p.provider,"home":home,"arguments":arguments}));return Ok(0);}
             if !native {private_dir(&home)?;}
             let mut command = inspection::native_command(&p.provider, &home, native);

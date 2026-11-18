@@ -160,7 +160,7 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
         std::env::remove_var(key);
     }
     let codex_no_daemon = agent == "codex" && codex_daemon_flag(&base[0])?;
-    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME"] {
+    for key in ["CLAUDE_CONFIG_DIR", "CODEX_HOME", "KIMI_CODE_HOME", "QWEN_HOME", "HERMES_HOME"] {
         if nonempty_env(key).is_none() {
             std::env::remove_var(key);
         }
@@ -524,6 +524,10 @@ pub(super) fn run(args: &[String]) -> Result<i32> {
     };
     for argv in [&mut base, &mut first] {
         crate::accounts::apply_permission_values(&agent, &permission_values, argv);
+    }
+    // WhiteWh fork: a fresh Hermes start names its session for its hooks.
+    if agent == hermes::AGENT {
+        hermes::name_session(&mut base, &session_id, &token);
     }
     // Claude Code reports its context window only to a status line command.
     // The saved base stays as launched; resume adds the settings again.

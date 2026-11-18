@@ -17,6 +17,9 @@ const COMMON: &[&str] = &[
 ];
 
 fn events(agent: &str) -> Vec<&'static str> {
+    if agent == hermes::AGENT {
+        return hermes::TRACKED.to_vec();
+    }
     let mut events = COMMON.to_vec();
     match agent {
         // Qwen Code runs Claude Code's hook events with the same payloads
@@ -1079,6 +1082,9 @@ pub(super) fn claude_version(program: &str) -> Option<(u64, u64, u64)> {
 /// Install hgs's tracking hooks into the configuration of `agent`, whose
 /// executable is `program` (spec D12 on Windows).
 pub(super) fn install_hooks(agent: &str, program: &str) -> Result<()> {
+    if agent == hermes::AGENT {
+        return hermes::prepare(&runner_executable()?);
+    }
     let path = hook_config(agent)?;
     let lock_path = path.with_file_name(format!(
         "{}.hgs.lock",
@@ -1749,6 +1755,27 @@ mod command_guard_tests {
 }
 
 pub(super) fn hook() -> Result<i32> {
+    // WhiteWh fork: a Hermes hook runs in Hermes's shared runtime, whose
+    // environment may be another session's: its session is found by the
+    // title hgs gave it, never by `HGS_SESSION`.
+    if nonempty_env("HGS_AGENT").as_deref() == Some(hermes::AGENT) || nonempty_env("HERMES_MANAGED_DIR").is_some() {
+        let event = stdin_json()?;
+        if event.get("extra").is_some() && string(&event, "hook_event_name").starts_with(|c: char| c.is_ascii_lowercase()) {
+            let Some((name, token)) = hermes::owner(string(&event, "session_id")) else {
+                return Ok(0);
+            };
+            let Some(event) = hermes::translate(&event)? else {
+                return Ok(0);
+            };
+            let stdout = io::stdout();
+            return track(name, token, event, &mut stdout.lock());
+        }
+        let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID")) else {
+            return Ok(0);
+        };
+        let stdout = io::stdout();
+        return track(name, token, event, &mut stdout.lock());
+    }
     let (Some(name), Some(token)) = (nonempty_env("HGS_SESSION"), nonempty_env("HGS_RUN_ID"))
     else {
         return Ok(0);

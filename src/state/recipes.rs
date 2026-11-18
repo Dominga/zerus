@@ -22,6 +22,14 @@ pub(super) fn argv(record: &Value) -> Result<Vec<String>> {
 }
 
 pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec<String>> {
+    // WhiteWh fork: a Hermes resume names Hermes's own session id.
+    let native;
+    let sid = if agent == super::hermes::AGENT && sid != "-" {
+        native = super::hermes::native_id(sid).ok_or_else(|| format!("hgs knows no Hermes session for conversation {sid}"))?;
+        native.as_str()
+    } else {
+        sid
+    };
     let value_flags: &[&str] = match agent {
         "claude" => &[
             "--model",
@@ -81,6 +89,8 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
             "--allowed-tools",
             "--exclude-tools",
         ],
+        // Hermes Agent 0.23.2's options that a resume keeps.
+        "hermes" => &["-m", "--model", "--provider", "-t", "--toolsets"],
         _ => return Err(format!("unsupported agent: {agent}")),
     };
     let multi_flags: &[&str] = match agent {
@@ -120,6 +130,7 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
         ],
         "kimi" => &["-y", "--yolo", "--auto", "--plan"],
         "qwen" => &["-y", "--yolo", "--sandbox", "-s", "--debug", "-d", "--chat-recording"],
+        "hermes" => &["--yolo"],
         _ => &[],
     };
     argv.first().ok_or("saved agent executable is missing")?;
@@ -128,7 +139,7 @@ pub(super) fn resume_argv(agent: &str, argv: &[String], sid: &str) -> Result<Vec
     result.extend([
         match agent {
             "codex" => "resume",
-            "claude" | "qwen" => "--resume",
+            "claude" | "qwen" | "hermes" => "--resume",
             _ => "--session",
         }
         .into(),

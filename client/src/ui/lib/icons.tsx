@@ -16,6 +16,8 @@ const AGENT_GLYPHS: Record<AgentKind, string> = {
   claude: rotations(8, (d) => `<path transform="rotate(${d} 12 12)" d="M12 15V21"/>`),
   kimi: `<path d="M6 4V20M6 12L18 4M6 12L18 20"/>`,
   qwen: `<circle cx="11" cy="11" r="7"/><path d="M16 16L21 21"/>`,
+  // Hermes Agent: a winged staff (WhiteWh fork, original glyph).
+  hermes: `<path d="M12 3V21M12 7C9 4 5 5 3 7C6 7 8 8 12 10C16 8 18 7 21 7C19 5 15 4 12 7M9 14C11 13 13 13 15 14M9 18C11 17 13 17 15 18"/>`,
   opencode: `<path d="M8 5L3 12L8 19M16 5L21 12L16 19M14 5L10 19"/>`,
   deepseek: `<path d="M3 10C5 5 15 4 18 10L23 7L22 13L18 13C15 22 3 19 3 10Z"/><circle cx="8" cy="10" r=".6" fill="currentColor"/>`,
   ollama: `<path d="M7 3V8M17 3V8M5 10A7 7 0 0 1 19 10V14A7 7 0 0 1 5 14Z"/><circle cx="9.5" cy="11" r=".6" fill="currentColor"/><circle cx="14.5" cy="11" r=".6" fill="currentColor"/>`,
@@ -27,6 +29,7 @@ export const AGENT_LABEL: Record<AgentKind, string> = {
   codex: "Codex",
   kimi: "Kimi",
   qwen: "Qwen Code",
+  hermes: "Hermes Agent",
   deepseek: "DeepSeek",
   opencode: "OpenCode",
   ollama: "Ollama",

@@ -1253,7 +1253,13 @@ mod tests {
         let start = Instant::now();
         loop {
             match server.accept() {
-                Ok((stream, _)) => return stream,
+                Ok((stream, _)) => {
+                    // A Windows socket accepted from a non-blocking listener
+                    // is non-blocking too: its read timeout would not apply,
+                    // and a request not yet arrived would read as empty.
+                    stream.set_nonblocking(false).unwrap();
+                    return stream;
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     assert!(
                         start.elapsed() < Duration::from_secs(3),

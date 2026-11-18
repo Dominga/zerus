@@ -8,6 +8,21 @@ const RESTART: &str = "state::input::task_refusal::windows_tests::retained_refus
 fn until() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
+/// A folder just released may still be open briefly in another program (a
+/// virus scanner, the indexer): Windows refuses its rename with a sharing
+/// violation then. Only that refusal is retried, for a few seconds.
+fn rename_released(from: &std::path::Path, to: &std::path::Path) {
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return,
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 32)) && Instant::now() < end => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => panic!("rename {} -> {}: {error}", from.display(), to.display()),
+        }
+    }
+}
 fn scope() -> Scope {
     Scope::new(
         "codex/example/worker",
@@ -164,8 +179,8 @@ fn the_original_input_writer_excludes_publication_and_the_root_stays_pinned() {
     assert!(fs::rename(&original, &moved).is_err());
     f.writer.verify().unwrap();
     drop(f.writer);
-    fs::rename(&original, &moved).unwrap();
-    fs::rename(&moved, &original).unwrap();
+    rename_released(&original, &moved);
+    rename_released(&moved, &original);
     let input = storage::lock(Some(&original.join(".lock"))).unwrap();
     let error = writer::test_open(&original, Instant::now() + Duration::from_secs(1))
         .err()

@@ -124,7 +124,18 @@ pub fn dispatch(config: &Config, host: &str, args: &[String], dry: bool) -> Resu
         .arg("--")
         .arg(format!("{host}:{}", sftp_path(path)))
         .arg(temporary.path());
+    // WhiteWh fork: Windows OpenSSH's scp cannot write a file another handle
+    // holds open ("open local ...: Broken pipe"), so no peer file ever
+    // downloaded to a Windows computer. The handle closes for the transfer;
+    // the temporary path still removes the file on any failure.
+    let (held, temporary_path) = temporary.into_parts();
+    drop(held);
     transfer(command, Duration::from_secs(120))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary_path)?;
+    let temporary = tempfile::NamedTempFile::from_parts(file, temporary_path);
     platform::make_private(temporary.as_file())?;
     temporary.as_file().sync_all()?;
     let bytes = fs::metadata(temporary.path())?.len();

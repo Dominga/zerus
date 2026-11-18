@@ -5793,6 +5793,28 @@ run outside the UI thread.
 
 `hgs @host download --path REMOTE_PATH --output LOCAL_FILE` provides the same
 transfer from the CLI, including empty files and paths starting with `~/`.
+
+What a peer's agent made opens here as a whole (WhiteWh fork, owner
+2026-11-18):
+- A download to a Windows computer works: Windows OpenSSH's `scp` cannot write
+  a file another handle holds, so the temporary file's handle closes for the
+  transfer and reopens after it.
+- Open copy of a peer's `.html`/`.htm` page assembles a site folder under the
+  app's `peer-pages` folder: the page and each file it and its style sheets
+  name by a relative path inside the page's folder (`src`, `href`, `poster`,
+  `data`, CSS `url(...)`), at the same relative paths, at most 200 files and
+  128 MiB, four downloads at once. A file that cannot be read is skipped and the
+  page still opens. Opening the page again replaces its folder.
+- A loopback link in a peer session's Activity (`http://localhost:5173/...`,
+  `127.0.0.1`, `0.0.0.0`, `[::1]`) names that peer's own server. It opens
+  through `hgs @host tunnel --port PORT`, which forwards a free local port to
+  the peer's `127.0.0.1:PORT` (`ssh -N -L`, batch mode, strict host keys),
+  prints `{"host","port","local_port","held"}` once the forward accepts and
+  holds it while its standard input stays open. Zerus keeps one tunnel per
+  peer port and opens the same link on `localhost:LOCAL_PORT`; the tunnels end
+  with Zerus. A WSL machine shares this computer's loopback, so its port is
+  used as is (`"held":false`). A session on this computer opens its links
+  unchanged.
 Display alone downloads or launches
 nothing. Copying the path keeps the dialog open so you can copy first and then
 choose an opening action. Desktop dispatch happens after the reference dialog is

@@ -1383,6 +1383,8 @@ export const sessionFileCheck = (id: number) => desktop<SessionFileView | null>(
 export const sessionFileDownload = (id: number, open: boolean) => desktop<SessionFileView | null>("session_file_download", { id, open });
 export const sessionFileSave = (id: number) => desktop<SessionFileView | null>("session_file_save", { id });
 export const sessionFileExternal = (url: string) => desktop<void>("session_file_external", { url });
+/** A link in a session's Activity: a peer's loopback link opens through a tunnel to that peer. */
+export const sessionUrlOpen = (computer: string, url: string) => desktop<void>("session_url_open", { computer, url });
 export const sessionFileAct = (id: number, action: "open_file" | "open_folder" | "open_copy" | "show_file" | "open_ssh") =>
   desktop<SessionFileView | null>("session_file_act", { id, action });
 export const sessionFileClose = (id: number) => desktop<void>("session_file_close", { id });

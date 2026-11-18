@@ -8,6 +8,7 @@ mod config;
 mod external_workstreams;
 mod desktop;
 mod download;
+mod tunnel;
 mod host;
 mod machines;
 mod macos_session;

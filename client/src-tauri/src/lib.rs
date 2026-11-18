@@ -2260,6 +2260,7 @@ fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         session_files::session_file_download,
         session_files::session_file_save,
         session_files::session_file_external,
+        session_files::session_url_open,
         session_files::session_file_act,
         session_files::session_file_close,
         session_files::media::session_media,

@@ -169,6 +169,7 @@ pub(crate) const USAGE: &str = r#"usage: hgs [@host] <cmd> [project] [-c [ID]] [
        hgs [@host] attachment <session> --request ID --index N --conversation ID   read a sent attachment
        hgs [@host] file-read <session> --json   read a document on the conversation computer
        hgs @host download --path REMOTE_PATH --output LOCAL_FILE   download a copy through configured SSH or explicit WSL
+       hgs @host tunnel --port PORT   forward a free local port to the peer's 127.0.0.1:PORT while stdin stays open (JSON)
        hgs [@host] answer <session> --json   answer an exact pending question from JSON stdin
        hgs [@host] answer <session> --observe --json   read a pending question's consent identity, changing nothing
        hgs [@host] delivery receipt <original-session-name> --json   read exact original send evidence from JSON stdin
@@ -437,6 +438,9 @@ fn wsl_forward(config: &Config, target: &str, command: &str, args: &[String], dr
     // never be forwarded as a Linux receiver destination.
     if command == "download" {
         return Some(crate::download::dispatch(config, target, args, dry));
+    }
+    if command == "tunnel" {
+        return Some(crate::tunnel::dispatch(config, target, args, dry));
     }
     Some(crate::wsl::run(profile, command, args, dry))
 }
@@ -1287,6 +1291,9 @@ fn dispatch_normal(mut args: Vec<String>) -> Result<i32> {
     }
     if command == "download" {
         return crate::download::dispatch(&config, &target, args, dry);
+    }
+    if command == "tunnel" {
+        return crate::tunnel::dispatch(&config, &target, args, dry);
     }
     if command == "approval-log" {
         return crate::approval_log::dispatch(&config, &target, args, dry);

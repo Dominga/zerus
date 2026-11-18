@@ -7,7 +7,8 @@ import type { Session } from "./types";
 import { HighlightQuery, SearchHighlight } from "./SearchHighlight";
 
 // Inline Markdown stays text except its links: HTTP(S) uses the system
-// opener, and local/file references open the session's File reference dialog.
+// opener (a peer session's loopback link through a tunnel to that peer), and
+// local/file references open the session's File reference dialog.
 
 export const ActivitySession = createContext<() => Session | undefined>();
 export { HighlightQuery };
@@ -26,7 +27,7 @@ function inlines(parts: Inline[], session?: () => Session | undefined, query = "
         const link = part;
         return <a href={link.href} title={link.href} draggable={false} onAuxClick={(event) => event.preventDefault()} onDragStart={(event) => event.preventDefault()} onClick={(event) => {
           event.preventDefault();
-          if (link.kind === "external") openExternal(link.href);
+          if (link.kind === "external") openExternal(link.href, session?.()?.computer ?? "");
           else {
             const current = session?.();
             if (current) openSessionFile(current, link.href);

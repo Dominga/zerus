@@ -9,6 +9,7 @@ import {
   sessionFileDownload,
   sessionFileExternal,
   sessionFileSave,
+  sessionUrlOpen,
   type SessionFileView,
 } from "../../bridge";
 import { subagentOpen, toast } from "../../store/ui";
@@ -32,7 +33,10 @@ onSessionFileChanged((view) => apply(view.id, view));
 onSessionFileNotice((notice) => toast(tr("File reference"), notice.text, notice.warn ? "warn" : "info", notice.warn));
 
 function report(error: unknown) { toast(tr("File reference"), String(error), "warn", true); }
-export function openExternal(url: string) { void sessionFileExternal(url).catch(report); }
+/** A session's link: a peer session's loopback link (`http://localhost:5173`) opens through a tunnel to that peer. */
+export function openExternal(url: string, computer = "") {
+  void (computer ? sessionUrlOpen(computer, url) : sessionFileExternal(url)).catch(report);
+}
 
 export function openSessionFile(session: Session, href: string) {
   const request = ++generation;

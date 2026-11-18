@@ -16,7 +16,9 @@ use zerus_client_core::{file_download, session_file_reference, terminal_launch, 
 mod downloads;
 use downloads::{Answer, Downloads};
 pub mod media;
+mod site;
 mod ssh;
+mod tunnel;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,6 +75,8 @@ pub struct SessionFiles {
     trim_busy: AtomicBool,
     /// Task 248: the media files the webview may read, by token.
     media: Mutex<media::Grants>,
+    /// Loopback links of a peer's agent, forwarded to that peer.
+    tunnels: tunnel::Tunnels,
 }
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -139,6 +143,7 @@ impl SessionFiles {
             trim,
             trim_busy: AtomicBool::new(false),
             media: Mutex::new(media::Grants::default()),
+            tunnels: tunnel::Tunnels::default(),
         });
         let weak = Arc::downgrade(&me);
         // One resettable grace timer, rather than a sleeping task per download.
@@ -386,14 +391,22 @@ impl SessionFiles {
         };
         self.emit(id);
         let me = self.clone();
-        let done = Box::new(move |answer| me.finish_download(id, answer, open, cached));
+        let page = site::is_page(&source.path).then(|| (source.host.clone(), source.path.clone()));
+        let done = Box::new(move |answer| me.finish_download(id, answer, open, cached, page));
         match destination {
             Destination::Cache => self.downloads.cached(root, source, force, done),
             Destination::Direct(path) => self.downloads.direct(source, path, done),
         }
         self.view(id, false)
     }
-    fn finish_download(self: &Arc<Self>, id: u64, result: Answer, open: bool, cached: bool) {
+    fn finish_download(
+        self: &Arc<Self>,
+        id: u64,
+        result: Answer,
+        open: bool,
+        cached: bool,
+        page: Option<(String, String)>,
+    ) {
         if let Ok((path, warning)) = &result {
             external_file::mark_downloaded(path);
             if let Some(warning) = warning {
@@ -442,7 +455,10 @@ impl SessionFiles {
                 if shown {
                     self.close(id);
                 }
-                self.open(path, Origin::OtherMachine, false);
+                match page {
+                    Some((host, remote)) => self.open_site(host, remote, path),
+                    None => self.open(path, Origin::OtherMachine, false),
+                }
             }
             Ok((path, _)) if !shown => {
                 self.notice(format!("Downloaded to {}", path.display()), false)
@@ -450,6 +466,30 @@ impl SessionFiles {
             Err(error) if !shown => self.notice(format!("Download failed: {error}"), true),
             _ => self.emit(id),
         }
+    }
+    /// WhiteWh fork (owner, 2026-11-18): a peer's HTML page opens with the
+    /// files it names (`site`), assembled off this thread; on failure the
+    /// downloaded page opens alone.
+    fn open_site(self: &Arc<Self>, host: String, remote: String, copy: PathBuf) {
+        let me = self.clone();
+        (self.spawn)(Box::new(move || {
+            let hgs = me.hgs.clone();
+            let fetch_host = host.clone();
+            let fetch: Arc<dyn Fn(&str, &Path) -> Result<(), String> + Send + Sync> =
+                Arc::new(move |path: &str, local: &Path| file_download::download(&hgs, &[], &fetch_host, path, local));
+            let sites = me.dir.join("peer-pages");
+            let opened = match site::assemble(&host, &remote, &copy, &sites, fetch) {
+                Ok(page) => {
+                    external_file::mark_downloaded(&page);
+                    page
+                }
+                Err(error) => {
+                    me.notice(format!("The page opens without its files: {error}"), true);
+                    copy
+                }
+            };
+            me.open(opened, Origin::OtherMachine, false);
+        }));
     }
     fn run_trim(self: &Arc<Self>, after_download: bool) {
         if crate::desktop_service::mode() {
@@ -765,6 +805,40 @@ pub fn session_file_external(url: String) -> Result<(), String> {
         return Err("The external link is invalid.".into());
     }
     crate::settings::open_url(&url).map_err(|error| format!("Could not open {url}: {error}"))
+}
+
+/// WhiteWh fork (owner, 2026-11-18): a link in a peer session's Activity. A
+/// loopback link (`http://localhost:5173`) names the peer's own server: it
+/// opens through a tunnel to that configured peer. Every other link, and any
+/// link of a session on this computer, opens as `session_file_external`.
+#[tauri::command(async)]
+pub fn session_url_open(
+    files: tauri::State<'_, Arc<SessionFiles>>,
+    computer: String,
+    url: String,
+) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://"))
+        || url.chars().any(char::is_control)
+    {
+        return Err("The external link is invalid.".into());
+    }
+    let link = (!computer.is_empty()).then(|| tunnel::Loopback::parse(&url)).flatten();
+    let Some(link) = link else {
+        return crate::settings::open_url(&url).map_err(|error| format!("Could not open {url}: {error}"));
+    };
+    // Resolve only a saved alias, never a webview-supplied host.
+    let machines = zerus_client_core::reads::read(
+        &files.hgs,
+        &ComputerId::local(),
+        &zerus_client_core::reads::Read::Machines,
+    )
+    .map_err(|error| error.to_string())?;
+    if !ssh::configured(&computer, &machines) {
+        return Err(format!("{computer} is not a configured machine, so its local link cannot open here."));
+    }
+    let local = files.tunnels.local_port(&files.hgs, &computer, link.port)?;
+    let opened = link.on(local);
+    crate::settings::open_url(&opened).map_err(|error| format!("Could not open {opened}: {error}"))
 }
 
 #[tauri::command(async)]
